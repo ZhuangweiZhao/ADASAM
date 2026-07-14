@@ -233,7 +233,7 @@ def main():
         gt_cls_masks = [g["mask"] for g in gt_insts if g["category_id"] == cls]
 
         # ── Correlation → sim_tensor ──
-        sim_tensor = correlation.build(support_feats, prototype, emb)  # [K, 64, 64]
+        sim_tensor = correlation.build(support_feats, prototype, emb, support_masks=masks)  # [K, 64, 64]
 
         # ── Candidate Generation ──
         candidates = candidate_gen.generate(sim_tensor, emb)

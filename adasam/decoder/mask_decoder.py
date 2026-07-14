@@ -280,6 +280,7 @@ class PromptMaskDecoder(nn.Module):
         input_size: tuple[int, int] = (1024, 1024),
         original_size: tuple[int, int] = (896, 896),
         support_features: torch.Tensor | None = None,
+        support_masks: list[torch.Tensor] | None = None,
     ) -> InstanceMasks:
         """图像嵌入 + 原型 → 每实例掩码与置信度 | Embedding + prototype → per-instance masks & scores.
 
@@ -294,12 +295,13 @@ class PromptMaskDecoder(nn.Module):
         :param original_size: 原始 tile 大小 | original tile size.
         :param support_features: [K, C, gh, gw] dense support features (V2).
             None → fall back to legacy Matcher pipeline.
+        :param support_masks: K FG masks for correlation FG-masked pooling (V2).
         :return: InstanceMasks(masks[N,H,W] bool, scores[N] float ∈ [0,1]).
         """
         if support_features is not None:
             return self._forward_v2(
                 image_embedding, prototype, support_features,
-                input_size, original_size,
+                input_size, original_size, support_masks,
             )
         return self._forward_legacy(image_embedding, prototype, input_size, original_size)
 
@@ -328,6 +330,7 @@ class PromptMaskDecoder(nn.Module):
         support_features: torch.Tensor,
         input_size: tuple[int, int],
         original_size: tuple[int, int],
+        support_masks: list[torch.Tensor] | None = None,
     ) -> InstanceMasks:
         """V2 推理管线 | V2 inference pipeline.
 
@@ -342,7 +345,9 @@ class PromptMaskDecoder(nn.Module):
         device = image_embedding.device
 
         # Step 1: Build similarity tensor (K support × query)
-        sim_tensor = self.correlation.build(support_features, prototype, image_embedding)
+        sim_tensor = self.correlation.build(
+            support_features, prototype, image_embedding, support_masks,
+        )
 
         # Step 2: Generate candidates
         candidates = self.candidate_gen.generate(sim_tensor, image_embedding)

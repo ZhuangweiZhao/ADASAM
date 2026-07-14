@@ -167,10 +167,12 @@ class Trainer:
 
     def _build_support_features(
         self, support_indices: list[int], class_id: int
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        """由 K 张 support 提取密集特征 + 原型 | Extract dense features + prototype from K supports.
+    ) -> Optional[tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]]:
+        """由 K 张 support 提取密集特征 + 原型 + FG masks | Extract dense features + prototype + FG masks.
 
-        :return: (support_features [K,256,64,64], prototype [256]), or None if no valid supports.
+        :return: (support_features [K,256,64,64], prototype [256], fg_masks [K, H, W]),
+            or None if no valid supports. fg_masks are at tile resolution for downstream
+            FG-masked pooling in correlation.
         """
         images, masks = [], []
         for idx in support_indices:
@@ -187,7 +189,7 @@ class Trainer:
             return None
 
         support_feats, prototype = extract_support_features(self.backbone, images, masks)
-        return support_feats, prototype
+        return support_feats, prototype, masks
 
     # ── V2: Sim-peak 点 (用于 bridge train-test gap) | Sim-peak point for 30% replacement ──
 
@@ -382,11 +384,11 @@ class Trainer:
     # ── V2 训练 (point + box + prompt_token + region_score) ──
 
     def _train_episode_v2(self, episode: dict, cls: int) -> Optional[dict]:
-        # 1. Extract support features + prototype
+        # 1. Extract support features + prototype + FG masks
         result = self._build_support_features(episode["support_indices"], cls)
         if result is None:
             return None
-        support_feats, prototype = result
+        support_feats, prototype, support_fg_masks = result
 
         # 2. Query targets (point + box + mask)
         query = self.dataset[episode["query_index"]]
@@ -400,7 +402,9 @@ class Trainer:
 
         # 4. Compute sim_tensor (V2 per-support similarity — used for both
         #    sim-peak replacement and per-instance support-sim pooling below)
-        sim_tensor = self.decoder.correlation.build(support_feats, prototype, emb)  # [K, gh, gw]
+        sim_tensor = self.decoder.correlation.build(
+            support_feats, prototype, emb, support_masks=support_fg_masks,
+        )  # [K, gh, gw]
         # Aggregate across supports (max) → single map for peak finding
         sim_agg = sim_tensor.max(dim=0).values              # [64, 64]
 
