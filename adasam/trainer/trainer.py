@@ -374,7 +374,7 @@ class Trainer:
         emb = self._embed(query["image"])                      # [1,256,64,64]
 
         # 4. Sim-peak replacement (bridge train-test gap)
-        if self.sim_peak_ratio > 0 and self.training:
+        if self.sim_peak_ratio > 0:
             for i in range(coords_in.shape[0]):
                 if random.random() < self.sim_peak_ratio:
                     px, py = self._sim_peak_point(prototype, emb, gt_masks[i])
