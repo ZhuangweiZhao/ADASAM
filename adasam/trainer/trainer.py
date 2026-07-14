@@ -405,8 +405,8 @@ class Trainer:
         sim_tensor = self.decoder.correlation.build(
             support_feats, prototype, emb, support_masks=support_fg_masks,
         )  # [K, gh, gw]
-        # Aggregate across supports (max) → single map for peak finding
-        sim_agg = sim_tensor.max(dim=0).values              # [64, 64]
+        # Aggregate across supports (mean, more robust than max to outlier supports)
+        sim_agg = sim_tensor.mean(dim=0)                    # [64, 64]
 
         # 5. Sim-peak replacement (bridge train-test gap)
         #    Uses V2 sim_tensor (not V1 similarity_map) so the peaks match what

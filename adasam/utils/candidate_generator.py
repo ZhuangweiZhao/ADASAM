@@ -179,7 +179,7 @@ def generate_candidates(
         binary_union |= (s > tau).astype(np.uint8)
 
     # ── Step 1.5: Aggregated similarity for peak finding ──
-    sim_agg = sim_np.max(axis=0)  # [H, W] — max over K supports
+    sim_agg = sim_np.mean(axis=0)  # [H, W] — mean over K supports (more robust than max)
 
     # ── Step 2: Connected components ──
     num_labels, labels = cv2.connectedComponents(binary_union, connectivity=8)
