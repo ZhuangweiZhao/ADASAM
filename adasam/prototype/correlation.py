@@ -36,6 +36,14 @@ def similarity_tensor(
 ) -> torch.Tensor:
     """构建 Similarity Tensor [K, H, W] | Build Similarity Tensor [K, H, W].
 
+    每张 support 用自己的池化特征 (子原型) 与 query 每个位置做余弦相似度。
+    Each support uses its pooled feature as a "sub-prototype" and computes
+    cosine similarity against every query spatial location.
+
+    这与 support/query 在同一位置比较完全不同 (后者在跨图像场景中无意义)。
+    This is fundamentally different from per-location support-vs-query comparison
+    (which is meaningless for cross-image matching).
+
     :param support_features: [K, C, H, W] dense support embeddings.
     :param prototype: [C] global class prototype (L2-normalized).
     :param query_feature: [1, C, H, W] query image embedding.
@@ -51,25 +59,24 @@ def similarity_tensor(
         )
 
     K, C, H, W = support_features.shape
+    device = support_features.device
 
-    # ── Normalize prototype once ──
-    proto_n = F.normalize(prototype, dim=0)  # [C]
+    # ── Per-support sub-prototype (pooled over spatial dims) ──
+    # Each support's avg feature captures what that support "looks like".
+    support_pooled = support_features.mean(dim=(2, 3))         # [K, C]
+    support_pooled_n = F.normalize(support_pooled, dim=1)      # [K, C]
 
-    # ── Per-location cosine similarity (batched over K) ──
-    # Normalize each spatial position to unit vector in channel dim
-    sf_flat = support_features.reshape(K, C, -1)              # [K, C, H*W]
-    sf_n = F.normalize(sf_flat, dim=1)                         # [K, C, H*W]
-
+    # ── Normalize query per spatial location ──
     qf_flat = query_feature[0].reshape(C, -1)                  # [C, H*W]
     qf_n = F.normalize(qf_flat, dim=0)                         # [C, H*W]
 
-    # Cosine similarity per location: dot product over channel dim
-    sim = torch.einsum("kci,ci->ki", sf_n, qf_n)               # [K, H*W]
+    # ── Cosine similarity: each support's sub-prototype vs each query location ──
+    # sim[k, loc] = dot(support_pooled_n[k], qf_n[:, loc])
+    sim = torch.einsum("kc,ci->ki", support_pooled_n, qf_n)    # [K, H*W]
     sim = sim.reshape(K, H, W)                                  # [K, H, W]
 
-    # ── Prototype gate per support ──
-    support_pooled = support_features.mean(dim=(2, 3))         # [K, C]
-    support_pooled_n = F.normalize(support_pooled, dim=1)      # [K, C]
+    # ── Prototype gate: how relevant is support k to the global class prototype? ──
+    proto_n = F.normalize(prototype, dim=0)                     # [C]
     gates = torch.sigmoid(
         torch.einsum("kc,c->k", support_pooled_n, proto_n)
     )                                                            # [K]
