@@ -395,6 +395,7 @@ class COCOInstanceEvaluator:
                     coco_eval.params.imgIds = _img_ids
                 coco_eval.evaluate()
                 coco_eval.accumulate()
+                _summarize(coco_eval, verbose=False)      # populate .stats (required before indexing)
                 per_cat_ap[cat_id] = float(coco_eval.stats[1])  # AP50
             except (IndexError, KeyError, RuntimeError) as exc:
                 logging.warning("per_category_ap: category %d failed — %s: %s",
