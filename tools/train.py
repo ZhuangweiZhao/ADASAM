@@ -35,12 +35,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--episodes", type=int, default=None, help="episodes per epoch")
     p.add_argument("--train-mode", choices=["base", "novel", "all"], default=None)
+    p.add_argument("--data-root", default=None, help="override data.data_root")
     p.add_argument("--train-ann-file", default=None,
                    help="RAM-lean subset annotation JSON (images/folds still from data_root)")
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--device", default=None)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--output-dir", default=None)
+    # ── V2 flags ──
+    p.add_argument("--use-v2", action="store_true", default=None,
+                   help="enable V2 training (point+box+prompt_token)")
+    p.add_argument("--sim-peak-ratio", type=float, default=None,
+                   help="fraction of GT points replaced with sim-peak (0.0-1.0)")
+    p.add_argument("--score-loss-weight", type=float, default=None,
+                   help="weight of the region-score supervision term")
     return p.parse_args()
 
 
@@ -56,6 +64,8 @@ def load_config(args: argparse.Namespace) -> dict:
         cfg["fewshot"]["k_shot"] = args.k_shot
     if args.train_mode is not None:
         cfg["fewshot"]["train_mode"] = args.train_mode
+    if args.data_root is not None:
+        cfg["data"]["data_root"] = args.data_root
     if args.train_ann_file is not None:
         cfg["data"]["train_ann_file"] = args.train_ann_file
     if args.epochs is not None:
@@ -70,6 +80,13 @@ def load_config(args: argparse.Namespace) -> dict:
         cfg["seed"] = args.seed
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
+    # ── V2 flags ──
+    if args.use_v2 is not None:
+        cfg["train"]["use_v2"] = True
+    if args.sim_peak_ratio is not None:
+        cfg["train"]["sim_peak_ratio"] = args.sim_peak_ratio
+    if args.score_loss_weight is not None:
+        cfg["train"]["score_loss_weight"] = args.score_loss_weight
     return cfg
 
 

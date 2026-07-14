@@ -178,9 +178,9 @@ class Trainer:
             fg = self._class_foreground(sample["instances"], class_id, self.tile_size)
             if fg is None:
                 continue
-            # Preprocess image for backbone
+            # Preprocess image → [3, 1024, 1024] normalized, move to device
             x, _ = preprocess_image(sample["image"])
-            images.append(x)
+            images.append(x.to(self.device))
             masks.append(fg)
 
         if not images:
