@@ -194,13 +194,10 @@ class Trainer:
     def _sim_peak_point(
         self, prototype: torch.Tensor, query_emb: torch.Tensor, gt_mask: torch.Tensor,
     ) -> tuple[float, float]:
-        """在 GT mask 区域内找到 prototype-query 相似度的峰值点 (tile 帧坐标) |
+        """[Legacy V1] 在 GT mask 区域内找到 prototype-query 相似度的峰值点 (tile 帧坐标) |
         Find the similarity peak within the GT mask region (tile-frame coords).
 
-        :param prototype: [256] class prototype.
-        :param query_emb: [1, 256, 64, 64] query embedding.
-        :param gt_mask: [H, W] float GT instance mask at tile resolution.
-        :return: (x, y) in tile frame.
+        Uses V1's similarity_map (prototype vs query). For V2 training, see _sim_peak_point_v2.
         """
         sim = similarity_map(query_emb[0], prototype)       # [64, 64]
         gt_grid = resize_mask(gt_mask, sim.shape)            # [64, 64]
@@ -217,6 +214,34 @@ class Trainer:
         # Map to tile frame
         sx = self.tile_size / self.image_size
         sy = self.tile_size / self.image_size
+        return cx * sx, cy * sy
+
+    def _sim_peak_point_v2(
+        self, sim_agg: torch.Tensor, gt_mask: torch.Tensor,
+    ) -> tuple[float, float]:
+        """在 GT mask 区域内找到 V2 sim_tensor 聚合图的峰值点 (tile 帧坐标) |
+        Find the V2 sim_tensor aggregate peak within the GT mask (tile-frame coords).
+
+        Uses the max-aggregated V2 similarity_tensor (per-support sub-prototype vs query),
+        so the peaks match what CandidateGenerator sees during inference.
+
+        :param sim_agg: [64, 64] aggregated sim_tensor (max over K supports) at grid resolution.
+        :param gt_mask: [H, W] float GT instance mask at tile resolution.
+        :return: (x, y) in tile frame.
+        """
+        H, W_grid = sim_agg.shape
+        gt_grid = resize_mask(gt_mask, (H, W_grid))          # [64, 64]
+        sim_masked = sim_agg * gt_grid.to(sim_agg.device)
+        if sim_masked.max() <= 0:
+            flat = int(sim_agg.argmax())
+        else:
+            flat = int(sim_masked.argmax())
+        gy, gx = divmod(flat, W_grid)
+        # Grid → tile frame: grid coord * stride * (tile/image)
+        stride = self.image_size / W_grid                      # 1024/64 = 16
+        cx = (float(gx) + 0.5) * stride                        # input-frame x
+        cy = (float(gy) + 0.5) * stride                        # input-frame y
+        sx = self.tile_size / self.image_size
         return cx * sx, cy * sy
 
     # ── V2: GT 教师提示 (点 + 框 + 掩码) | Teacher-forced GT (point + box + mask) ──
@@ -373,22 +398,27 @@ class Trainer:
         # 3. Embed query
         emb = self._embed(query["image"])                      # [1,256,64,64]
 
-        # 4. Sim-peak replacement (bridge train-test gap)
+        # 4. Compute sim_tensor (V2 per-support similarity — used for both
+        #    sim-peak replacement and per-instance support-sim pooling below)
+        sim_tensor = self.decoder.correlation.build(support_feats, prototype, emb)  # [K, gh, gw]
+        # Aggregate across supports (max) → single map for peak finding
+        sim_agg = sim_tensor.max(dim=0).values              # [64, 64]
+
+        # 5. Sim-peak replacement (bridge train-test gap)
+        #    Uses V2 sim_tensor (not V1 similarity_map) so the peaks match what
+        #    CandidateGenerator will produce during inference.
         if self.sim_peak_ratio > 0:
             for i in range(coords_in.shape[0]):
                 if random.random() < self.sim_peak_ratio:
-                    px, py = self._sim_peak_point(prototype, emb, gt_masks[i])
+                    px, py = self._sim_peak_point_v2(sim_agg, gt_masks[i])
                     sx = self.image_size / self.tile_size
                     coords_in[i, 0] = px * sx
                     coords_in[i, 1] = py * sx
 
-        # 5. PromptGenerator: pool query features per GT instance, generate prompts
+        # 6. PromptGenerator: pool query features per GT instance, generate prompts
         N = coords_in.shape[0]
         C = self.embed_dim
         gh, gw = self.decoder.grid_size                       # (64, 64)
-
-        # Compute sim_tensor for per-support similarity stats
-        sim_tensor = self.decoder.correlation.build(support_feats, prototype, emb)  # [K, gh, gw]
 
         query_feats_pooled = []
         per_support_sim_list = []
