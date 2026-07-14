@@ -333,12 +333,10 @@ class PromptMaskDecoder(nn.Module):
 
         1. CorrelationBuilder → sim_tensor [K, H, W]
         2. CandidateGenerator → N candidates (coords + boxes + scores + features)
-        3. PromptGenerator → (point, box, prompt_token, region_score)
-           Uses learned PromptGenerator — trained on GT features, tested on CC features.
-           If the PromptGenerator's delta hurts for some CCs, the zero-init ensures
-           prompt_token ≈ prototype as a safe fallback.
-        4. decode_v2(point + box + prompt_token) → masks
-        5. scores = iou_pred × region_score
+        3. prompt_token = prototype (bypasses PromptGenerator delta — trained on GT-region
+           features, delta degrades on CC-region features; prototype is the safe zero-init default)
+        4. decode_v2(point + box + prototype-as-token) → masks
+        5. scores = iou_pred × candidate_score (heuristic)
         6. Mask IoU NMS
         """
         device = image_embedding.device
@@ -355,21 +353,19 @@ class PromptMaskDecoder(nn.Module):
                 scores=torch.empty(0, device=device),
             )
 
-        # Step 3: Generate prompts via learnable PromptGenerator.
-        # Point and box pass through unchanged; prompt_token = prototype + Δprompt.
-        point_xy, box_xyxy, prompt_token, region_score = self.prompt_generator(
-            prototype=prototype,
-            candidate_coords=candidates.coords,
-            candidate_boxes=candidates.boxes,
-            candidate_query_features=candidates.query_features,
-            candidate_per_support_sim=candidates.per_support_sim,
-            candidate_scores_raw=candidates.scores,
-            image_size=float(self.image_size),
-        )
-        # point_xy: [N,2], box_xyxy: [N,4], prompt_token: [N,C], region_score: [N,1]
+        N = candidates.n_candidates
 
-        # Step 4: Decode all candidates with point + box + learned prompt_token
-        labels = torch.ones(candidates.n_candidates, device=device, dtype=torch.float32)
+        # Step 3: Prompts — point + box from candidates (geometric pass-through).
+        # prompt_token = prototype (PromptGenerator delta is trained on GT-region features
+        # and empirically degrades performance on CC-region features at inference time).
+        # region_score = heuristic score from CandidateGenerator.
+        point_xy = candidates.coords                                        # [N, 2]
+        box_xyxy = candidates.boxes                                         # [N, 4]
+        prompt_token = prototype.unsqueeze(0).expand(N, -1).contiguous()    # [N, C]
+        region_score = candidates.scores.clamp(0.0, 1.0)                    # [N]
+
+        # Step 4: Decode all candidates with point + box + prototype-as-token
+        labels = torch.ones(N, device=device, dtype=torch.float32)
 
         low_res, iou_pred = self.decode_v2(
             image_embedding=image_embedding,
@@ -382,8 +378,8 @@ class PromptMaskDecoder(nn.Module):
         # Step 5: Upscale + threshold
         logits = self.upscale_logits(low_res, input_size, original_size)   # [N, H, W]
         masks = logits > self.mask_threshold                     # bool
-        # V2 scoring: iou_pred (from SAM) × region_score (from PromptGenerator)
-        scores = iou_pred[:, 0].clamp(0.0, 1.0) * region_score[:, 0].clamp(0.0, 1.0)
+        # V2 scoring: iou_pred (from SAM) × heuristic region_score
+        scores = iou_pred[:, 0].clamp(0.0, 1.0) * region_score.clamp(0.0, 1.0)
 
         # Step 6: Mask IoU NMS (optional, removes duplicate masks from overlapping candidates)
         if self.use_nms and masks.shape[0] > 1:
