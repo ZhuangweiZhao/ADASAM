@@ -17,7 +17,24 @@ from __future__ import annotations
 
 import torch
 
-from adasam.metrics.instance_match import pairwise_iou
+
+def _mask_iou(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """GPU-friendly pairwise mask IoU | GPU 友好的成对掩码 IoU.
+
+    :param a: [P, H, W] float or bool masks.
+    :param b: [Q, H, W] float or bool masks.
+    :return: [P, Q] IoU matrix on the same device as a.
+    """
+    P, H, W = a.shape
+    Q = b.shape[0]
+    a_f = a.float().reshape(P, H * W)   # [P, HW]
+    b_f = b.float().reshape(Q, H * W)   # [Q, HW]
+    inter = a_f @ b_f.T                 # [P, Q]
+    area_a = a_f.sum(dim=1, keepdim=True)  # [P, 1]
+    area_b = b_f.sum(dim=1, keepdim=False)  # [Q]
+    union = area_a + area_b - inter
+    iou = torch.where(union > 0, inter / union, torch.zeros_like(inter))
+    return iou
 
 
 def mask_iou_nms(
@@ -55,13 +72,10 @@ def mask_iou_nms(
         keep.append(int(order[i].item()))
 
         # Suppress remaining predictions with high IoU
-        if i + 1 < masks_sorted.shape[0]:
-            iou = pairwise_iou(
-                masks_sorted[i+1:].float(),
-                masks_sorted[i:i+1].float(),
-            )[:, 0]  # [remaining]
+        remaining = masks_sorted.shape[0] - i - 1
+        if remaining > 0:
+            iou = _mask_iou(masks_sorted[i + 1:], masks_sorted[i:i + 1])[:, 0]  # [remaining]
             high_iou = iou > iou_threshold
-            # Map back to sorted indices
             rem_indices = torch.arange(i + 1, masks_sorted.shape[0], device=masks.device)
             suppressed[rem_indices[high_iou]] = True
 
