@@ -118,7 +118,10 @@ def main():
 
     proto_builder = PrototypeBuilder(embed_dim)
     correlation = CorrelationBuilder()
-    candidate_gen = CandidateGenerator(alpha=1.0, min_area=1, max_candidates=64, stride=16.0)
+    candidate_gen = CandidateGenerator(
+        alpha=1.0, min_area=1, max_candidates=64, stride=16.0,
+        peak_min_distance=2, max_peaks_per_cc=8,
+    )
 
     # ── Load dataset ──
     dataset = ISAIDInstanceDataset(

@@ -114,6 +114,8 @@ class PromptMaskDecoder(nn.Module):
         candidate_alpha: float = 1.0,
         candidate_min_area: int = 1,
         candidate_max: int = 64,
+        candidate_peak_min_distance: int = 2,
+        candidate_max_peaks_per_cc: int = 8,
         # ── V2: NMS 参数 | NMS params ──
         use_nms: bool = True,
         nms_iou_threshold: float = 0.6,
@@ -136,6 +138,8 @@ class PromptMaskDecoder(nn.Module):
             min_area=candidate_min_area,
             max_candidates=candidate_max,
             stride=self.stride,
+            peak_min_distance=candidate_peak_min_distance,
+            max_peaks_per_cc=candidate_max_peaks_per_cc,
         )
         self.prompt_generator = PromptGenerator(
             embed_dim=embed_dim, hidden_dim=embed_dim,
