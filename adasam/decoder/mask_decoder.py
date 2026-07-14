@@ -376,8 +376,23 @@ class PromptMaskDecoder(nn.Module):
         # Step 5: Upscale + threshold
         logits = self.upscale_logits(low_res, input_size, original_size)   # [N, H, W]
         masks = logits > self.mask_threshold                     # bool
+        mask_areas = masks.reshape(masks.shape[0], -1).sum(dim=1)  # [N]
         # V2 scoring: iou_pred (from SAM) × heuristic region_score
         scores = iou_pred[:, 0].clamp(0.0, 1.0) * region_score.clamp(0.0, 1.0)
+
+        # ── DEBUG: 诊断 V2 推理管线 ──
+        _dbg = (f"[V2 DEBUG] candidates={N} "
+                f"sim_range=[{sim_tensor.min().item():.4f}, {sim_tensor.max().item():.4f}] "
+                f"sim_mean={sim_tensor.mean().item():.4f} "
+                f"logit_range=[{logits.min().item():.4f}, {logits.max().item():.4f}] "
+                f"logit_mean={logits.mean().item():.4f} "
+                f"mask_areas=[{mask_areas.min().item():.0f}, {mask_areas.max().item():.0f}] "
+                f"mask_nonzero={(mask_areas > 0).sum().item()}/{N} "
+                f"iou_pred_range=[{iou_pred.min().item():.4f}, {iou_pred.max().item():.4f}] "
+                f"scores_range=[{scores.min().item():.4f}, {scores.max().item():.4f}] "
+                f"box_sizes=({(box_xyxy[:,2]-box_xyxy[:,0]).mean().item():.0f},"
+                f"{(box_xyxy[:,3]-box_xyxy[:,1]).mean().item():.0f})")
+        print(_dbg)
 
         # Step 6: Mask IoU NMS (optional, removes duplicate masks from overlapping candidates)
         if self.use_nms and masks.shape[0] > 1:
