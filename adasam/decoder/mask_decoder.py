@@ -9,12 +9,21 @@ The core decoding module. It reuses MobileSAM's PromptEncoder + MaskDecoder, and
 "prototype → point prompts" makes each point decode one instance mask (PerSAM/Matcher). Class
 information is injected into every prompt's sparse tokens by a learnable PrototypeAdapter.
 
+V2 新增 | V2 additions:
+    - decode_v2(): 支持 point + box + 可选 prompt_token 提示。
+      Supports point + box + optional prompt_token prompts.
+    - forward() / forward_v2(): 使用 CorrelationBuilder + CandidateGenerator 的新推理管线。
+      New inference pipeline using CorrelationBuilder + CandidateGenerator.
+    - 旧 forward() 保留为 _forward_legacy(), 当 support_features=None 时自动回退。
+      Old forward() kept as _forward_legacy(), auto-fallback when support_features=None.
+
 契约 | Contract::
 
-    forward(image_embedding[1,256,64,64], prototype[256]) -> (masks[N,H,W] bool, scores[N])
+    forward(image_embedding[1,256,64,64], prototype[256],
+           support_features=[K,256,64,64] | None) -> InstanceMasks
 
-训练 (teacher forcing) 与推理共用 decode() 核心 —— 训练用 GT 实例内采样点, 推理用相似度峰值,
-无 if-mode 分支。decode() core is shared by training (GT points) and inference (sim peaks).
+训练 (teacher forcing) 与推理共用 decode/decode_v2 核心 —— 无 if-mode 分支。
+decode / decode_v2 core is shared by training and inference — no if-mode branches.
 
 可训练面 | Trainable surface:
     - PrototypeAdapter (始终可训练, 末层零初始化 → 初始≈纯 PerSAM)。
@@ -30,6 +39,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from adasam.prototype.matcher import Matcher, similarity_map
+from adasam.prototype.correlation import CorrelationBuilder
+from adasam.utils.candidate_generator import CandidateGenerator, CandidateSet
+from adasam.decoder.prompt_generator import PromptGenerator
+from adasam.utils.nms import mask_iou_nms
 
 
 class InstanceMasks(NamedTuple):
@@ -97,6 +110,13 @@ class PromptMaskDecoder(nn.Module):
         n_proto_tokens: int = 1,
         train_mask_decoder: bool = True,
         train_prompt_encoder: bool = False,
+        # ── V2: Candidate Generator 参数 | Candidate Generator params ──
+        candidate_alpha: float = 1.0,
+        candidate_min_area: int = 1,
+        candidate_max: int = 64,
+        # ── V2: NMS 参数 | NMS params ──
+        use_nms: bool = True,
+        nms_iou_threshold: float = 0.6,
     ) -> None:
         super().__init__()
         self.prompt_encoder = prompt_encoder
@@ -108,6 +128,22 @@ class PromptMaskDecoder(nn.Module):
         gh, gw = prompt_encoder.image_embedding_size            # (64, 64)
         self.grid_size = (int(gh), int(gw))
         self.stride = self.image_size / gh                       # 1024/64 = 16
+
+        # ── V2 modules ──
+        self.correlation = CorrelationBuilder()
+        self.candidate_gen = CandidateGenerator(
+            alpha=candidate_alpha,
+            min_area=candidate_min_area,
+            max_candidates=candidate_max,
+            stride=self.stride,
+        )
+        self.prompt_generator = PromptGenerator(
+            embed_dim=embed_dim, hidden_dim=embed_dim,
+        )
+
+        # ── V2: NMS ──
+        self.use_nms = use_nms
+        self.nms_iou_threshold = nms_iou_threshold
 
         self._set_trainable(self.prompt_encoder, train_prompt_encoder)
         self._set_trainable(self.mask_decoder, train_mask_decoder)
@@ -154,6 +190,65 @@ class PromptMaskDecoder(nn.Module):
         )                                                        # [N,1,256,256], [N,1]
         return low_res, iou_pred
 
+    def decode_v2(
+        self,
+        image_embedding: torch.Tensor,
+        point_coords: torch.Tensor,
+        point_labels: torch.Tensor,
+        boxes_xyxy: torch.Tensor,
+        prompt_token: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """由点+框+可选 prompt token 解码 | Decode from point + box + optional prompt token.
+
+        V2 解码核心: 同时使用 point 和 box 提示, 可选注入 prompt_token。
+        V2 decode core: uses both point and box prompts, optionally injects prompt_token.
+
+        SAM PromptEncoder 行为 | behavior:
+            - _embed_points(pad=False, 1 point)  → [N, 1, 256]
+            - _embed_boxes(boxes_xyxy)            → [N, 2, 256] (two corners)
+            → sparse = [N, 3, 256] (1 point + 2 box tokens)
+            → with prompt_token: [N, 4, 256]
+
+        :param image_embedding: [1, C, gh, gw] 单图嵌入 | single-image embedding.
+        :param point_coords: [N, 2] 输入帧 (x, y) | input-frame (x, y).
+        :param point_labels: [N] 1=正点 | 1 = positive point.
+        :param boxes_xyxy: [N, 4] 输入帧 (x1, y1, x2, y2) | input-frame bbox corners.
+        :param prompt_token: [N, C] 可选 learnable prompt token | optional learned prompt token.
+        :return: (low_res_logits[N, 1, 256, 256], iou_pred[N, 1]).
+        """
+        if image_embedding.ndim != 4 or image_embedding.shape[0] != 1:
+            raise ValueError(
+                f"expected image_embedding [1,C,gh,gw], got {tuple(image_embedding.shape)}"
+            )
+
+        N = point_coords.shape[0]
+        if boxes_xyxy.shape[0] != N:
+            raise ValueError(
+                f"point/box count mismatch: {N} points vs {boxes_xyxy.shape[0]} boxes"
+            )
+
+        # SAM PromptEncoder with both points and boxes
+        # points: (coords [N, 1, 2], labels [N, 1]) — one positive point per candidate
+        sparse, dense = self.prompt_encoder(
+            points=(point_coords[:, None, :], point_labels[:, None]),
+            boxes=boxes_xyxy,
+            masks=None,
+        )                                                        # [N, 3, 256], [N, 256, gh, gw]
+
+        # Inject learnable prompt token (if provided)
+        if prompt_token is not None:
+            pt = prompt_token.unsqueeze(1)                       # [N, 1, C]
+            sparse = torch.cat([pt, sparse], dim=1)             # [N, 4, C]
+
+        low_res, iou_pred = self.mask_decoder(
+            image_embeddings=image_embedding,
+            image_pe=self.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse,
+            dense_prompt_embeddings=dense,
+            multimask_output=False,
+        )                                                        # [N,1,256,256], [N,1]
+        return low_res, iou_pred
+
     def upscale_logits(
         self,
         low_res_logits: torch.Tensor,
@@ -175,7 +270,7 @@ class PromptMaskDecoder(nn.Module):
         x = F.interpolate(x, original_size, mode="bilinear", align_corners=False)
         return x[:, 0]                                           # [N, H, W]
 
-    # ── 推理: 由原型相似度峰值生成提示 | Inference: prompts from prototype-sim peaks ──
+    # ── 推理: V2 管线 (候选生成 → 多点+框解码) | Inference: V2 pipeline (candidates → multi-point+box decode) ──
 
     @torch.no_grad()
     def forward(
@@ -184,11 +279,38 @@ class PromptMaskDecoder(nn.Module):
         prototype: torch.Tensor,
         input_size: tuple[int, int] = (1024, 1024),
         original_size: tuple[int, int] = (896, 896),
+        support_features: torch.Tensor | None = None,
     ) -> InstanceMasks:
         """图像嵌入 + 原型 → 每实例掩码与置信度 | Embedding + prototype → per-instance masks & scores.
 
+        V2: 当 support_features 提供时, 使用 CorrelationBuilder → CandidateGenerator →
+        decode_v2(point + box) 管线。否则回退到旧 Matcher 管线 (向后兼容)。
+        V2: when support_features is provided, uses the CorrelationBuilder → CandidateGenerator →
+        decode_v2(point + box) pipeline. Falls back to old Matcher pipeline otherwise.
+
+        :param image_embedding: [1, C, gh, gw] query image embedding.
+        :param prototype: [C] class prototype.
+        :param input_size: 模型输入帧大小 | model input frame size.
+        :param original_size: 原始 tile 大小 | original tile size.
+        :param support_features: [K, C, gh, gw] dense support features (V2).
+            None → fall back to legacy Matcher pipeline.
         :return: InstanceMasks(masks[N,H,W] bool, scores[N] float ∈ [0,1]).
         """
+        if support_features is not None:
+            return self._forward_v2(
+                image_embedding, prototype, support_features,
+                input_size, original_size,
+            )
+        return self._forward_legacy(image_embedding, prototype, input_size, original_size)
+
+    def _forward_legacy(
+        self,
+        image_embedding: torch.Tensor,
+        prototype: torch.Tensor,
+        input_size: tuple[int, int],
+        original_size: tuple[int, int],
+    ) -> InstanceMasks:
+        """旧 Matcher 管线 (向后兼容) | Legacy Matcher pipeline (backward compatible)."""
         sim = similarity_map(image_embedding[0], prototype)      # [gh, gw]
         pts = self.matcher.select(sim, stride=self.stride)
 
@@ -197,6 +319,73 @@ class PromptMaskDecoder(nn.Module):
 
         masks = logits > self.mask_threshold                     # bool
         scores = iou_pred[:, 0].clamp(0.0, 1.0) * pts.sims.clamp(0.0, 1.0)
+        return InstanceMasks(masks=masks, scores=scores)
+
+    def _forward_v2(
+        self,
+        image_embedding: torch.Tensor,
+        prototype: torch.Tensor,
+        support_features: torch.Tensor,
+        input_size: tuple[int, int],
+        original_size: tuple[int, int],
+    ) -> InstanceMasks:
+        """V2 推理管线 | V2 inference pipeline.
+
+        1. CorrelationBuilder → sim_tensor [K, H, W]
+        2. CandidateGenerator → N candidates (coords + boxes + scores + features)
+        3. PromptGenerator → (point, box, prompt_token, region_score)
+        4. decode_v2(point + box + prompt_token) → masks
+        5. scores = iou_pred × region_score
+        """
+        device = image_embedding.device
+
+        # Step 1: Build similarity tensor (K support × query)
+        sim_tensor = self.correlation.build(support_features, prototype, image_embedding)
+
+        # Step 2: Generate candidates
+        candidates = self.candidate_gen.generate(sim_tensor, image_embedding)
+
+        if candidates.n_candidates == 0:
+            return InstanceMasks(
+                masks=torch.empty(0, *original_size, device=device, dtype=torch.bool),
+                scores=torch.empty(0, device=device),
+            )
+
+        # Step 3: Generate prompts via learnable PromptGenerator
+        point_xy, box_xyxy, prompt_token, region_score = self.prompt_generator(
+            prototype=prototype,
+            candidate_coords=candidates.coords,
+            candidate_boxes=candidates.boxes,
+            candidate_query_features=candidates.query_features,
+            candidate_per_support_sim=candidates.per_support_sim,
+            candidate_scores_raw=candidates.scores,
+            image_size=float(self.image_size),
+        )
+        # point_xy: [N,2], box_xyxy: [N,4], prompt_token: [N,C], region_score: [N,1]
+
+        # Step 4: Decode all candidates with learned prompts
+        labels = torch.ones(candidates.n_candidates, device=device, dtype=torch.float32)
+
+        low_res, iou_pred = self.decode_v2(
+            image_embedding=image_embedding,
+            point_coords=point_xy,
+            point_labels=labels,
+            boxes_xyxy=box_xyxy,
+            prompt_token=prompt_token,
+        )
+
+        # Step 5: Upscale + threshold
+        logits = self.upscale_logits(low_res, input_size, original_size)   # [N, H, W]
+        masks = logits > self.mask_threshold                     # bool
+        # V2 scoring: iou_pred (from SAM) × region_score (from PromptGenerator)
+        scores = iou_pred[:, 0].clamp(0.0, 1.0) * region_score[:, 0].clamp(0.0, 1.0)
+
+        # Step 6: Mask IoU NMS (optional, removes duplicate masks from overlapping candidates)
+        if self.use_nms and masks.shape[0] > 1:
+            keep = mask_iou_nms(masks, scores, self.nms_iou_threshold)
+            masks = masks[keep]
+            scores = scores[keep]
+
         return InstanceMasks(masks=masks, scores=scores)
 
     # ── 坐标帧变换辅助 (供 trainer 把 GT tile 坐标映射到输入帧) ──

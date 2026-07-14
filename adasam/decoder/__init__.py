@@ -5,5 +5,6 @@ from adasam.decoder.mask_decoder import (
     PrototypeAdapter,
     InstanceMasks,
 )
+from adasam.decoder.prompt_generator import PromptGenerator
 
-__all__ = ["PromptMaskDecoder", "PrototypeAdapter", "InstanceMasks"]
+__all__ = ["PromptMaskDecoder", "PrototypeAdapter", "InstanceMasks", "PromptGenerator"]

@@ -220,6 +220,7 @@ class Evaluator:
     def build_prototypes(self, manifest_stems: Optional[set[str]]):
         rng = random.Random(self.args.seed)
         class_protos: dict[int, torch.Tensor] = {}
+        class_support_feats: dict[int, torch.Tensor] = {}           # V2: dense support features
         query_stems: set[str] = set(manifest_stems) if manifest_stems is not None else set()
 
         for cls, src_to_stems in sorted(self.class_index.items()):
@@ -260,19 +261,34 @@ class Evaluator:
                 masks.append(fg)
             if embs:
                 class_protos[cls] = self.proto_builder.build(embs, masks)
+                # V2: also store dense support features [K, C, gh, gw]
+                class_support_feats[cls] = torch.stack(embs, dim=0)
                 self.logger.log_info("proto", f"class {cls:>2d} ({ISAID_CATEGORIES.get(cls,'?')}): "
                                               f"K={self.k_shot} from {len(support_sources)} scenes")
-        return class_protos, query_stems
+        return class_protos, class_support_feats, query_stems
 
     # ── 逐 tile 推理 | Per-tile inference ──
 
     @torch.no_grad()
-    def _predict_tile(self, rgb: np.ndarray, class_protos: dict[int, torch.Tensor]):
-        """→ {cls: [(mask bool[H,W], score float), ...]} | per-class predicted instances."""
+    def _predict_tile(
+        self,
+        rgb: np.ndarray,
+        class_protos: dict[int, torch.Tensor],
+        class_support_feats: dict[int, torch.Tensor] | None = None,
+    ):
+        """→ {cls: [(mask bool[H,W], score float), ...]} | per-class predicted instances.
+
+        V2: when class_support_feats is provided, passes dense support features to the decoder
+        for the CorrelationBuilder → CandidateGenerator → PromptGenerator pipeline.
+        """
         emb, meta = self._embed(rgb)
         preds: dict[int, list[tuple[np.ndarray, float]]] = defaultdict(list)
         for cls, proto in class_protos.items():
-            out = self.decoder(emb, proto, meta.input_size, meta.original_size)
+            sf = class_support_feats.get(cls) if class_support_feats else None
+            out = self.decoder(
+                emb, proto, meta.input_size, meta.original_size,
+                support_features=sf,
+            )
             for i in range(out.masks.shape[0]):
                 m = out.masks[i].cpu().numpy()
                 if m.sum() < self.args.min_area:
@@ -289,7 +305,7 @@ class Evaluator:
         manifest_existed = manifest_path.exists()
         manifest_stems = set(load_manifest(manifest_path)) if manifest_existed else None
 
-        class_protos, query_stems = self.build_prototypes(manifest_stems)
+        class_protos, class_support_feats, query_stems = self.build_prototypes(manifest_stems)
         if not manifest_existed:
             save_manifest(manifest_path, sorted(query_stems))
             self.logger.log_info("manifest", f"generated fixed eval set: {len(query_stems)} tiles")
@@ -313,7 +329,7 @@ class Evaluator:
             evaluated_image_ids.append(image_id)
             rgb = self._load_tile_rgb(stem)
 
-            preds = self._predict_tile(rgb, class_protos)
+            preds = self._predict_tile(rgb, class_protos, class_support_feats)
             for cls, insts in preds.items():
                 for mask, score in insts:
                     self.ft_eval.add_prediction(image_id, cls, mask, score)
