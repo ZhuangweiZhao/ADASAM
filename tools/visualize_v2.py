@@ -395,7 +395,16 @@ def main():
 
         # ── Stack rows ──
         row_a_img = np.hstack(row_a)
-        row_b_img = cv2.resize(all_pred_viz, (row_a_img.shape[1], all_pred_viz.shape[0]))
+        # Pad Row B to match Row A width WITHOUT stretching
+        target_w = row_a_img.shape[1]
+        if all_pred_viz.shape[1] < target_w:
+            pad_w = target_w - all_pred_viz.shape[1]
+            row_b_img = cv2.copyMakeBorder(
+                all_pred_viz, 0, 0, 0, pad_w,
+                cv2.BORDER_CONSTANT, value=(0, 0, 0),
+            )
+        else:
+            row_b_img = all_pred_viz
         canvas = np.vstack([row_a_img, row_b_img])
 
         out_path = out_dir / f"tile{qi:02d}_cls{cls}_{cls_name}.png"
