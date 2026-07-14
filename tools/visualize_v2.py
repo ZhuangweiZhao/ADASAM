@@ -306,19 +306,27 @@ def main():
 
         # ── Row A: similarity + union ──
         row_a = []
-        # Panel 1: mean sim heatmap
-        sim_mean_viz = (sim_mean_tile - sim_mean_tile.min()) / (sim_mean_tile.max() - sim_mean_tile.min() + 1e-8)
-        heat = cv2.applyColorMap((sim_mean_viz * 255).astype(np.uint8), cv2.COLORMAP_JET)
-        blended_mean = cv2.addWeighted(rgb, 0.5, cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), 0.5, 0)
-        cv2.putText(blended_mean, "sim_mean", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        row_a.append(blended_mean)
 
-        # Panel 2: max sim heatmap
-        sim_max_viz = (sim_max_tile - sim_max_tile.min()) / (sim_max_tile.max() - sim_max_tile.min() + 1e-8)
-        heat = cv2.applyColorMap((sim_max_viz * 255).astype(np.uint8), cv2.COLORMAP_JET)
-        blended_max = cv2.addWeighted(rgb, 0.5, cv2.cvtColor(heat, cv2.COLOR_BGR2RGB), 0.5, 0)
-        cv2.putText(blended_max, "sim_max", (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-        row_a.append(blended_max)
+        # Panel 1: mean sim — original image + similarity contours
+        # Draw contours at μ+1σ threshold (same logic as CandidateGenerator)
+        sim_mean_viz = rgb.copy()
+        thresh_mean = sim_mean_tile.mean() + 1.0 * sim_mean_tile.std()
+        binary_mean = (sim_mean_tile > thresh_mean).astype(np.uint8)
+        contours_mean, _ = cv2.findContours(binary_mean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(sim_mean_viz, contours_mean, -1, (255, 255, 0), 2)
+        cv2.putText(sim_mean_viz, "sim_mean (yellow=μ+σ)", (5, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        row_a.append(sim_mean_viz)
+
+        # Panel 2: max sim — original image + similarity contours
+        sim_max_viz = rgb.copy()
+        thresh_max = sim_max_tile.mean() + 1.0 * sim_max_tile.std()
+        binary_max = (sim_max_tile > thresh_max).astype(np.uint8)
+        contours_max, _ = cv2.findContours(binary_max, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(sim_max_viz, contours_max, -1, (255, 255, 0), 2)
+        cv2.putText(sim_max_viz, "sim_max (yellow=μ+σ)", (5, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        row_a.append(sim_max_viz)
 
         # Panel 3: binary union
         binary_color = np.zeros((H, W, 3), dtype=np.uint8)
