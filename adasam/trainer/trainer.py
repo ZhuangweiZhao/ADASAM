@@ -242,7 +242,7 @@ class Trainer:
         cx = (float(gx) + 0.5) * stride                        # input-frame x
         cy = (float(gy) + 0.5) * stride                        # input-frame y
         sx = self.tile_size / self.image_size
-        return cx * sx, cy * sy
+        return cx * sx, cy * sx
 
     # ── V2: GT 教师提示 (点 + 框 + 掩码) | Teacher-forced GT (point + box + mask) ──
 
