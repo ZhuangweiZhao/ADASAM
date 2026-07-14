@@ -267,9 +267,8 @@ def main():
 
         # ═══════════════════════════════════════════════════════════
         # Figure Layout (5 panels wide)
-        #   Row A: sim (mean), sim (max), binary union, CC labels, GT masks
-        #   Row B: candidates + bboxes + centroids on query image
-        #   Row C: top-5 predicted masks
+        #   Row A: sim_mean | sim_max | binary union | GT | Candidates
+        #   Row B: All predictions overlaid on one image (colored by score)
         # ═══════════════════════════════════════════════════════════
 
         sim_np = sim_tensor.cpu().numpy()  # [K, 64, 64]
@@ -361,41 +360,34 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         row_a.append(cand_viz)
 
-        # ── Row B: top-K predicted masks ──
-        top_k = min(5, N)
+        # ── Row B: ALL predictions overlaid on one image ──
+        all_pred_viz = rgb.copy()
+        # Generate distinct colors (HSV space, evenly spaced by hue)
         sort_idx = np.argsort(final_scores)[::-1]
-        cols = min(top_k, 5)
-        pred_row = []
-        for ri in range(top_k):
+        pred_colors = []
+        for ri in range(N):
+            hue = (ri * 137) % 360  # golden-angle spacing for visual distinction
+            # Convert HSV→BGR→RGB
+            hsv = np.uint8([[[hue // 2, 220, 240]]])  # OpenCV hue is 0-179
+            bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+            pred_colors.append((int(bgr[2]), int(bgr[1]), int(bgr[0])))  # BGR→RGB
+
+        for ri in range(N):
             si = sort_idx[ri]
-            pred_viz = rgb.copy()
             pm = pred_masks[si]
-            pred_viz = draw_mask_overlay(pred_viz, pm, (255, 100, 0), alpha=0.35, border=True)
-            # Draw GT contours
-            for gm in gt_cls_masks:
-                contours_gt, _ = cv2.findContours(gm.astype(np.uint8), cv2.RETR_EXTERNAL,
-                                                   cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(pred_viz, contours_gt, -1, (0, 255, 0), 1)
-            cv2.putText(pred_viz, f"pred#{ri} s={final_scores[si]:.3f} area={int(pred_masks[si].sum())}",
-                        (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
-            pred_row.append(pred_viz)
-        # Pad if less than 5
-        while len(pred_row) < 5:
-            blank = np.zeros_like(rgb)
-            cv2.putText(blank, "(no prediction)", (20, H // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1)
-            pred_row.append(blank)
+            col = pred_colors[ri]
+            all_pred_viz = draw_mask_overlay(all_pred_viz, pm, col, alpha=0.25, border=True)
+        # Draw GT contours in green on top
+        for gm in gt_cls_masks:
+            contours_gt, _ = cv2.findContours(gm.astype(np.uint8), cv2.RETR_EXTERNAL,
+                                               cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(all_pred_viz, contours_gt, -1, (0, 255, 0), 2)
+        cv2.putText(all_pred_viz, f"All {N} predictions (colored, GT=green)", (5, 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
 
         # ── Stack rows ──
-        # Row A: 5 images (sim_mean, sim_max, binary, GT, candidates)
-        # Row B: 5 images (top-5 predictions)
         row_a_img = np.hstack(row_a)
-        row_b_img = np.hstack(pred_row)
-
-        # Make panels same width
-        target_w = row_a_img.shape[1]
-        if row_b_img.shape[1] != target_w:
-            row_b_img = cv2.resize(row_b_img, (target_w, row_b_img.shape[0]))
-
+        row_b_img = cv2.resize(all_pred_viz, (row_a_img.shape[1], all_pred_viz.shape[0]))
         canvas = np.vstack([row_a_img, row_b_img])
 
         out_path = out_dir / f"tile{qi:02d}_cls{cls}_{cls_name}.png"
