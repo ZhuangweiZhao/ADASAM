@@ -1,0 +1,27 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ── Model weights (large binaries, fetched via tools/setup_mobilesam.py) ──
+*.pt
+*.pth
+weights/*.pt
+thirdparty/MobileSAM/weights/*.pt
+
+# ── Experiment outputs ──
+runs/
+output/
+*.jsonl
+!tests/**/*.jsonl
+
+# ── OS / editor ──
+.DS_Store
+.vscode/
+.idea/

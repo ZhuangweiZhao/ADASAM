@@ -1,0 +1,55 @@
+# AdaSAM base configuration | 基础配置
+# =====================================
+# 单一配置源, 被 tools/train.py 与 tools/evaluate.py 共同读取。
+# Single config source, read by both tools/train.py and tools/evaluate.py.
+
+# ── Backbone (MobileSAM, frozen) ──
+backbone:
+  model_type: vit_t                                   # MobileSAM = TinyViT variant
+  checkpoint: weights/mobile_sam.pt                   # relative to repo root
+  image_size: 1024                                    # SAM native encoder resolution
+
+# ── Data (iSAID Instance Few-Shot Split — referenced, NOT copied) ──
+data:
+  # Frozen 896² COCO tiles materialized by the FastSAM project's prep pipeline.
+  data_root: E:/A_postgraduate_stude/AdaTile-FastSAM/data/iSAID_instance_fewshot
+  tile_size: 896                                      # GT/eval resolution (never 1024)
+  num_classes: 15
+  fold: 0                                             # 0/1/2 → base/novel split
+  eval_manifest: evaluation_manifest_val.json         # under data_root; frozen query set
+
+# ── Few-shot episode ──
+fewshot:
+  k_shot: 5
+  min_tiles: 30                                       # exclude classes with < 30 tiles
+  train_mode: novel                                   # base | novel | all (training class set)
+
+# ── Prototype / matcher ──
+prototype:
+  embed_dim: 256                                      # SAM prompt-token dim
+  top_k_points: 10                                    # similarity peaks → point prompts
+  sim_threshold: 0.5
+  min_distance: 1                                     # NMS radius (grid cells) between peaks
+  n_proto_tokens: 1                                   # prototype tokens injected per prompt
+
+# ── Training ──
+train:
+  epochs: 50
+  episodes_per_epoch: 200
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  device: cuda
+  max_instances_per_query: 32                         # cap GT instances supervised per query
+  iou_loss_weight: 1.0                                # weight of the IoU-head MSE term
+
+# ── Evaluation (Protocol V3) ──
+eval:
+  iou_thr: 0.5
+  score_thr: 0.5
+  min_area: 16
+  per_class: 20
+
+# ── Reproducibility ──
+seed: 42
+output_dir: runs
