@@ -209,36 +209,23 @@ def generate_candidates(
         if not peaks:
             continue
 
-        # CC-level bbox (used when only 1 peak — keeps original behavior)
+        # CC-level bbox shared by all peaks within this CC.
+        # The point prompt handles per-instance disambiguation; the bbox
+        # just needs to be large enough to enclose the full object.
+        # Using the same full bbox for all peaks avoids fragmenting large
+        # objects while still allowing dense small objects to separate via points.
         rows, cols = np.where(grid_mask)
         gx1_cc, gx2_cc = int(cols.min()), int(cols.max())
         gy1_cc, gy2_cc = int(rows.min()), int(rows.max())
+        bbox_x1 = float(gx1_cc) * stride
+        bbox_y1 = float(gy1_cc) * stride
+        bbox_x2 = float(gx2_cc + 1) * stride
+        bbox_y2 = float(gy2_cc + 1) * stride
 
         for peak_gy, peak_gx, peak_val in peaks:
-            # --- Point from peak (more precise than center-of-mass) ---
+            # --- Point from peak ---
             centroid_x = (float(peak_gx) + 0.5) * stride
             centroid_y = (float(peak_gy) + 0.5) * stride
-
-            # --- Bbox: local neighborhood around peak ---
-            # When multiple peaks exist in one CC, use a local box per peak
-            # so the box prompt doesn't cover unrelated instances.
-            if len(peaks) == 1:
-                # Single peak → use the full CC bbox (original behavior)
-                bbox_x1 = float(gx1_cc) * stride
-                bbox_y1 = float(gy1_cc) * stride
-                bbox_x2 = float(gx2_cc + 1) * stride
-                bbox_y2 = float(gy2_cc + 1) * stride
-            else:
-                # Multiple peaks → local box around each peak
-                half = max(1, peak_min_distance)
-                px1 = max(0, peak_gx - half)
-                py1 = max(0, peak_gy - half)
-                px2 = min(W - 1, peak_gx + half + 1)
-                py2 = min(H - 1, peak_gy + half + 1)
-                bbox_x1 = float(px1) * stride
-                bbox_y1 = float(py1) * stride
-                bbox_x2 = float(px2 + 1) * stride
-                bbox_y2 = float(py2 + 1) * stride
 
             # --- Per-support similarity in local neighborhood ---
             py1_l = max(0, peak_gy - 1)
