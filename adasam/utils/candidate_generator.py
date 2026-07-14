@@ -240,12 +240,17 @@ def _fallback_candidate(
     coords = torch.tensor([[cx, cy]], device=device, dtype=torch.float32)
     boxes = torch.tensor([[cx - 16, cy - 16, cx + 16, cy + 16]],
                          device=device, dtype=torch.float32)
-    scores = torch.tensor([0.0], device=device, dtype=torch.float32)
 
     # Per-support sim at the fallback point
     grid_mask_t = torch.zeros(H, W, dtype=torch.bool, device=device)
     grid_mask_t[gy, gx] = True
     per_support_sim = sim_tensor[:, grid_mask_t].mean(dim=1)  # [K]
+
+    # Score from similarity at the peak point (not 0.0)
+    mean_sim = float(per_support_sim.mean().item())
+    max_sim = float(per_support_sim.max().item())
+    fallback_score = 0.5 * mean_sim + 0.5 * max_sim
+    scores = torch.tensor([fallback_score], device=device, dtype=torch.float32)
 
     qf = query_3d[:, grid_mask_t].mean(dim=1)  # [C]
 

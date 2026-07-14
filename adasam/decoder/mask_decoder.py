@@ -333,10 +333,13 @@ class PromptMaskDecoder(nn.Module):
 
         1. CorrelationBuilder → sim_tensor [K, H, W]
         2. CandidateGenerator → N candidates (coords + boxes + scores + features)
-        3. prompt_token = prototype (no delta — delta is trained on GT-region features,
-           while inference sees CC-region features; zero-init ensures safe fallback)
-        4. decode_v2(point + box + prototype-as-token) → masks
-        5. scores = iou_pred × candidate_score (heuristic, no learned score_head)
+        3. PromptGenerator → (point, box, prompt_token, region_score)
+           Uses learned PromptGenerator — trained on GT features, tested on CC features.
+           If the PromptGenerator's delta hurts for some CCs, the zero-init ensures
+           prompt_token ≈ prototype as a safe fallback.
+        4. decode_v2(point + box + prompt_token) → masks
+        5. scores = iou_pred × region_score
+        6. Mask IoU NMS
         """
         device = image_embedding.device
 
@@ -352,18 +355,21 @@ class PromptMaskDecoder(nn.Module):
                 scores=torch.empty(0, device=device),
             )
 
-        N = candidates.n_candidates
+        # Step 3: Generate prompts via learnable PromptGenerator.
+        # Point and box pass through unchanged; prompt_token = prototype + Δprompt.
+        point_xy, box_xyxy, prompt_token, region_score = self.prompt_generator(
+            prototype=prototype,
+            candidate_coords=candidates.coords,
+            candidate_boxes=candidates.boxes,
+            candidate_query_features=candidates.query_features,
+            candidate_per_support_sim=candidates.per_support_sim,
+            candidate_scores_raw=candidates.scores,
+            image_size=float(self.image_size),
+        )
+        # point_xy: [N,2], box_xyxy: [N,4], prompt_token: [N,C], region_score: [N,1]
 
-        # Step 3: Prompts — point and box from candidates (geometric, no learning).
-        # prompt_token = prototype (bypasses PromptGenerator delta, which is trained
-        # on GT-region features and does not generalise to CC-region features at inference).
-        point_xy = candidates.coords                                        # [N, 2]
-        box_xyxy = candidates.boxes                                         # [N, 4]
-        prompt_token = prototype.unsqueeze(0).expand(N, -1).contiguous()    # [N, C]
-        region_score = candidates.scores.clamp(0.0, 1.0)                    # [N]
-
-        # Step 4: Decode all candidates with point + box + prototype-as-token
-        labels = torch.ones(N, device=device, dtype=torch.float32)
+        # Step 4: Decode all candidates with point + box + learned prompt_token
+        labels = torch.ones(candidates.n_candidates, device=device, dtype=torch.float32)
 
         low_res, iou_pred = self.decode_v2(
             image_embedding=image_embedding,
@@ -376,23 +382,8 @@ class PromptMaskDecoder(nn.Module):
         # Step 5: Upscale + threshold
         logits = self.upscale_logits(low_res, input_size, original_size)   # [N, H, W]
         masks = logits > self.mask_threshold                     # bool
-        mask_areas = masks.reshape(masks.shape[0], -1).sum(dim=1)  # [N]
-        # V2 scoring: iou_pred (from SAM) × heuristic region_score
-        scores = iou_pred[:, 0].clamp(0.0, 1.0) * region_score.clamp(0.0, 1.0)
-
-        # ── DEBUG: 诊断 V2 推理管线 ──
-        _dbg = (f"[V2 DEBUG] candidates={N} "
-                f"sim_range=[{sim_tensor.min().item():.4f}, {sim_tensor.max().item():.4f}] "
-                f"sim_mean={sim_tensor.mean().item():.4f} "
-                f"logit_range=[{logits.min().item():.4f}, {logits.max().item():.4f}] "
-                f"logit_mean={logits.mean().item():.4f} "
-                f"mask_areas=[{mask_areas.min().item():.0f}, {mask_areas.max().item():.0f}] "
-                f"mask_nonzero={(mask_areas > 0).sum().item()}/{N} "
-                f"iou_pred_range=[{iou_pred.min().item():.4f}, {iou_pred.max().item():.4f}] "
-                f"scores_range=[{scores.min().item():.4f}, {scores.max().item():.4f}] "
-                f"box_sizes=({(box_xyxy[:,2]-box_xyxy[:,0]).mean().item():.0f},"
-                f"{(box_xyxy[:,3]-box_xyxy[:,1]).mean().item():.0f})")
-        print(_dbg)
+        # V2 scoring: iou_pred (from SAM) × region_score (from PromptGenerator)
+        scores = iou_pred[:, 0].clamp(0.0, 1.0) * region_score[:, 0].clamp(0.0, 1.0)
 
         # Step 6: Mask IoU NMS (optional, removes duplicate masks from overlapping candidates)
         if self.use_nms and masks.shape[0] > 1:
