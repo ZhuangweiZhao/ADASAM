@@ -167,19 +167,17 @@ def generate_candidates(
 
     device = sim_tensor.device
 
-    # ── Step 1: Relative threshold per support, then union ──
+    # ── Step 1: Aggregate similarity, then single threshold ──
+    # Aggregating FIRST (mean over K) then thresholding once is more robust
+    # than per-support thresholding + OR union — the latter merges adjacent
+    # instances when different supports highlight different parts of a cluster.
     sim_np = sim_tensor.detach().cpu().numpy()  # [K, H, W]
+    sim_agg = sim_np.mean(axis=0)               # [H, W]
 
-    binary_union = np.zeros((H, W), dtype=np.uint8)
-    for k in range(K):
-        s = sim_np[k]
-        mu = float(s.mean())
-        sigma = float(s.std())
-        tau = mu + alpha * sigma
-        binary_union |= (s > tau).astype(np.uint8)
-
-    # ── Step 1.5: Aggregated similarity for peak finding ──
-    sim_agg = sim_np.mean(axis=0)  # [H, W] — mean over K supports (more robust than max)
+    mu = float(sim_agg.mean())
+    sigma = float(sim_agg.std())
+    tau = mu + alpha * sigma
+    binary_union = (sim_agg > tau).astype(np.uint8)
 
     # ── Step 2: Connected components ──
     num_labels, labels = cv2.connectedComponents(binary_union, connectivity=8)

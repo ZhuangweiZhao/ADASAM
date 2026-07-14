@@ -275,13 +275,11 @@ def main():
         sim_mean = sim_np.mean(axis=0)     # [64, 64]
         sim_max = sim_np.max(axis=0)       # [64, 64]
 
-        # Binary union (same logic as CandidateGenerator)
-        binary_union = np.zeros((64, 64), dtype=np.uint8)
+        # Binary union — aggregate FIRST, then single threshold (same as CandidateGenerator)
+        sim_agg = sim_np.mean(axis=0)        # [64, 64]
         alpha_val = 1.0
-        for k in range(sim_np.shape[0]):
-            s = sim_np[k]
-            tau = s.mean() + alpha_val * s.std()
-            binary_union |= (s > tau).astype(np.uint8)
+        tau = sim_agg.mean() + alpha_val * sim_agg.std()
+        binary_union = (sim_agg > tau).astype(np.uint8)
 
         num_labels, labels_cc = cv2.connectedComponents(binary_union, connectivity=8)
 
