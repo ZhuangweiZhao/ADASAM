@@ -42,6 +42,10 @@ train:
   device: cuda
   max_instances_per_query: 32                         # cap GT instances supervised per query
   iou_loss_weight: 1.0                                # weight of the IoU-head MSE term
+  # ── CAT-SAM Adapter ──
+  use_cat_adapter: false                               # enable CAT-SAM feature adapter
+  cat_adapter:
+    bottleneck: 64                                     # adapter bottleneck dimension
 
 # ── Evaluation (Protocol V3) ──
 eval:

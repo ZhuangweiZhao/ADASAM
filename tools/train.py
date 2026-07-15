@@ -49,6 +49,9 @@ def parse_args() -> argparse.Namespace:
                    help="fraction of GT points replaced with sim-peak (0.0-1.0)")
     p.add_argument("--score-loss-weight", type=float, default=None,
                    help="weight of the region-score supervision term")
+    # ── CAT-SAM Adapter ──
+    p.add_argument("--cat-adapter", action="store_true", default=None,
+                   help="enable CAT-SAM feature adapter (bottleneck residual conv)")
     return p.parse_args()
 
 
@@ -87,6 +90,9 @@ def load_config(args: argparse.Namespace) -> dict:
         cfg["train"]["sim_peak_ratio"] = args.sim_peak_ratio
     if args.score_loss_weight is not None:
         cfg["train"]["score_loss_weight"] = args.score_loss_weight
+    # ── CAT-SAM Adapter ──
+    if args.cat_adapter is not None:
+        cfg["train"]["use_cat_adapter"] = True
     return cfg
 
 

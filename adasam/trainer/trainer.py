@@ -30,6 +30,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
+from adasam.adapters import CATAdapter
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone
 from adasam.datasets import EpisodeSampler, ISAIDInstanceDataset
 from adasam.decoder import PromptMaskDecoder
@@ -106,7 +107,19 @@ class Trainer:
         self.score_loss_weight = float(tcfg.get("score_loss_weight", 0.1))
         self.use_v2 = bool(tcfg.get("use_v2", False))
         self.sim_peak_ratio = float(tcfg.get("sim_peak_ratio", 0.0))  # 0.0=off, 0.3=30% sim-peak
+
+        # ── CAT-SAM Adapter (optional) | CAT-SAM 适配器 (可选) ──
+        self.cat_adapter = None
+        if bool(tcfg.get("use_cat_adapter", False)):
+            adapter_cfg = tcfg.get("cat_adapter", {})
+            self.cat_adapter = CATAdapter(
+                dim=self.embed_dim,
+                bottleneck=int(adapter_cfg.get("bottleneck", 64)),
+            ).to(self.device)
+
         params = [p for p in self.decoder.parameters() if p.requires_grad]
+        if self.cat_adapter is not None:
+            params += list(self.cat_adapter.parameters())
         self.optimizer = AdamW(params, lr=float(tcfg.get("lr", 1e-4)),
                                weight_decay=float(tcfg.get("weight_decay", 1e-4)))
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.epochs)
@@ -123,6 +136,10 @@ class Trainer:
         self.logger.log_info("init",
                              f"device={self.device}, trainable={n_train:.2f}M, "
                              f"classes={self.sampler.eligible_classes()}, out={self.out_dir}")
+        if self.cat_adapter is not None:
+            self.logger.log_info("adapter",
+                               f"CAT-Adapter: dim={self.embed_dim}, "
+                               f"params={sum(p.numel() for p in self.cat_adapter.parameters()):,}")
 
     # ── 路径工具 | Path helper ──
 
@@ -136,7 +153,10 @@ class Trainer:
     def _embed(self, image: torch.Tensor) -> torch.Tensor:
         """tile 图像 [3,H,W]∈[0,1] → 图像嵌入 [1,256,64,64] (冻结, 无梯度) | frozen embedding."""
         x, _ = preprocess_image(image)
-        return self.backbone(x.unsqueeze(0).to(self.device))["image_embedding"]
+        emb = self.backbone(x.unsqueeze(0).to(self.device))["image_embedding"]
+        if self.cat_adapter is not None:
+            emb = self.cat_adapter(emb)
+        return emb
 
     # ── 原型构建 | Prototype build ──
 
@@ -188,7 +208,15 @@ class Trainer:
         if not images:
             return None
 
-        support_feats, prototype = extract_support_features(self.backbone, images, masks)
+        # Run backbone on all support images (batched for efficiency)
+        batch = torch.stack(images, dim=0)  # [K, 3, 1024, 1024]
+        feats = self.backbone(batch)["image_embedding"]  # [K, 256, 64, 64]
+        if self.cat_adapter is not None:
+            feats = self.cat_adapter(feats)
+        support_feats = feats
+        prototype = self.proto_builder.build(
+            [support_feats[k] for k in range(support_feats.shape[0])], masks
+        )
         return support_feats, prototype, masks
 
     # ── V2: Sim-peak 点 (用于 bridge train-test gap) | Sim-peak point for 30% replacement ──
@@ -450,8 +478,9 @@ class Trainer:
         query_feats_pooled = torch.stack(query_feats_pooled, dim=0)    # [N, C]
         per_support_sim = torch.stack(per_support_sim_list, dim=0)     # [N, K]
 
-        # PromptGenerator → prompt_token + region_score
-        point_xy, box_xyxy, prompt_token, region_score = self.decoder.prompt_generator(
+        # PromptGenerator → region_score only (point/box are pass-through from GT).
+        # prompt_token = raw prototype (no delta) — same as inference, avoids train-test gap.
+        _, _, _, region_score = self.decoder.prompt_generator(
             prototype=prototype,
             candidate_coords=coords_in,
             candidate_boxes=boxes_in,
@@ -459,10 +488,11 @@ class Trainer:
             candidate_per_support_sim=per_support_sim,
             candidate_scores_raw=per_support_sim.mean(dim=1),
         )
+        prompt_token = prototype.unsqueeze(0).expand(coords_in.shape[0], -1).contiguous()
 
         # 6. Decode V2
         low_res, iou_pred = self.decoder.decode_v2(
-            emb, point_xy, labels, box_xyxy,
+            emb, coords_in, labels, boxes_in,
             prompt_token=prompt_token,
         )
 
@@ -535,13 +565,16 @@ class Trainer:
 
     def _save(self, path: Path, epoch: int, metrics: dict) -> None:
         """保存 checkpoint (统一 schema, 无条件键) | Save checkpoint (uniform schema)."""
-        torch.save({
+        ckpt = {
             "epoch": epoch,
             "model": self.decoder.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "config": self.cfg,
             "metrics": metrics,
-        }, path)
+        }
+        if self.cat_adapter is not None:
+            ckpt["cat_adapter"] = self.cat_adapter.state_dict()
+        torch.save(ckpt, path)
         # 同时落一份纯文本指标便于人读 | also drop human-readable metrics
         (self.out_dir / "last_metrics.json").write_text(
             json.dumps({"epoch": epoch, **metrics}, indent=2), encoding="utf-8"

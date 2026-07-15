@@ -34,6 +34,7 @@ import cv2
 import numpy as np
 import torch
 
+from adasam.adapters import CATAdapter
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone
 from adasam.datasets import ISAID_CATEGORIES
 from adasam.decoder import PromptMaskDecoder
@@ -147,6 +148,21 @@ class Evaluator:
         self.decoder.eval()
         self.proto_builder = PrototypeBuilder(self.embed_dim)
 
+        # ── CAT-SAM Adapter (optional) | CAT-SAM 适配器 (可选) ──
+        self.cat_adapter = None
+        if "cat_adapter" in ckpt:
+            tcfg = cfg.get("train", {})
+            adapter_cfg = tcfg.get("cat_adapter", {})
+            self.cat_adapter = CATAdapter(
+                dim=self.embed_dim,
+                bottleneck=int(adapter_cfg.get("bottleneck", 64)),
+            ).to(self.device)
+            self.cat_adapter.load_state_dict(ckpt["cat_adapter"])
+            self.cat_adapter.eval()
+            self.logger.log_info("adapter",
+                               f"CAT-Adapter loaded: "
+                               f"params={sum(p.numel() for p in self.cat_adapter.parameters()):,}")
+
         # ── COCO GT + 索引 | COCO GT + indices ──
         gt_path = str(self.data_root / "annotations" / f"instances_{self.split}.json")
         self.ft_eval = COCOInstanceEvaluator(gt_path, iouType="segm")
@@ -196,6 +212,8 @@ class Evaluator:
         """RGB HWC uint8 → (embedding[1,256,64,64], meta) | frozen embedding + preprocess meta."""
         x, meta = preprocess_image(rgb_uint8)
         emb = self.backbone(x.unsqueeze(0).to(self.device))["image_embedding"]
+        if self.cat_adapter is not None:
+            emb = self.cat_adapter(emb)
         return emb, meta
 
     def _load_tile_rgb(self, stem: str) -> np.ndarray:
