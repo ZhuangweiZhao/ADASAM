@@ -42,13 +42,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default=None)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--output-dir", default=None)
-    # ── V2 flags ──
-    p.add_argument("--use-v2", action="store_true", default=None,
-                   help="enable V2 training (point+box+prompt_token)")
-    p.add_argument("--sim-peak-ratio", type=float, default=None,
-                   help="fraction of GT points replaced with sim-peak (0.0-1.0)")
-    p.add_argument("--score-loss-weight", type=float, default=None,
-                   help="weight of the region-score supervision term")
+    # ── Dense Prompt Generator ──
+    p.add_argument("--num-queries", type=int, default=None,
+                   help="instance queries per image (prompt_generator.num_queries)")
     # ── CAT-SAM Adapter ──
     p.add_argument("--cat-adapter", action="store_true", default=None,
                    help="enable CAT-SAM feature adapter (bottleneck residual conv)")
@@ -83,13 +79,9 @@ def load_config(args: argparse.Namespace) -> dict:
         cfg["seed"] = args.seed
     if args.output_dir is not None:
         cfg["output_dir"] = args.output_dir
-    # ── V2 flags ──
-    if args.use_v2 is not None:
-        cfg["train"]["use_v2"] = True
-    if args.sim_peak_ratio is not None:
-        cfg["train"]["sim_peak_ratio"] = args.sim_peak_ratio
-    if args.score_loss_weight is not None:
-        cfg["train"]["score_loss_weight"] = args.score_loss_weight
+    # ── Dense Prompt Generator ──
+    if args.num_queries is not None:
+        cfg.setdefault("prompt_generator", {})["num_queries"] = args.num_queries
     # ── CAT-SAM Adapter ──
     if args.cat_adapter is not None:
         cfg["train"]["use_cat_adapter"] = True

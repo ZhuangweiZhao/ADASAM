@@ -1,10 +1,9 @@
 """
-原型构建与记忆单元测试 | Unit tests for PrototypeBuilder & PrototypeMemory.
-=============================================================================
+原型构建单元测试 | Unit tests for PrototypeBuilder.
+=====================================================
 
 覆盖 | Covers:
     - build: 形状 [256]、L2 归一化、空掩码→零、多 support 平均、判别性。
-    - memory: add/get/has/classes、running mean、归一化、缺失报错。
 纯合成张量, 无需真实数据/权重 | Pure synthetic tensors, no real data/weights needed.
 """
 
@@ -13,7 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from adasam.prototype import PrototypeBuilder, PrototypeMemory
+from adasam.prototype import PrototypeBuilder
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -72,42 +71,3 @@ def test_build_length_mismatch_raises():
     builder = PrototypeBuilder()
     with pytest.raises(ValueError):
         builder.build([torch.randn(256, 64, 64)], [])
-
-
-# ═══════════════════════════════════════════════════════════════════
-# PrototypeMemory
-# ═══════════════════════════════════════════════════════════════════
-
-def test_memory_add_get_has_classes():
-    """基本存取接口 | basic add/get/has/classes."""
-    mem = PrototypeMemory(embed_dim=4)
-    p = torch.tensor([1.0, 0.0, 0.0, 0.0])
-    mem.add(5, p)
-    assert mem.has(5) and not mem.has(6)
-    assert mem.classes() == [5]
-    assert torch.allclose(mem.get(5), p)
-
-
-def test_memory_running_mean_normalized():
-    """多次 add 同类 → running mean 且归一化 | repeated adds → normalized running mean."""
-    mem = PrototypeMemory(embed_dim=2)
-    mem.add(1, torch.tensor([1.0, 0.0]))
-    mem.add(1, torch.tensor([0.0, 1.0]))
-    got = mem.get(1)
-    assert got.norm().item() == pytest.approx(1.0, abs=1e-6)
-    # 两正交向量均值方向 = (1,1)/√2 | mean of two orthogonal unit vectors
-    assert torch.allclose(got, torch.tensor([0.5, 0.5]).div(torch.tensor(0.5**2 * 2) ** 0.5), atol=1e-5)
-
-
-def test_memory_missing_raises():
-    """查询未登记类 → KeyError | querying an absent class raises."""
-    mem = PrototypeMemory()
-    with pytest.raises(KeyError):
-        mem.get(99)
-
-
-def test_memory_bad_shape_raises():
-    """错误维度 → 报错 | wrong prototype dim raises."""
-    mem = PrototypeMemory(embed_dim=256)
-    with pytest.raises(ValueError):
-        mem.add(1, torch.randn(128))

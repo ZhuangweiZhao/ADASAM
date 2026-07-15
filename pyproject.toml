@@ -17,6 +17,7 @@ dependencies = [
     "opencv-python",
     "pycocotools",
     "pyyaml",
+    "scipy",              # Hungarian matching (linear_sum_assignment)
     "tqdm",
 ]
 

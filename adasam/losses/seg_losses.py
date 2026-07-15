@@ -109,3 +109,44 @@ def mask_iou(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-6) 
     inter = (p * g).sum(dim=1)
     union = p.sum(dim=1) + g.sum(dim=1) - inter
     return inter / (union + eps)
+
+
+def pairwise_sigmoid_bce_cost(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """成对 sigmoid BCE 代价 | Pairwise sigmoid BCE cost.
+
+    Mask2Former batch_sigmoid_ce_loss 风格: 逐像素正/负 BCE 与目标做 einsum 组合,
+    对每个 (预测 i, 目标 j) 给出平均 BCE, 用作匈牙利匹配代价。
+    Mask2Former batch_sigmoid_ce_loss style: per-pixel pos/neg BCE combined with the
+    targets via einsum, yielding the mean BCE for every (pred i, target j) pair.
+
+    :param logits: [N, HW] 预测 logits (调用方展平) | prediction logits (caller flattens).
+    :param targets: [M, HW] 软目标 ∈ [0,1] | soft targets in [0, 1].
+    :return: [N, M] 代价矩阵 | cost matrix.
+    """
+    hw = logits.shape[1]
+    tgt = targets.to(logits.dtype)
+    pos = F.binary_cross_entropy_with_logits(logits, torch.ones_like(logits), reduction="none")
+    neg = F.binary_cross_entropy_with_logits(logits, torch.zeros_like(logits), reduction="none")
+    cost = torch.einsum("nc,mc->nm", pos, tgt) + torch.einsum("nc,mc->nm", neg, 1.0 - tgt)
+    return cost / hw
+
+
+def pairwise_dice_cost(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """成对 Dice 代价 | Pairwise Dice cost.
+
+    与 :func:`dice_loss` 同一公式 (同 eps), 但对全部 N×M 组合向量化。
+    Same formula (and eps) as :func:`dice_loss`, vectorized over all N×M pairs.
+
+    :param logits: [N, HW] 预测 logits | prediction logits.
+    :param targets: [M, HW] 软目标 ∈ [0,1] | soft targets in [0, 1].
+    :return: [N, M] 代价矩阵 | cost matrix.
+    """
+    prob = torch.sigmoid(logits)
+    tgt = targets.to(prob.dtype)
+    inter = torch.einsum("nc,mc->nm", prob, tgt)
+    denom = prob.sum(dim=1)[:, None] + tgt.sum(dim=1)[None, :]
+    return 1.0 - (2.0 * inter + eps) / (denom + eps)

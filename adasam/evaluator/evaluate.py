@@ -14,8 +14,11 @@ The single evaluation entry of AdaSAM, strictly reusing the frozen Protocol V3
     6. 固定评估清单 (frozen manifest) → 跨运行/跨模型完全一致的 query 集合。
 
 模型输出如何成为实例 | How model output becomes instances:
-    PromptMaskDecoder 对每个"原型相似度峰值"点提示直接解码出一个实例掩码 —— 无需连通域分解、
-    无 oracle、无 GT 提示。Each prototype-sim peak point directly decodes one instance mask.
+    DensePromptGenerator 生成 N 个实例查询, SAM MaskDecoder 逐查询解码掩码,
+    score = sigmoid(objectness) × iou_pred 过滤 —— 无点提示、无 top-k、无 NMS、
+    无 oracle、无 GT 提示。The DensePromptGenerator emits N instance queries;
+    the SAM MaskDecoder decodes one mask per query; predictions are filtered by
+    score = sigmoid(objectness) × iou_pred — no point prompts, no top-k, no NMS.
 
 输出 | Output: <output_dir>/instance_metrics.json (schema 与 V3 完全一致 | identical schema).
 """
@@ -37,10 +40,10 @@ import torch
 from adasam.adapters import CATAdapter
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone
 from adasam.datasets import ISAID_CATEGORIES
-from adasam.decoder import PromptMaskDecoder
 from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
 from adasam.metrics import COCOInstanceEvaluator, greedy_match, instance_miou
+from adasam.model import AdaSAMModel, AdaSAMModelConfig
 from adasam.prototype import PrototypeBuilder
 from adasam.utils import set_seed
 from adasam.utils.transforms import preprocess_image
@@ -131,21 +134,19 @@ class Evaluator:
             self.logger.add_backend(ConsoleBackend())
             self.logger.add_backend(FileBackend(str(self.out_dir / "eval.jsonl")))
 
-        # ── 微调模型: backbone + decoder (从 checkpoint 恢复) | fine-tuned model ──
+        # ── 微调模型: backbone + AdaSAMModel (从 checkpoint 恢复) | fine-tuned model ──
+        if "prompt_generator" not in cfg:
+            raise ValueError(
+                f"old-format checkpoint (no 'prompt_generator' config section): "
+                f"{args.checkpoint} — pre-refactor checkpoints are incompatible with the "
+                f"Dense Prompt Generation pipeline; retrain with tools/train.py"
+            )
         sam_ft = build_mobile_sam(weights_path, mtype, self.device)
         self.backbone = MobileSAMBackbone(sam_ft.image_encoder, sam_ft.image_encoder.img_size).to(self.device)
         self.image_size = self.backbone.img_size
-        self.decoder = PromptMaskDecoder(
-            sam_ft.prompt_encoder, sam_ft.mask_decoder,
-            embed_dim=self.embed_dim, image_size=self.image_size,
-            top_k_points=args.top_k if args.top_k is not None else int(pcfg.get("top_k_points", 10)),
-            sim_threshold=args.sim_threshold if args.sim_threshold is not None
-            else float(pcfg.get("sim_threshold", 0.5)),
-            min_distance=int(pcfg.get("min_distance", 1)),
-            n_proto_tokens=int(pcfg.get("n_proto_tokens", 1)),
-        ).to(self.device)
-        self.decoder.load_state_dict(ckpt["model"])
-        self.decoder.eval()
+        self.model = AdaSAMModel(sam_ft, AdaSAMModelConfig.from_dict(cfg)).to(self.device)
+        self.model.load_state_dict(ckpt["model"], strict=True)
+        self.model.eval()
         self.proto_builder = PrototypeBuilder(self.embed_dim)
 
         # ── CAT-SAM Adapter (optional) | CAT-SAM 适配器 (可选) ──
@@ -238,8 +239,6 @@ class Evaluator:
     def build_prototypes(self, manifest_stems: Optional[set[str]]):
         rng = random.Random(self.args.seed)
         class_protos: dict[int, torch.Tensor] = {}
-        class_support_feats: dict[int, torch.Tensor] = {}           # V2: dense support features
-        class_support_masks: dict[int, list[torch.Tensor]] = {}     # V2: FG masks for correlation
         query_stems: set[str] = set(manifest_stems) if manifest_stems is not None else set()
 
         for cls, src_to_stems in sorted(self.class_index.items()):
@@ -247,7 +246,6 @@ class Evaluator:
             if len(sources) < self.k_shot + 1:
                 continue
 
-            cls_stems = {s for stems in src_to_stems.values() for s in stems}
             if manifest_stems is None:
                 # 首次: 确定性采样 query 源图 | first run: deterministic query sampling
                 n_q = min(self.args.per_class, len(sources) - self.k_shot)
@@ -280,12 +278,9 @@ class Evaluator:
                 masks.append(fg)
             if embs:
                 class_protos[cls] = self.proto_builder.build(embs, masks)
-                # V2: also store dense support features [K, C, gh, gw] + FG masks
-                class_support_feats[cls] = torch.stack(embs, dim=0)
-                class_support_masks[cls] = masks
                 self.logger.log_info("proto", f"class {cls:>2d} ({ISAID_CATEGORIES.get(cls,'?')}): "
                                               f"K={self.k_shot} from {len(support_sources)} scenes")
-        return class_protos, class_support_feats, class_support_masks, query_stems
+        return class_protos, query_stems
 
     # ── 逐 tile 推理 | Per-tile inference ──
 
@@ -294,29 +289,26 @@ class Evaluator:
         self,
         rgb: np.ndarray,
         class_protos: dict[int, torch.Tensor],
-        class_support_feats: dict[int, torch.Tensor] | None = None,
-        class_support_masks: dict[int, list[torch.Tensor]] | None = None,
     ):
         """→ {cls: [(mask bool[H,W], score float), ...]} | per-class predicted instances.
 
-        V2: when class_support_feats is provided, passes dense support features to the decoder
-        for the CorrelationBuilder → CandidateGenerator → PromptGenerator pipeline.
+        每类: 原型作为语义条件 → AdaSAMModel.predict (DPG 查询 → SAM 解码 → score 过滤)。
+        Per class: prototype as the semantic condition → AdaSAMModel.predict
+        (DPG queries → SAM decode → score filtering).
         """
         emb, meta = self._embed(rgb)
         preds: dict[int, list[tuple[np.ndarray, float]]] = defaultdict(list)
         for cls, proto in class_protos.items():
-            sf = class_support_feats.get(cls) if class_support_feats else None
-            sm = class_support_masks.get(cls) if class_support_masks else None
-            out = self.decoder(
-                emb, proto, meta.input_size, meta.original_size,
-                support_features=sf,
-                support_masks=sm,
+            masks, scores = self.model.predict(
+                emb, proto.to(self.device),
+                meta.input_size, meta.original_size,
+                score_thr=self.args.score_thr,
             )
-            for i in range(out.masks.shape[0]):
-                m = out.masks[i].cpu().numpy()
+            for i in range(masks.shape[0]):
+                m = masks[i].cpu().numpy()
                 if m.sum() < self.args.min_area:
                     continue
-                preds[cls].append((m, float(out.scores[i])))
+                preds[cls].append((m, float(scores[i])))
         return preds
 
     # ── 主流程 | Run ──
@@ -328,8 +320,7 @@ class Evaluator:
         manifest_existed = manifest_path.exists()
         manifest_stems = set(load_manifest(manifest_path)) if manifest_existed else None
 
-        class_protos, class_support_feats, class_support_masks, query_stems = \
-            self.build_prototypes(manifest_stems)
+        class_protos, query_stems = self.build_prototypes(manifest_stems)
         if not manifest_existed:
             save_manifest(manifest_path, sorted(query_stems))
             self.logger.log_info("manifest", f"generated fixed eval set: {len(query_stems)} tiles")
@@ -353,7 +344,7 @@ class Evaluator:
             evaluated_image_ids.append(image_id)
             rgb = self._load_tile_rgb(stem)
 
-            preds = self._predict_tile(rgb, class_protos, class_support_feats, class_support_masks)
+            preds = self._predict_tile(rgb, class_protos)
             for cls, insts in preds.items():
                 for mask, score in insts:
                     self.ft_eval.add_prediction(image_id, cls, mask, score)
@@ -502,8 +493,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--manifest", default=None)
     p.add_argument("--iou-thr", type=float, default=0.5)
     p.add_argument("--min-area", type=int, default=16)
-    p.add_argument("--top-k", type=int, default=None, help="override matcher top-k points")
-    p.add_argument("--sim-threshold", type=float, default=None, help="override matcher sim threshold")
+    p.add_argument("--score-thr", type=float, default=0.3,
+                   help="filter threshold on sigmoid(objectness) × iou_pred")
     p.add_argument("--no-zero-shot", action="store_true")
     p.add_argument("--zs-points-per-side", type=int, default=16, help="everything-mode grid density")
     p.add_argument("--limit", type=int, default=0, help="cap query tiles (debug only, 0 = full)")

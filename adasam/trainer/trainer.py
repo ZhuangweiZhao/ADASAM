@@ -5,15 +5,20 @@
 AdaSAM 的**唯一**训练入口 (单一 Trainer 类, 无 if-mode 分支)。
 The single training entry point of AdaSAM (one Trainer class, no if-mode branches).
 
-范式 | Paradigm — teacher forcing:
-    - 冻结 MobileSAM 图像编码器; 只训练 PromptMaskDecoder (PrototypeAdapter + MaskDecoder)。
-      Frozen MobileSAM image encoder; only PromptMaskDecoder trains.
-    - 每个 episode: 从 K 张 support 构建类原型; 在 query tile 上, 为每个 GT 实例在其内部
-      采样一个提示点 (距离变换峰值) → 解码该实例掩码 → focal+dice 监督。
-      Per episode: build a class prototype from K supports; on the query tile, sample one
-      interior point per GT instance (distance-transform peak) → decode that instance → supervise.
-    - 推理时提示点改由原型相似度峰值给出 (adasam.decoder.PromptMaskDecoder.forward), 与训练
-      共用 decode() 核心。At inference, prompts come from prototype-sim peaks, sharing decode().
+范式 | Paradigm — Hungarian set prediction (Mask2Former 式):
+    - 冻结 MobileSAM 图像编码器; 训练 DensePromptGenerator + SAM MaskDecoder
+      (+ 可选 CATAdapter)。Frozen MobileSAM encoder; DensePromptGenerator +
+      SAM MaskDecoder (+ optional CATAdapter) train.
+    - 每个 episode: K 张 support → 类原型 (仅语义条件); query 特征 + 原型 →
+      DPG 生成 N 个实例查询 → SAM 解码 N 个掩码 → 与该类全部 GT 实例做匈牙利
+      匹配 → focal+dice+objectness+IoU-head 监督 (含 DPG 逐层深监督)。
+      Per episode: prototype from K supports (semantic condition only); DPG
+      generates N instance queries from query features + prototype → SAM
+      decodes N masks → Hungarian matching against all class GT instances →
+      focal+dice+objectness+IoU-head supervision (with DPG deep supervision).
+    - 无点提示、无框提示、无 top-k、无 NMS — 训练与推理共用 AdaSAMModel。
+      No point/box prompts, no top-k, no NMS — training and inference share
+      the same AdaSAMModel forward.
 """
 
 from __future__ import annotations
@@ -23,8 +28,6 @@ import random
 from pathlib import Path
 from typing import Optional
 
-import cv2
-import numpy as np
 import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -33,15 +36,13 @@ from tqdm import tqdm
 from adasam.adapters import CATAdapter
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone
 from adasam.datasets import EpisodeSampler, ISAIDInstanceDataset
-from adasam.decoder import PromptMaskDecoder
 from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
-from adasam.losses import combined_loss, dice_loss, focal_loss, mask_iou
+from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
+from adasam.model import AdaSAMModel, AdaSAMModelConfig
 from adasam.prototype import PrototypeBuilder
-from adasam.prototype.support_features import extract_support_features
-from adasam.prototype.matcher import similarity_map
 from adasam.utils import set_seed
-from adasam.utils.transforms import preprocess_image, resize_mask
+from adasam.utils.transforms import preprocess_image
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -78,35 +79,29 @@ class Trainer:
             min_tiles=int(config["fewshot"].get("min_tiles", 30)),
         )
 
-        # ── 模型装配 (一次构建 Sam, 分发到 backbone/decoder) | Assemble model (one Sam) ──
+        # ── 模型装配 (一次构建 Sam, 分发到 backbone/model) | Assemble model (one Sam) ──
         ckpt = self._resolve(config["backbone"]["checkpoint"])
         sam = build_mobile_sam(ckpt, config["backbone"].get("model_type", "vit_t"), self.device)
         self.backbone = MobileSAMBackbone(sam.image_encoder, sam.image_encoder.img_size).to(self.device)
         self.image_size = self.backbone.img_size
 
-        proto_cfg = config.get("prototype", {})
-        self.embed_dim = int(proto_cfg.get("embed_dim", 256))
-        self.decoder = PromptMaskDecoder(
-            sam.prompt_encoder, sam.mask_decoder,
-            embed_dim=self.embed_dim, image_size=self.image_size,
-            top_k_points=int(proto_cfg.get("top_k_points", 10)),
-            sim_threshold=float(proto_cfg.get("sim_threshold", 0.5)),
-            min_distance=int(proto_cfg.get("min_distance", 1)),
-            n_proto_tokens=int(proto_cfg.get("n_proto_tokens", 1)),
-            train_mask_decoder=True, train_prompt_encoder=False,
-        ).to(self.device)
+        self.embed_dim = int(config.get("prototype", {}).get("embed_dim", 256))
+        self.model = AdaSAMModel(sam, AdaSAMModelConfig.from_dict(config)).to(self.device)
+        self.num_queries = self.model.num_queries
         self.proto_builder = PrototypeBuilder(self.embed_dim)
 
-        # ── 优化器 / 调度器 (仅可训练参数) | Optimizer / scheduler (trainable params only) ──
+        # ── 匹配器 / 损失准则 | Matcher / criterion ──
+        loss_cfg = config.get("loss", {})
+        self.criterion = SetCriterion(
+            HungarianMatcher(MatcherConfig.from_dict(loss_cfg)),
+            CriterionConfig.from_dict(loss_cfg),
+        )
+
+        # ── 训练配置 | Train config ──
         tcfg = config["train"]
         self.epochs = int(tcfg.get("epochs", 50))
         self.episodes_per_epoch = int(tcfg.get("episodes_per_epoch", 200))
         self.grad_clip = float(tcfg.get("grad_clip", 1.0))
-        self.max_instances = int(tcfg.get("max_instances_per_query", 32))
-        self.iou_loss_weight = float(tcfg.get("iou_loss_weight", 1.0))
-        self.score_loss_weight = float(tcfg.get("score_loss_weight", 0.1))
-        self.use_v2 = bool(tcfg.get("use_v2", False))
-        self.sim_peak_ratio = float(tcfg.get("sim_peak_ratio", 0.0))  # 0.0=off, 0.3=30% sim-peak
 
         # ── CAT-SAM Adapter (optional) | CAT-SAM 适配器 (可选) ──
         self.cat_adapter = None
@@ -117,10 +112,23 @@ class Trainer:
                 bottleneck=int(adapter_cfg.get("bottleneck", 64)),
             ).to(self.device)
 
-        params = [p for p in self.decoder.parameters() if p.requires_grad]
+        # ── 优化器: 全新模块全 lr, 预训练 MaskDecoder 降 lr | Optimizer param groups ──
+        lr = float(tcfg.get("lr", 1e-4))
+        sam_mult = float(tcfg.get("sam_decoder_lr_mult", 0.1))
+        param_groups = [{"params": list(self.model.dpg.parameters()), "lr": lr}]
+        if self.model.sam_decoder.proto_adapter is not None:
+            param_groups.append(
+                {"params": list(self.model.sam_decoder.proto_adapter.parameters()), "lr": lr}
+            )
+        param_groups.append({
+            "params": [p for p in self.model.sam_decoder.mask_decoder.parameters()
+                       if p.requires_grad],
+            "lr": lr * sam_mult,
+        })
         if self.cat_adapter is not None:
-            params += list(self.cat_adapter.parameters())
-        self.optimizer = AdamW(params, lr=float(tcfg.get("lr", 1e-4)),
+            param_groups.append({"params": list(self.cat_adapter.parameters()), "lr": lr})
+        self._trainable = [p for g in param_groups for p in g["params"]]
+        self.optimizer = AdamW(param_groups, lr=lr,
                                weight_decay=float(tcfg.get("weight_decay", 1e-4)))
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.epochs)
 
@@ -132,9 +140,10 @@ class Trainer:
         if not self.logger.backends:
             self.logger.add_backend(ConsoleBackend())
             self.logger.add_backend(FileBackend(str(self.out_dir / "train.jsonl")))
-        n_train = sum(p.numel() for p in params) / 1e6
+        n_train = sum(p.numel() for p in self._trainable) / 1e6
         self.logger.log_info("init",
                              f"device={self.device}, trainable={n_train:.2f}M, "
+                             f"queries={self.num_queries}, "
                              f"classes={self.sampler.eligible_classes()}, out={self.out_dir}")
         if self.cat_adapter is not None:
             self.logger.log_info("adapter",
@@ -151,26 +160,46 @@ class Trainer:
     # ── 嵌入 | Embedding ──
 
     def _embed(self, image: torch.Tensor) -> torch.Tensor:
-        """tile 图像 [3,H,W]∈[0,1] → 图像嵌入 [1,256,64,64] (冻结, 无梯度) | frozen embedding."""
+        """tile 图像 [3,H,W]∈[0,1] → 图像嵌入 [1,256,64,64] (冻结骨干 + 可训练适配器)。
+        Frozen-backbone embedding, adapted by the trainable CATAdapter if enabled."""
         x, _ = preprocess_image(image)
         emb = self.backbone(x.unsqueeze(0).to(self.device))["image_embedding"]
         if self.cat_adapter is not None:
             emb = self.cat_adapter(emb)
         return emb
 
-    # ── 原型构建 | Prototype build ──
+    # ── 原型构建 (仅语义条件) | Prototype build (semantic condition only) ──
 
-    def _build_prototype(self, support_indices: list[int], class_id: int) -> torch.Tensor:
-        """由 K 张 support 构建类原型 | Build class prototype from K supports."""
-        embeddings, masks = [], []
+    def _build_prototype(self, support_indices: list[int], class_id: int) -> Optional[torch.Tensor]:
+        """由 K 张 support 构建类原型 | Build class prototype from K supports.
+
+        support 批量过冻结骨干, 再过可训练 CATAdapter (Siamese, 梯度经原型流入适配器)。
+        Supports are batch-encoded by the frozen backbone, then pass the trainable
+        CATAdapter (Siamese; gradients flow into the adapter through the prototype).
+
+        :return: [256] L2 归一化原型, 无有效 support 时 None | prototype or None.
+        """
+        images, masks = [], []
         for idx in support_indices:
             sample = self.dataset[idx]
             fg = self._class_foreground(sample["instances"], class_id, self.tile_size)
             if fg is None:
                 continue
-            embeddings.append(self._embed(sample["image"])[0])   # [256,64,64]
+            x, _ = preprocess_image(sample["image"])
+            images.append(x.to(self.device))
             masks.append(fg)
-        return self.proto_builder.build(embeddings, masks)
+        if not images:
+            return None
+
+        feats = self.backbone(torch.stack(images, dim=0))["image_embedding"]  # [K,256,64,64]
+        if self.cat_adapter is not None:
+            feats = self.cat_adapter(feats)
+        prototype = self.proto_builder.build(
+            [feats[k] for k in range(feats.shape[0])], masks
+        )
+        if float(prototype.detach().norm()) == 0.0:
+            return None
+        return prototype
 
     @staticmethod
     def _class_foreground(instances: list[dict], class_id: int, size: int) -> Optional[torch.Tensor]:
@@ -183,352 +212,54 @@ class Trainer:
                 found = True
         return fg.float() if found else None
 
-    # ── V2: 支持特征 + 原型 | Support features + prototype ──
-
-    def _build_support_features(
-        self, support_indices: list[int], class_id: int
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]]:
-        """由 K 张 support 提取密集特征 + 原型 + FG masks | Extract dense features + prototype + FG masks.
-
-        :return: (support_features [K,256,64,64], prototype [256], fg_masks [K, H, W]),
-            or None if no valid supports. fg_masks are at tile resolution for downstream
-            FG-masked pooling in correlation.
-        """
-        images, masks = [], []
-        for idx in support_indices:
-            sample = self.dataset[idx]
-            fg = self._class_foreground(sample["instances"], class_id, self.tile_size)
-            if fg is None:
-                continue
-            # Preprocess image → [3, 1024, 1024] normalized, move to device
-            x, _ = preprocess_image(sample["image"])
-            images.append(x.to(self.device))
-            masks.append(fg)
-
-        if not images:
-            return None
-
-        # Run backbone on all support images (batched for efficiency)
-        batch = torch.stack(images, dim=0)  # [K, 3, 1024, 1024]
-        feats = self.backbone(batch)["image_embedding"]  # [K, 256, 64, 64]
-        if self.cat_adapter is not None:
-            feats = self.cat_adapter(feats)
-        support_feats = feats
-        prototype = self.proto_builder.build(
-            [support_feats[k] for k in range(support_feats.shape[0])], masks
-        )
-        return support_feats, prototype, masks
-
-    # ── V2: Sim-peak 点 (用于 bridge train-test gap) | Sim-peak point for 30% replacement ──
-
-    def _sim_peak_point(
-        self, prototype: torch.Tensor, query_emb: torch.Tensor, gt_mask: torch.Tensor,
-    ) -> tuple[float, float]:
-        """[Legacy V1] 在 GT mask 区域内找到 prototype-query 相似度的峰值点 (tile 帧坐标) |
-        Find the similarity peak within the GT mask region (tile-frame coords).
-
-        Uses V1's similarity_map (prototype vs query). For V2 training, see _sim_peak_point_v2.
-        """
-        sim = similarity_map(query_emb[0], prototype)       # [64, 64]
-        gt_grid = resize_mask(gt_mask, sim.shape)            # [64, 64]
-        sim_masked = sim * gt_grid.to(sim.device)
-        if sim_masked.max() <= 0:
-            # Fallback: use global max
-            flat = int(sim.argmax())
-        else:
-            flat = int(sim_masked.argmax())
-        gy, gx = divmod(flat, sim.shape[1])
-        stride = self.image_size / sim.shape[1]              # 1024/64 = 16
-        cx = (float(gx) + 0.5) * stride                      # input-frame x
-        cy = (float(gy) + 0.5) * stride                      # input-frame y
-        # Map to tile frame
-        sx = self.tile_size / self.image_size
-        sy = self.tile_size / self.image_size
-        return cx * sx, cy * sy
-
-    def _sim_peak_point_v2(
-        self, sim_agg: torch.Tensor, gt_mask: torch.Tensor,
-    ) -> tuple[float, float]:
-        """在 GT mask 区域内找到 V2 sim_tensor 聚合图的峰值点 (tile 帧坐标) |
-        Find the V2 sim_tensor aggregate peak within the GT mask (tile-frame coords).
-
-        Uses the max-aggregated V2 similarity_tensor (per-support sub-prototype vs query),
-        so the peaks match what CandidateGenerator sees during inference.
-
-        :param sim_agg: [64, 64] aggregated sim_tensor (max over K supports) at grid resolution.
-        :param gt_mask: [H, W] float GT instance mask at tile resolution.
-        :return: (x, y) in tile frame.
-        """
-        H, W_grid = sim_agg.shape
-        gt_grid = resize_mask(gt_mask, (H, W_grid))          # [64, 64]
-        sim_masked = sim_agg * gt_grid.to(sim_agg.device)
-        if sim_masked.max() <= 0:
-            flat = int(sim_agg.argmax())
-        else:
-            flat = int(sim_masked.argmax())
-        gy, gx = divmod(flat, W_grid)
-        # Grid → tile frame: grid coord * stride * (tile/image)
-        stride = self.image_size / W_grid                      # 1024/64 = 16
-        cx = (float(gx) + 0.5) * stride                        # input-frame x
-        cy = (float(gy) + 0.5) * stride                        # input-frame y
-        sx = self.tile_size / self.image_size
-        return cx * sx, cy * sx
-
-    # ── V2: GT 教师提示 (点 + 框 + 掩码) | Teacher-forced GT (point + box + mask) ──
-
-    def _query_targets_v2(
-        self, query_sample: dict, class_id: int
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """query tile 内每个类实例 → (输入帧点, 输入帧框 xyxy, labels, GT 掩码) |
-        Per-instance GT → (input-frame points, input-frame boxes xyxy, labels, GT masks).
-
-        :return: (coords_in [N,2], boxes_in [N,4], labels [N], gt_masks [N,H,W]) or None.
-        """
-        insts = [i for i in query_sample["instances"] if i["category_id"] == class_id]
-        if not insts:
-            return None
-        if len(insts) > self.max_instances:
-            insts = self._rng.sample(insts, self.max_instances)
-
-        coords_tile, boxes_tile_xyxy, gt_masks = [], [], []
-        for inst in insts:
-            xy = self._interior_point(inst["mask"])
-            if xy is None:
-                continue
-
-            # Bbox: COCO xywh → xyxy in tile frame
-            bx, by, bw, bh = inst["bbox"]
-            if bw <= 0 or bh <= 0:
-                continue
-
-            coords_tile.append(xy)
-            boxes_tile_xyxy.append((bx, by, bx + bw, by + bh))
-            gt_masks.append(inst["mask"].float())
-
-        if not coords_tile:
-            return None
-
-        # Scale to input frame (1024²)
-        coords_tile_t = torch.tensor(coords_tile, dtype=torch.float32)  # [N, 2]
-        coords_in = PromptMaskDecoder.scale_points(
-            coords_tile_t, (self.tile_size, self.tile_size), (self.image_size, self.image_size)
-        )
-
-        # Box: scale each corner separately
-        boxes_tile_t = torch.tensor(boxes_tile_xyxy, dtype=torch.float32)  # [N, 4]
-        corners_tile = boxes_tile_t.reshape(-1, 2)  # [2N, 2]
-        corners_in = PromptMaskDecoder.scale_points(
-            corners_tile, (self.tile_size, self.tile_size), (self.image_size, self.image_size)
-        )
-        boxes_in = corners_in.reshape(-1, 4)  # [N, 4] xyxy in input frame
-
-        labels = torch.ones(coords_in.shape[0], dtype=torch.float32, device=self.device)
-        gt = torch.stack(gt_masks, dim=0).to(self.device)
-        return coords_in.to(self.device), boxes_in.to(self.device), labels, gt
-
-    # ── GT 教师提示点 + 掩码 (原版, backward compat) | Teacher-forced GT points + masks (legacy) ──
-
-    def _query_targets(
-        self, query_sample: dict, class_id: int
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """query tile 内每个类实例 → (输入帧提示点, labels, GT 掩码) | per-instance points + masks."""
-        insts = [i for i in query_sample["instances"] if i["category_id"] == class_id]
-        if not insts:
-            return None
-        if len(insts) > self.max_instances:
-            insts = self._rng.sample(insts, self.max_instances)
-
-        coords_tile, gt_masks = [], []
-        for inst in insts:
-            xy = self._interior_point(inst["mask"])
-            if xy is None:
-                continue
-            coords_tile.append(xy)
-            gt_masks.append(inst["mask"].float())
-        if not coords_tile:
-            return None
-
-        coords_tile_t = torch.tensor(coords_tile, dtype=torch.float32, device=self.device)  # [N,2]
-        coords_in = PromptMaskDecoder.scale_points(
-            coords_tile_t, (self.tile_size, self.tile_size), (self.image_size, self.image_size)
-        )
-        labels = torch.ones(coords_in.shape[0], dtype=torch.float32, device=self.device)
-        gt = torch.stack(gt_masks, dim=0).to(self.device)               # [N,H,W]
-        return coords_in, labels, gt
-
-    @staticmethod
-    def _interior_point(mask: torch.Tensor) -> Optional[tuple[float, float]]:
-        """实例内部最深点 (距离变换峰值), tile 帧 (x,y) | deepest interior point (distance transform)."""
-        m = mask.cpu().numpy().astype(np.uint8)
-        if m.sum() == 0:
-            return None
-        dt = cv2.distanceTransform(m, cv2.DIST_L2, 5)
-        flat = int(dt.argmax())
-        y, x = divmod(flat, m.shape[1])
-        return float(x), float(y)
-
     # ── 单 episode 训练 | Single-episode training step ──
 
     def _train_episode(self, episode: dict) -> Optional[dict]:
         cls = episode["class_id"]
 
-        if self.use_v2:
-            return self._train_episode_v2(episode, cls)
-
-        # ── Legacy V1 path (point-only, no box, no prompt token) ──
+        # 1. 原型 (语义条件) | prototype (semantic condition)
         prototype = self._build_prototype(episode["support_indices"], cls)
-
-        query = self.dataset[episode["query_index"]]
-        targets = self._query_targets(query, cls)
-        if targets is None:
+        if prototype is None:
             return None
-        coords, labels, gt = targets                        # [N,2],[N],[N,H,W]
 
-        emb = self._embed(query["image"])                   # [1,256,64,64]
-        low_res, iou_pred = self.decoder.decode(emb, prototype, coords, labels)
-        logits = self.decoder.upscale_logits(
-            low_res, (self.image_size, self.image_size), (self.tile_size, self.tile_size)
-        )                                                    # [N,H,W]
+        # 2. query GT 实例 (该类全部, 超出查询数时随机截断) | class GT instances
+        query = self.dataset[episode["query_index"]]
+        gt_list = [i["mask"] for i in query["instances"] if i["category_id"] == cls]
+        if not gt_list:
+            return None
+        if len(gt_list) > self.num_queries:
+            gt_list = self._rng.sample(gt_list, self.num_queries)
+        gt_masks = torch.stack([m.float() for m in gt_list], dim=0).to(self.device)  # [M,H,W]
 
-        fl = focal_loss(logits, gt)
-        dl = dice_loss(logits, gt)
-        iou_target = mask_iou(torch.sigmoid(logits), gt)     # [N] detached
-        iou_head_loss = torch.nn.functional.mse_loss(iou_pred[:, 0], iou_target)
-        loss = fl + dl + self.iou_loss_weight * iou_head_loss
+        # 3. 前向 + 匹配损失 | forward + matched loss
+        emb = self._embed(query["image"])                        # [1,256,64,64]
+        dpg_out, low_res, iou_pred = self.model.forward_train(emb, prototype)
+        losses = self.criterion(low_res[:, 0], iou_pred[:, 0], dpg_out, gt_masks)
 
+        # 4. 反传 | backward
         self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            [p for p in self.decoder.parameters() if p.requires_grad], self.grad_clip
-        )
+        losses["loss"].backward()
+        torch.nn.utils.clip_grad_norm_(self._trainable, self.grad_clip)
         self.optimizer.step()
 
         return {
-            "loss": float(loss.detach()), "focal": float(fl.detach()),
-            "dice": float(dl.detach()), "iou_head": float(iou_head_loss.detach()),
-            "pred_iou": float(iou_target.mean()), "n_inst": gt.shape[0],
-        }
-
-    # ── V2 训练 (point + box + prompt_token + region_score) ──
-
-    def _train_episode_v2(self, episode: dict, cls: int) -> Optional[dict]:
-        # 1. Extract support features + prototype + FG masks
-        result = self._build_support_features(episode["support_indices"], cls)
-        if result is None:
-            return None
-        support_feats, prototype, support_fg_masks = result
-
-        # 2. Query targets (point + box + mask)
-        query = self.dataset[episode["query_index"]]
-        targets = self._query_targets_v2(query, cls)
-        if targets is None:
-            return None
-        coords_in, boxes_in, labels, gt_masks = targets       # all on device
-
-        # 3. Embed query
-        emb = self._embed(query["image"])                      # [1,256,64,64]
-
-        # 4. Compute sim_tensor (V2 per-support similarity — used for both
-        #    sim-peak replacement and per-instance support-sim pooling below)
-        sim_tensor = self.decoder.correlation.build(
-            support_feats, prototype, emb, support_masks=support_fg_masks,
-        )  # [K, gh, gw]
-        # Aggregate across supports (mean, more robust than max to outlier supports)
-        sim_agg = sim_tensor.mean(dim=0)                    # [64, 64]
-
-        # 5. Sim-peak replacement (bridge train-test gap)
-        #    Uses V2 sim_tensor (not V1 similarity_map) so the peaks match what
-        #    CandidateGenerator will produce during inference.
-        if self.sim_peak_ratio > 0:
-            for i in range(coords_in.shape[0]):
-                if random.random() < self.sim_peak_ratio:
-                    px, py = self._sim_peak_point_v2(sim_agg, gt_masks[i])
-                    sx = self.image_size / self.tile_size
-                    coords_in[i, 0] = px * sx
-                    coords_in[i, 1] = py * sx
-
-        # 6. PromptGenerator: pool query features per GT instance, generate prompts
-        N = coords_in.shape[0]
-        C = self.embed_dim
-        gh, gw = self.decoder.grid_size                       # (64, 64)
-
-        query_feats_pooled = []
-        per_support_sim_list = []
-
-        for i in range(N):
-            # Resize GT mask to grid for region pooling
-            mask_grid = resize_mask(gt_masks[i], (gh, gw)).to(emb.device)
-            grid_bool = mask_grid > 0.5
-
-            if grid_bool.sum() == 0:
-                # Fallback: single grid cell at centroid
-                gy = int(coords_in[i, 1].item() / self.decoder.stride)
-                gx = int(coords_in[i, 0].item() / self.decoder.stride)
-                gy = max(0, min(gh - 1, gy))
-                gx = max(0, min(gw - 1, gx))
-                grid_bool = torch.zeros(gh, gw, dtype=torch.bool, device=emb.device)
-                grid_bool[gy, gx] = True
-
-            qf = emb[0, :, grid_bool].mean(dim=1)            # [C]
-            query_feats_pooled.append(qf)
-
-            pss = sim_tensor[:, grid_bool].mean(dim=1)       # [K]
-            per_support_sim_list.append(pss)
-
-        query_feats_pooled = torch.stack(query_feats_pooled, dim=0)    # [N, C]
-        per_support_sim = torch.stack(per_support_sim_list, dim=0)     # [N, K]
-
-        # PromptGenerator → region_score only (point/box are pass-through from GT).
-        # prompt_token = raw prototype (no delta) — same as inference, avoids train-test gap.
-        _, _, _, region_score = self.decoder.prompt_generator(
-            prototype=prototype,
-            candidate_coords=coords_in,
-            candidate_boxes=boxes_in,
-            candidate_query_features=query_feats_pooled,
-            candidate_per_support_sim=per_support_sim,
-            candidate_scores_raw=per_support_sim.mean(dim=1),
-        )
-        prompt_token = prototype.unsqueeze(0).expand(coords_in.shape[0], -1).contiguous()
-
-        # 6. Decode V2
-        low_res, iou_pred = self.decoder.decode_v2(
-            emb, coords_in, labels, boxes_in,
-            prompt_token=prompt_token,
-        )
-
-        # 7. Loss
-        logits = self.decoder.upscale_logits(
-            low_res, (self.image_size, self.image_size), (self.tile_size, self.tile_size)
-        )                                                       # [N, H, W]
-
-        fl = focal_loss(logits, gt_masks)
-        dl = dice_loss(logits, gt_masks)
-        iou_target = mask_iou(torch.sigmoid(logits), gt_masks)  # [N] detached
-        iou_head_loss = torch.nn.functional.mse_loss(iou_pred[:, 0], iou_target)
-        score_loss = torch.nn.functional.mse_loss(region_score[:, 0], iou_target)
-
-        loss = (fl + dl + self.iou_loss_weight * iou_head_loss
-                + self.score_loss_weight * score_loss)
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            [p for p in self.decoder.parameters() if p.requires_grad], self.grad_clip
-        )
-        self.optimizer.step()
-
-        return {
-            "loss": float(loss.detach()), "focal": float(fl.detach()),
-            "dice": float(dl.detach()), "iou_head": float(iou_head_loss.detach()),
-            "score_loss": float(score_loss.detach()),
-            "pred_iou": float(iou_target.mean()), "n_inst": gt_masks.shape[0],
+            "loss": float(losses["loss"].detach()),
+            "focal": float(losses["focal"]),
+            "dice": float(losses["dice"]),
+            "obj": float(losses["obj"]),
+            "iou_head": float(losses["iou_head"]),
+            "aux": float(losses["aux"]),
+            "n_matched": float(losses["n_matched"]),
+            "mean_obj_matched": float(losses["mean_obj_matched"]),
+            "mean_obj_unmatched": float(losses["mean_obj_unmatched"]),
+            "n_inst": gt_masks.shape[0],
         }
 
     # ── 主循环 | Main loop ──
 
     def train(self) -> Path:
         """运行训练, 返回最优 checkpoint 路径 | Run training, return best checkpoint path."""
-        self.decoder.train()
+        self.model.train()
         best_loss = float("inf")
         best_path = self.out_dir / "best_model.pt"
 
@@ -544,14 +275,19 @@ class Trainer:
                 for k, v in metrics.items():
                     agg[k] = agg.get(k, 0.0) + v
                 pbar.set_postfix(loss=f"{metrics['loss']:.3f}")
+            epoch_lr = self.optimizer.param_groups[0]["lr"]      # 本轮实际 lr | lr used this epoch
             self.scheduler.step()
 
             mean = {k: v / max(n, 1) for k, v in agg.items()}
+            mean["lr"] = epoch_lr
             for k, v in mean.items():
                 self.logger.log_metric(f"train/{k}", v, step=epoch, phase="train")
             self.logger.log_info("epoch",
                                  f"epoch {epoch}: loss={mean.get('loss', 0):.4f} "
-                                 f"dice={mean.get('dice', 0):.4f} n={n}", step=epoch)
+                                 f"dice={mean.get('dice', 0):.4f} "
+                                 f"obj_matched={mean.get('mean_obj_matched', 0):.3f} "
+                                 f"obj_unmatched={mean.get('mean_obj_unmatched', 0):.3f} "
+                                 f"n={n}", step=epoch)
 
             self._save(self.out_dir / "last_model.pt", epoch, mean)
             if mean.get("loss", float("inf")) < best_loss:
@@ -567,7 +303,7 @@ class Trainer:
         """保存 checkpoint (统一 schema, 无条件键) | Save checkpoint (uniform schema)."""
         ckpt = {
             "epoch": epoch,
-            "model": self.decoder.state_dict(),
+            "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "config": self.cfg,
             "metrics": metrics,

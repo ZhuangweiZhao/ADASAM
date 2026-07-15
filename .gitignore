@@ -26,3 +26,4 @@ output/
 .vscode/
 .idea/
 thirdparty/cat-sam/
+thirdparty/Mask2Former/

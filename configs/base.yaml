@@ -24,33 +24,56 @@ fewshot:
   min_tiles: 30                                       # exclude classes with < 30 tiles
   train_mode: novel                                   # base | novel | all (training class set)
 
-# ── Prototype / matcher ──
+# ── Prototype (semantic condition only | 仅语义条件, 不负责定位) ──
 prototype:
   embed_dim: 256                                      # SAM prompt-token dim
-  top_k_points: 10                                    # similarity peaks → point prompts
-  sim_threshold: 0.5
-  min_distance: 1                                     # NMS radius (grid cells) between peaks
-  n_proto_tokens: 1                                   # prototype tokens injected per prompt
+
+# ── Dense Prompt Generator (核心创新 | core innovation) ──
+prompt_generator:
+  num_queries: 64                                     # N instance queries per image
+  num_layers: 3                                       # masked cross-attn decoder layers
+  num_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
+
+# ── SAM decoder wrapper ──
+decoder:
+  use_proto_token: true                               # prepend zero-init prototype token
+  train_mask_decoder: true
+  decode_chunk_size: 0                                # 0 = all N at once; 32 if OOM
+
+# ── Loss / Hungarian matching ──
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  objectness_weight: 2.0
+  iou_weight: 1.0
+  aux_weight: 1.0                                     # DPG deep-supervision bucket
+  eos_coef: 0.1                                       # unmatched-query BCE down-weight
+  focal_gamma: 5.0                                    # remote-sensing constants (frozen)
+  focal_eps: 1.0e-4
+  match_cost_objectness: 2.0
+  match_cost_mask: 5.0
+  match_cost_dice: 5.0
 
 # ── Training ──
 train:
   epochs: 50
   episodes_per_epoch: 200
   lr: 1.0e-4
+  sam_decoder_lr_mult: 0.1                            # pretrained MaskDecoder gets lr*mult
   weight_decay: 1.0e-4
   grad_clip: 1.0
   device: cuda
-  max_instances_per_query: 32                         # cap GT instances supervised per query
-  iou_loss_weight: 1.0                                # weight of the IoU-head MSE term
   # ── CAT-SAM Adapter ──
-  use_cat_adapter: false                               # enable CAT-SAM feature adapter
+  use_cat_adapter: false                              # enable CAT-SAM feature adapter
   cat_adapter:
-    bottleneck: 64                                     # adapter bottleneck dimension
+    bottleneck: 64                                    # adapter bottleneck dimension
 
 # ── Evaluation (Protocol V3) ──
 eval:
   iou_thr: 0.5
-  score_thr: 0.5
+  score_thr: 0.3                                      # filters sigmoid(obj) × iou_pred
   min_area: 16
   per_class: 20
 

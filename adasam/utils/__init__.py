@@ -1,4 +1,4 @@
-"""adasam.utils — 通用工具 | Shared utilities (seed, transforms, candidate generator, NMS)."""
+"""adasam.utils — 通用工具 | Shared utilities (seed, transforms)."""
 
 from adasam.utils.seed import set_seed, get_worker_init_fn
 from adasam.utils.transforms import (
@@ -9,15 +9,6 @@ from adasam.utils.transforms import (
     preprocess_image,
     resize_longest_side,
     resize_mask,
-)
-from adasam.utils.candidate_generator import (
-    CandidateGenerator,
-    CandidateSet,
-    generate_candidates,
-)
-from adasam.utils.nms import (
-    mask_iou_nms,
-    mask_iou_nms_batch,
 )
 
 __all__ = [
@@ -30,9 +21,4 @@ __all__ = [
     "preprocess_image",
     "resize_longest_side",
     "resize_mask",
-    "CandidateGenerator",
-    "CandidateSet",
-    "generate_candidates",
-    "mask_iou_nms",
-    "mask_iou_nms_batch",
 ]
