@@ -29,6 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from adasam.adapters import CATAdapter
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone
 from adasam.datasets import ISAID_CATEGORIES, ISAIDInstanceDataset
 from adasam.decoder import PromptMaskDecoder
@@ -116,6 +117,19 @@ def main():
     decoder.load_state_dict(ckpt["model"])
     decoder.eval()
 
+    # ── CAT-SAM Adapter (可选, 与 evaluate.py 行为一致) | optional, mirrors evaluate.py ──
+    cat_adapter = None
+    if "cat_adapter" in ckpt:
+        adapter_cfg = cfg.get("train", {}).get("cat_adapter", {})
+        cat_adapter = CATAdapter(
+            dim=embed_dim,
+            bottleneck=int(adapter_cfg.get("bottleneck", 64)),
+        ).to(device)
+        cat_adapter.load_state_dict(ckpt["cat_adapter"])
+        cat_adapter.eval()
+        print(f"[vis] CAT-Adapter loaded: "
+              f"params={sum(p.numel() for p in cat_adapter.parameters()):,}")
+
     proto_builder = PrototypeBuilder(embed_dim)
     correlation = CorrelationBuilder()
     candidate_gen = CandidateGenerator(
@@ -194,7 +208,10 @@ def main():
 
     def embed(rgb: np.ndarray):
         x, meta = preprocess_image(rgb)
-        emb = backbone(x.unsqueeze(0).to(device))["image_embedding"]
+        with torch.no_grad():
+            emb = backbone(x.unsqueeze(0).to(device))["image_embedding"]
+            if cat_adapter is not None:
+                emb = cat_adapter(emb)
         return emb, meta
 
     def class_fg_mask(image_id: int, c: int) -> np.ndarray | None:
