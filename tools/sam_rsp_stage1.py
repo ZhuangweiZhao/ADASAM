@@ -175,7 +175,25 @@ def build_pspnet(num_base_classes: int, pretrained: bool = True) -> nn.Module:
     fea_dim = 2048
     bins = (1, 2, 3, 6)
 
-    from model.PPM import PPM
+    # PPM (Pyramid Pooling Module) — inlined to avoid import path issues
+    class PPM(nn.Module):
+        def __init__(self, in_dim, reduction_dim, bins):
+            super().__init__()
+            self.features = nn.ModuleList([
+                nn.Sequential(
+                    nn.AdaptiveAvgPool2d(b),
+                    nn.Conv2d(in_dim, reduction_dim, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(reduction_dim),
+                    nn.ReLU(inplace=True),
+                ) for b in bins
+            ])
+
+        def forward(self, x):
+            x_size = x.size()
+            return torch.cat([x] + [
+                F.interpolate(f(x), x_size[2:], mode='bilinear', align_corners=True)
+                for f in self.features
+            ], dim=1)
 
     ppm = PPM(fea_dim, int(fea_dim / len(bins)), bins)
     cls_head = nn.Sequential(
