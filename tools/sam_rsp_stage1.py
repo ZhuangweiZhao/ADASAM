@@ -175,8 +175,6 @@ def build_pspnet(num_base_classes: int, pretrained: bool = True) -> nn.Module:
     fea_dim = 2048
     bins = (1, 2, 3, 6)
 
-    # Import PPM from SAM-RSP
-    sys.path.insert(0, str(_SAM_RSP))
     from model.PPM import PPM
 
     ppm = PPM(fea_dim, int(fea_dim / len(bins)), bins)
