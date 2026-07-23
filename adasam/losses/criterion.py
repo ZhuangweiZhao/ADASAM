@@ -112,6 +112,75 @@ class SetCriterion(nn.Module):
         bce = F.binary_cross_entropy_with_logits(objectness_logits, target, reduction="none")
         return (weight * bce).sum() / weight.sum()
 
+    # ── 梯度冲突诊断 | Gradient conflict diagnostics ──
+
+    @staticmethod
+    def _compute_grad_cosine(
+        focal: torch.Tensor,
+        dice: torch.Tensor,
+        obj: torch.Tensor,
+        iou_head: torch.Tensor,
+        aux_total: torch.Tensor,
+        prompt_loss: torch.Tensor,
+        cfg: CriterionConfig,
+        dpg_params: list[torch.Tensor],
+    ) -> dict[str, torch.Tensor] | None:
+        """计算 Main/Aux/Prompt 在 DPG 参数上的梯度余弦相似度.
+        Compute gradient cosine similarity between Main/Aux/Prompt on DPG params.
+
+        分别对主损失 (focal+dice+obj+iou) / aux / prompt 求 DPG 参数的梯度,
+        然后计算两两之间的余弦相似度 — 检测梯度冲突 (负值 = 互相伤害)。
+        Differentiate main/aux/prompt losses w.r.t. DPG params, then compute
+        pairwise cosine similarity — detects gradient conflict (negative = harm).
+        """
+        params = [p for p in dpg_params if p.requires_grad]
+        if not params:
+            return None
+
+        main_loss = (
+            cfg.focal_weight * focal + cfg.dice_weight * dice
+            + cfg.objectness_weight * obj + cfg.iou_weight * iou_head
+        )
+        aux_l = cfg.aux_weight * aux_total
+        prompt_l = cfg.prompt_weight * prompt_loss
+
+        components = {"main": main_loss, "aux": aux_l, "prompt": prompt_l}
+
+        # 对每个分量分别求 DPG 参数梯度, 用 torch.autograd.grad (不改 .grad 属性)
+        # Differentiate each component w.r.t. DPG params individually
+        grads: dict[str, torch.Tensor | None] = {}
+        for name, loss_tensor in components.items():
+            if not loss_tensor.requires_grad:
+                grads[name] = None
+                continue
+            g = torch.autograd.grad(
+                loss_tensor, params,
+                retain_graph=True,
+                create_graph=False,
+                allow_unused=True,
+            )
+            # g is tuple(grad_wrt_p1, grad_wrt_p2, ...) — flatten into one vector
+            flat_parts = [gi.flatten() for gi in g if gi is not None]
+            grads[name] = torch.cat(flat_parts) if flat_parts else None
+
+        # 两两余弦相似度 | pairwise cosine similarities
+        result: dict[str, torch.Tensor] = {}
+        pairs = [
+            ("main", "aux", "main_vs_aux"),
+            ("main", "prompt", "main_vs_prompt"),
+            ("aux", "prompt", "aux_vs_prompt"),
+        ]
+        for a, b, key in pairs:
+            ga, gb = grads.get(a), grads.get(b)
+            if ga is not None and gb is not None and ga.numel() > 0 and gb.numel() > 0:
+                # 数值稳定: 防止除零 | numerically stable cosine
+                cos = F.cosine_similarity(ga.unsqueeze(0), gb.unsqueeze(0), dim=1)
+                result[key] = cos.clamp(-1.0, 1.0)
+            else:
+                result[key] = torch.zeros(1)
+
+        return result
+
     # ── 前向 | Forward ──
 
     def forward(
@@ -120,6 +189,7 @@ class SetCriterion(nn.Module):
         iou_pred: torch.Tensor,
         dpg_out: DPGOutput,
         gt_masks: torch.Tensor,
+        dpg_params: list[torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """计算总损失与分项 | Compute the total loss and its components.
 
@@ -231,6 +301,22 @@ class SetCriterion(nn.Module):
             + cfg.prompt_weight * prompt_loss
             + cfg.var_weight * var_loss
         )
+
+        # ── 梯度冲突诊断 | Gradient conflict diagnostics ──
+        # 分别对主损失 / aux / prompt 求 DPG 梯度, 计算余弦相似度
+        # Compute per-component DPG gradients and their cosine similarities
+        if dpg_params is not None and dpg_out.dense_prompt is not None:
+            grad_cos = self._compute_grad_cosine(
+                focal, dice, obj, iou_head,
+                aux_total, prompt_loss, cfg, dpg_params,
+            )
+            if grad_cos:
+                tracer.section("SetCriterion — Gradient Cosine (DPG params)")
+                tracer.tensor_dict("grad_cos", {
+                    "main_vs_aux":    grad_cos["main_vs_aux"].detach(),
+                    "main_vs_prompt": grad_cos["main_vs_prompt"].detach(),
+                    "aux_vs_prompt":  grad_cos["aux_vs_prompt"].detach(),
+                })
 
         # ── 监控指标 (objectness 塌缩监视) | monitoring (objectness-collapse watch) ──
         with torch.no_grad():

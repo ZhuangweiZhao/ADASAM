@@ -292,7 +292,9 @@ class ISAID5iTrainer:
         dpg_out, low_res, iou_pred = self.model.forward_train(
             emb, support_features, support_masks_grid
         )
-        losses = self.criterion(low_res[:, 0], iou_pred[:, 0], dpg_out, gt_masks)
+        dpg_params = list(self.model.dpg.parameters()) if tracer.should_log else None
+        losses = self.criterion(low_res[:, 0], iou_pred[:, 0], dpg_out, gt_masks,
+                                dpg_params=dpg_params)
 
         # 反向传播 | Backward
         self.optimizer.zero_grad()
@@ -494,6 +496,108 @@ class ISAID5iTrainer:
             "val/n_classes": len(valid_ious),
         }
 
+    @torch.no_grad()
+    def _save_aux_viz(
+        self,
+        support_cache: dict[int, tuple[torch.Tensor, torch.Tensor]],
+        epoch: int,
+        n_samples: int = 4,
+    ) -> None:
+        """保存 Aux/Prompt 输出可视化 | Save aux/prompt output visualizations.
+
+        每 val_every epoch 保存几张对比图:
+        [query image | GT union | prompt_mask (aux) | main prediction]
+        用于诊断 Aux Head 是否学到了有意义的结构。
+        Saves comparison grids to diagnose whether Aux Head learns meaningful structure.
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        was_training = self.model.training
+        self.model.eval()
+
+        out_dir = self.out_dir / "aux_viz"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        # 固定采样 tile (同 epoch 可比) | fixed tile sampling for comparability
+        viz_rng = random.Random(self.seed + 3000)
+        pool = [i for i in range(len(self.val_ds))
+                if len(self.val_ds[i]["instances"]) > 0]
+        if len(pool) > n_samples:
+            pool = viz_rng.sample(pool, n_samples)
+
+        fig, axes = plt.subplots(len(pool), 4, figsize=(16, 4 * len(pool)))
+        if len(pool) == 1:
+            axes = axes[None, :]  # ensure 2D
+
+        for row, idx in enumerate(pool):
+            sample = self.val_ds[idx]
+            emb = self._embed(sample["image"])
+
+            # 选该 tile 上 GT 实例最多的类别 | pick class with most GT instances
+            best_cls = max(self.val_classes, key=lambda c:
+                sum(1 for i in sample["instances"] if i["category_id"] == c))
+            sup_data = support_cache.get(best_cls)
+            if sup_data is None:
+                sup_data = next(iter(support_cache.values()))
+            sup_feat, sup_mask = sup_data
+
+            # 运行一次前向获取 prompt_mask | run forward once to get prompt_mask
+            try:
+                dpg_out, low_res, iou_pred = self.model.forward_train(
+                    emb, sup_feat, sup_mask
+                )
+                masks_pred, scores = self.model.predict(
+                    emb, sup_feat, sup_mask,
+                    (1024, 1024), (256, 256), score_thr=0.3,
+                )
+            except (RuntimeError, ValueError, IndexError):
+                continue
+
+            # --- 1) Query image ---
+            img = sample["image"].permute(1, 2, 0).clamp(0, 1).cpu().numpy()
+            axes[row, 0].imshow(img)
+            axes[row, 0].set_title(f"Query (cls={best_cls})", fontsize=9)
+            axes[row, 0].axis("off")
+
+            # --- 2) GT union (all instances of this class) ---
+            gt = np.zeros(img.shape[:2], dtype=bool)
+            for inst in sample["instances"]:
+                if inst["category_id"] == best_cls:
+                    gt = gt | inst["mask"].numpy()
+            axes[row, 1].imshow(gt, cmap="gray", vmin=0, vmax=1)
+            axes[row, 1].set_title("GT Union", fontsize=9)
+            axes[row, 1].axis("off")
+
+            # --- 3) prompt_mask (aux head output) ---
+            if dpg_out.prompt_mask is not None:
+                pm = dpg_out.prompt_mask[0, 0].sigmoid().cpu().numpy()
+                axes[row, 2].imshow(pm, cmap="viridis", vmin=0, vmax=1)
+                axes[row, 2].set_title(f"prompt_mask\nμ={pm.mean():.3f} σ={pm.std():.3f}", fontsize=9)
+            else:
+                axes[row, 2].text(0.5, 0.5, "N/A", ha="center", va="center",
+                                  transform=axes[row, 2].transAxes, fontsize=12)
+            axes[row, 2].axis("off")
+
+            # --- 4) Main prediction (merged) ---
+            if len(masks_pred) > 0:
+                pred = masks_pred.cpu().numpy().any(axis=0)
+            else:
+                pred = np.zeros(img.shape[:2], dtype=bool)
+            axes[row, 3].imshow(pred, cmap="gray", vmin=0, vmax=1)
+            axes[row, 3].set_title("Main Prediction", fontsize=9)
+            axes[row, 3].axis("off")
+
+        plt.tight_layout()
+        save_path = out_dir / f"epoch_{epoch:03d}.png"
+        plt.savefig(save_path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+        print(f"[aux_viz] saved to {save_path}")
+
+        if was_training:
+            self.model.train()
+
     # ── 主训练循环 | Main Training Loop ──
 
     def train(self) -> Path:
@@ -543,6 +647,8 @@ class ISAID5iTrainer:
                 val_metrics = self._validate(val_cache)
                 for k, v in val_metrics.items():
                     self.logger.log_metric(k, v, step=epoch, phase="val")
+                # 保存 Aux/Prompt 可视化 (每 val_every epoch) | Save aux/prompt viz
+                self._save_aux_viz(val_cache, epoch)
 
             # ── 日志记录 | Logging ──
             val_str = ""
