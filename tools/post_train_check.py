@@ -220,7 +220,7 @@ def test1_dense_prompt(model, backbone, dataset, device: str):
                 "std": float(dp.std()),
                 "abs_mean": float(dp.abs().mean()),
                 "abs_max": float(dp.abs().max()),
-                "norm": float(dp.norm(float("fro"))),
+                "norm": float(dp.norm(p="fro")),
             })
 
             # 空间相关性: 随机采样位置对, 计算特征余弦相似度
