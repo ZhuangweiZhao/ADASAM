@@ -262,7 +262,7 @@ def train(args: argparse.Namespace) -> Path:
     print(f"[Stage1] train={len(train_ds)} val={len(val_subset)}")
 
     # Model
-    model = build_pspnet(num_base, layers=args.layers).to(device)
+    model = build_pspnet(num_base, pretrained=True).to(device)
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
     print(f"[Stage1] params={n_params:.1f}M trainable={n_trainable:.1f}M")
@@ -308,10 +308,11 @@ def train(args: argparse.Namespace) -> Path:
                 images = batch["image"].to(device)
                 masks = batch["mask"].to(device)
 
-                output, loss = model(images, masks)
+                logits = model(images, masks)  # eval mode: returns logits only
+                loss = criterion(logits, masks.long())
                 val_loss += loss.item()
 
-                pred = output.max(1)[1].cpu().numpy()
+                pred = logits.max(1)[1].cpu().numpy()
                 target = masks.cpu().numpy()
                 for c in range(num_base + 1):
                     inter_sum[c] += ((pred == c) & (target == c)).sum()
@@ -350,7 +351,6 @@ def main() -> None:
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--lr", type=float, default=0.001)
     p.add_argument("--weight-decay", type=float, default=1e-4)
-    p.add_argument("--layers", type=int, default=50)
     p.add_argument("--crop-size", type=int, default=256)
     p.add_argument("--seed", type=int, default=321)
     p.add_argument("--workers", type=int, default=2)
