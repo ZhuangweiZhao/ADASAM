@@ -171,16 +171,38 @@ class SetCriterion(nn.Module):
             prompt_dice = torch.tensor(0.0, device=sam_mask_logits.device)
 
         # ── Spatial variance loss (V3.1 实验): 惩罚空间平坦化 ──
-        # 负的 per-channel 空间标准差均值, 鼓励 dense prompt 在不同空间位置
-        # 产生不同的通道调制信号。若不加此约束, 网络倾向于学习全局广播
-        # (所有位置相同), 因为这是优化 BCE+Dice 最容易的路径。
-        # Negative mean of per-channel spatial std: encourages the dense prompt
-        # to produce position-dependent channel modulation. Without this,
-        # the network prefers a flat broadcast — the easiest path for BCE+Dice.
+        # 若不加显式约束, 网络倾向于将 dense prompt 退化为全局广播 (所有空间位置
+        # 相同), 因为这是优化 BCE+Dice 时最容易的路径。
+        # Without explicit constraint, the network collapses the dense prompt to a
+        # global broadcast — the easiest path for BCE+Dice optimization.
+        #
+        # 使用尺度无关的变异系数 (CV = std/mean) 而非原始 std:
+        # - 原始 std 梯度 ∝ prompt 幅值 → prompt 小时梯度消失
+        # - CV 归一化后梯度不受幅值影响 → 即使 prompt 值~0.003 也有有效梯度
+        # Coefficient-of-variation (CV = std/mean) is scale-invariant:
+        # raw std gradient ∝ prompt magnitude → vanishes when small;
+        # CV is normalized → effective gradient even at 0.003-scale values.
+        #
+        # 同时惩罚全局平坦 (per-channel CV) 和局部平坦 (Total Variation):
+        # Penalize both global flatness (per-channel CV) and local smoothness (TV).
         if dpg_out.dense_prompt is not None and cfg.var_weight > 0:
-            # per-channel spatial std: measures how much each channel varies across space
-            spatial_std = dpg_out.dense_prompt.std(dim=(-2, -1)) + 1e-8  # [1, C]
-            var_loss = -spatial_std.mean()  # negative → maximize spatial variation
+            dp = dpg_out.dense_prompt  # [1, C, H, W]
+
+            # 1) Per-channel coefficient of variation: std/mean → scale-invariant
+            #    Low CV = channel broadcasts same value everywhere → penalize
+            ch_std = dp.std(dim=(-2, -1))                     # [1, C]
+            ch_mean = dp.abs().mean(dim=(-2, -1)) + 1e-8      # [1, C]
+            cv = ch_std / ch_mean                              # [1, C], ~0(flat) ~1+(varied)
+            cv_loss = -cv.mean()                               # maximize CV
+
+            # 2) Total Variation (local): penalize if neighboring positions are identical
+            #    Gradient magnitude ~O(1) regardless of value scale — much stronger
+            #    signal than variance-based losses for tiny values.
+            tv_h = (dp[:, :, 1:, :] - dp[:, :, :-1, :]).abs().mean()
+            tv_w = (dp[:, :, :, 1:] - dp[:, :, :, :-1]).abs().mean()
+            tv_loss = -(tv_h + tv_w)                           # maximize local variation
+
+            var_loss = cv_loss + tv_loss
         else:
             var_loss = torch.tensor(0.0, device=sam_mask_logits.device)
 

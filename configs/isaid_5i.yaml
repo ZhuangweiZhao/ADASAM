@@ -55,7 +55,7 @@ loss:
   iou_weight: 1.0
   aux_weight: 0.3      # reduced from 1.0 — was dominating 77% of total loss
   prompt_weight: 0.5   # V3: BCE+Dice on dense_prompt projection → class-spatial supervision
-  var_weight: 0.1      # V3.1 实验: 负空间方差惩罚 → 鼓励 prompt 学习空间变化 (0=关闭)
+  var_weight: 0.1      # V3.1 实验: CV+TV 空间方差损失 (尺度无关, 0=关闭, 推荐 0.1~1.0)
   eos_coef: 0.1
   focal_gamma: 5.0
   focal_eps: 1.0e-4
