@@ -209,9 +209,21 @@ class DensePromptGenerator(nn.Module):
         # 1×1 Conv projects dense prompt to a single-channel coarse mask logits,
         # supervised by BCE+Dice against GT union — forces the dense prompt
         # to learn class-discriminative spatial activation patterns.
-        self.prompt_mask_head = nn.Conv2d(c, 1, 1)
-        nn.init.xavier_uniform_(self.prompt_mask_head.weight, gain=1.0)
-        nn.init.zeros_(self.prompt_mask_head.bias)
+        #
+        # GroupNorm 前置: dense_prompt 值极小 (std≈0.03), 直接过 Conv1×1
+        # 会导致 sigmoid(0)≈0.5 且梯度 ∝ 输入幅值 — 永远卡住。
+        # GN 将输入归一化到单位方差, 梯度放大 ~33×, 使 prompt_loss 能
+        # 与 var_loss 竞争 (之前 var 主导 23:1)。
+        # GroupNorm pre-normalization: without it, tiny input (std≈0.03)
+        # produces sigmoid(0)≈0.5 with gradient ∝ input scale — stuck forever.
+        # GN normalizes to unit variance, amplifying gradient ~33× so
+        # prompt_loss can compete with var_loss (previously 23:1 ratio).
+        self.prompt_mask_head = nn.Sequential(
+            nn.GroupNorm(num_groups=min(32, c), num_channels=c),
+            nn.Conv2d(c, 1, 1),
+        )
+        nn.init.xavier_uniform_(self.prompt_mask_head[-1].weight, gain=1.0)
+        nn.init.zeros_(self.prompt_mask_head[-1].bias)
 
         # Legacy: global dense prompt (kept for backward compat when no spatial input)
         self.dense_pool_attn = nn.Linear(c, 1)
