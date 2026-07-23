@@ -53,8 +53,12 @@ loss:
   dice_weight: 1.0
   objectness_weight: 2.0
   iou_weight: 1.0
-  aux_weight: 0.3      # reduced from 1.0 — was dominating 77% of total loss
-  prompt_weight: 0.5   # V3: BCE+Dice on dense_prompt projection → class-spatial supervision
+  aux_weight: 0.05     # DPG 64² mask head is inherently weak (dot-product, 66K params
+                        # vs SAM decoder's 4M). Deep supervision should be a gentle
+                        # regularizer, not the dominant loss term. 0.3 → 0.1.
+  prompt_weight: 0.0   # V3: DISABLED — prompt_mask_head has no access to query image,
+                        # so spatial GT prediction is an information-bottleneck task.
+                        # var_loss alone provides sufficient spatial regularization.
   var_weight: 0.1      # V3.1 实验: CV+TV 空间方差损失 (尺度无关, 0=关闭, 推荐 0.1~1.0)
   eos_coef: 0.1
   focal_gamma: 5.0
