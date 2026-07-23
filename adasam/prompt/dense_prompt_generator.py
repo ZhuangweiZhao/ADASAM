@@ -195,6 +195,12 @@ class DensePromptGenerator(nn.Module):
         nn.init.xavier_uniform_(self.spatial_prompt_proj[-1].weight, gain=1.0)
         nn.init.zeros_(self.spatial_prompt_proj[-1].bias)
 
+        # Learnable scale for spatial prompt (starts small for stable warm-up,
+        # training can amplify as prompt becomes useful). Prevents the spatial
+        # signal from being drowned by pretrained no_mask_embed.
+        # 可学习缩放因子: 从小值开始, 训练可逐步放大空间信号的贡献。
+        self.spatial_prompt_scale = nn.Parameter(torch.tensor(0.1))
+
         # ---- Prompt auxiliary mask head (V3 BCE supervision) ----
         # 1×1 Conv 将 dense prompt [1,C,H,W] 投影为粗掩码 logits [1,1,H,W],
         # 用于辅助 BCE+Dice 监督 — 迫使 dense prompt 学习类别判别的空间激活。
@@ -344,16 +350,15 @@ class DensePromptGenerator(nn.Module):
         prompt_mask = None  # auxiliary mask from dense_prompt projection
         if has_support and support_features is not None and support_masks_grid is not None:
             # ── V3 Spatial Dense Prompt ──
+            # Mask × features → per-support masked features, then mean-pool
+            # across K support images. Each (c,h,w) position gets the average
+            # target feature at that spatial position. No sqrt division —
+            # preserves natural feature magnitude so conv layers operate at
+            # their designed scale.
             masked = support_features * support_masks_grid.unsqueeze(1)    # [K, C, gh, gw]
-            support_spatial = masked.sum(dim=0, keepdim=True)              # [1, C, gh, gw]
-            n_pixels = support_masks_grid.sum() + 1e-8
-            support_spatial = support_spatial / n_pixels.sqrt()            # normalize
-
-            # Spatial projector: conv layers learn to transform support spatial
-            # features into a query-focused spatial attention map.
+            support_spatial = masked.mean(dim=0, keepdim=True)              # [1, C, gh, gw]
             dense_prompt = self.spatial_prompt_proj(support_spatial)       # [1, C, gh, gw]
-
-            # Auxiliary prompt mask: 1×1 Conv → coarse mask logits for BCE supv
+            dense_prompt = self.spatial_prompt_scale * dense_prompt        # learnable scale
             prompt_mask = self.prompt_mask_head(dense_prompt)              # [1, 1, gh, gw]
         elif has_support:
             # ── V2 Legacy: Global Dense Prompt (fallback) ──
