@@ -46,6 +46,12 @@ class CriterionConfig:
     iou_weight: float = 1.0
     aux_weight: float = 1.0
     prompt_weight: float = 0.5  # V3: BCE+Dice on dense_prompt projection mask
+    var_weight: float = 0.0     # V3.1 spatial variance loss (实验性): 负空间方差惩罚,
+                                # 鼓励 dense_prompt 学习空间变化而非退化为全局广播。
+                                # 0=关闭; 0.1~1.0 实验推荐值。
+                                # Negative spatial-variance penalty: encourages the dense
+                                # prompt to learn spatial variation instead of collapsing
+                                # to a global broadcast. 0=off; 0.1-1.0 for experiments.
     eos_coef: float = 0.1
     focal_gamma: float = 5.0
     focal_eps: float = 1.0e-4
@@ -164,6 +170,20 @@ class SetCriterion(nn.Module):
             prompt_focal = torch.tensor(0.0, device=sam_mask_logits.device)
             prompt_dice = torch.tensor(0.0, device=sam_mask_logits.device)
 
+        # ── Spatial variance loss (V3.1 实验): 惩罚空间平坦化 ──
+        # 负的 per-channel 空间标准差均值, 鼓励 dense prompt 在不同空间位置
+        # 产生不同的通道调制信号。若不加此约束, 网络倾向于学习全局广播
+        # (所有位置相同), 因为这是优化 BCE+Dice 最容易的路径。
+        # Negative mean of per-channel spatial std: encourages the dense prompt
+        # to produce position-dependent channel modulation. Without this,
+        # the network prefers a flat broadcast — the easiest path for BCE+Dice.
+        if dpg_out.dense_prompt is not None and cfg.var_weight > 0:
+            # per-channel spatial std: measures how much each channel varies across space
+            spatial_std = dpg_out.dense_prompt.std(dim=(-2, -1)) + 1e-8  # [1, C]
+            var_loss = -spatial_std.mean()  # negative → maximize spatial variation
+        else:
+            var_loss = torch.tensor(0.0, device=sam_mask_logits.device)
+
         # ── aux: DPG 最终层掩码用主匹配索引耦合监督 | final DPG masks, main indices ──
         aux_total = self._focal_dice(dpg_out.mask_logits[pred_idx], gt_grid[gt_idx])
 
@@ -186,6 +206,7 @@ class SetCriterion(nn.Module):
             + cfg.iou_weight * iou_head
             + cfg.aux_weight * aux_total
             + cfg.prompt_weight * prompt_loss
+            + cfg.var_weight * var_loss
         )
 
         # ── 监控指标 (objectness 塌缩监视) | monitoring (objectness-collapse watch) ──
@@ -209,6 +230,7 @@ class SetCriterion(nn.Module):
             "prompt_focal": prompt_focal.detach(),
             "prompt_dice": prompt_dice.detach(),
             "prompt": prompt_loss.detach(),
+            "var": var_loss.detach(),
             "n_matched": torch.as_tensor(float(pred_idx.numel())),
             "mean_obj_matched": mean_matched,
             "mean_obj_unmatched": mean_unmatched,

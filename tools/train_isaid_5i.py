@@ -306,6 +306,7 @@ class ISAID5iTrainer:
             "prompt_focal": float(losses["prompt_focal"]),
             "prompt_dice": float(losses["prompt_dice"]),
             "prompt": float(losses["prompt"]),
+            "var": float(losses["var"]),
             "n_matched": float(losses["n_matched"]),
             "mean_obj_matched": float(losses["mean_obj_matched"]),
             "mean_obj_unmatched": float(losses["mean_obj_unmatched"]),
