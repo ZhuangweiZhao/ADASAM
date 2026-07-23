@@ -312,7 +312,7 @@ class ISAID5iTrainer:
         # ── Debug: advance step counter ──
         tracer.step()
 
-        return {
+        metrics = {
             "loss": float(losses["loss"].detach()),
             "focal": float(losses["focal"]),
             "dice": float(losses["dice"]),
@@ -328,6 +328,11 @@ class ISAID5iTrainer:
             "mean_obj_unmatched": float(losses["mean_obj_unmatched"]),
             "n_inst": gt_masks.shape[0],
         }
+        # Per-layer aux breakdown
+        for name, fd, obj_val in losses.get("aux_per_layer", []):
+            metrics[f"aux_{name}_fd"] = fd
+            metrics[f"aux_{name}_obj"] = obj_val
+        return metrics
 
     # ── Validation ──
 

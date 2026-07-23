@@ -278,19 +278,27 @@ class SetCriterion(nn.Module):
             var_loss = torch.tensor(0.0, device=sam_mask_logits.device)
 
         # ── aux: DPG 最终层掩码用主匹配索引耦合监督 | final DPG masks, main indices ──
-        aux_total = self._focal_dice(dpg_out.mask_logits[pred_idx], gt_grid[gt_idx])
+        aux_final_fd = self._focal_dice(dpg_out.mask_logits[pred_idx], gt_grid[gt_idx])
+        aux_total = aux_final_fd
+        aux_per_layer: list[dict[str, torch.Tensor]] = [
+            {"name": "final", "focal_dice": aux_final_fd.detach(), "obj": torch.zeros(1)}
+        ]
 
         # ── aux: 每个中间层重新匹配 (深监督) | per-layer re-match (deep supervision) ──
-        for layer in dpg_out.aux:
+        for i, layer in enumerate(dpg_out.aux):
             l_pred, l_gt = self.matcher.match(
                 layer["mask_logits"], layer["objectness_logits"], gt_grid
             )
-            aux_total = aux_total + self._focal_dice(
-                layer["mask_logits"][l_pred], gt_grid[l_gt]
-            )
-            aux_total = aux_total + cfg.objectness_weight * self._objectness_bce(
+            l_fd = self._focal_dice(layer["mask_logits"][l_pred], gt_grid[l_gt])
+            l_obj = cfg.objectness_weight * self._objectness_bce(
                 layer["objectness_logits"], l_pred
             )
+            aux_total = aux_total + l_fd + l_obj
+            aux_per_layer.append({
+                "name": f"layer{i}",
+                "focal_dice": l_fd.detach(),
+                "obj": l_obj.detach(),
+            })
 
         loss = (
             cfg.focal_weight * focal
@@ -341,6 +349,12 @@ class SetCriterion(nn.Module):
             "prompt":   prompt_loss.detach(),
             "var":      var_loss.detach(),
         })
+        # Per-layer aux breakdown
+        for entry in aux_per_layer:
+            tracer.tensor_dict(f"aux_{entry['name']}", {
+                "focal_dice": entry["focal_dice"],
+                "obj":        entry["obj"],
+            })
         tracer.tensor("n_matched", torch.as_tensor(float(pred_idx.numel())).unsqueeze(0))
 
         return {
@@ -357,4 +371,7 @@ class SetCriterion(nn.Module):
             "n_matched": torch.as_tensor(float(pred_idx.numel())),
             "mean_obj_matched": mean_matched,
             "mean_obj_unmatched": mean_unmatched,
+            # Per-layer aux breakdown
+            "aux_per_layer": [(e["name"], float(e["focal_dice"]), float(e["obj"]))
+                              for e in aux_per_layer],
         }
