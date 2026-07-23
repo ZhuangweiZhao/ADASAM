@@ -78,13 +78,6 @@ class AdaSAMModel(nn.Module):
         self.dpg = DensePromptGenerator(cfg.dpg)
         self.sam_decoder = QueryMaskDecoder(sam.prompt_encoder, sam.mask_decoder, cfg.decoder)
 
-        # V3.4: 可学习 dense prompt 混合权重 | learnable dense prompt blend
-        # no_mask_embed (std≈0.03) 的幅值 >> spatial dense_prompt (std≈0.002),
-        # 直接相加会淹没空间结构。可学习 α 让训练自动决定支持多少空间信息。
-        # no_mask_embed magnitude >> spatial dense_prompt → direct addition drowns
-        # spatial structure. Learnable alpha lets training find the right balance.
-        self.dense_prompt_alpha = nn.Parameter(torch.tensor(0.5))
-
         # SAM-RSP 式粗先验模块 (opt-in, 默认启用)
         # SAM-RSP style coarse prior module (opt-in, enabled by default)
         if cfg.use_coarse_prior:
@@ -143,22 +136,18 @@ class AdaSAMModel(nn.Module):
             tracer.tensor("aux[0].mask_logits (64²)", aux_0["mask_logits"].unsqueeze(0))
             tracer.tensor("aux[0].objectness_logits", aux_0["objectness_logits"].unsqueeze(0))
 
-        # 4. Build dense prompt for SAM decoder:
-        #    V3.4: 可学习混合 — alpha × spatial_prompt + (1-alpha) × no_mask
-        #    解决 no_mask (std≈0.03) 淹没 spatial_prompt (std≈0.002) 的问题。
-        #    Learnable blend: alpha controls how much spatial structure vs SAM prior.
+        # 4. Dense prompt for SAM decoder:
+        #    方案 A: 直接用 spatial dense_prompt, 不加 no_mask_embed.
+        #    实验证明 no_mask (std≈0.03) 会淹没 spatial_prompt (std≈0.003),
+        #    即使可学习混合权重也无法解耦。直接替换让 SAM decoder 完全依赖
+        #    support-conditioned 空间信号。
+        #    Plan A: use spatial dense_prompt directly, no no_mask_embed blending.
+        #    Trace showed no_mask (std≈0.03) drowns spatial signal (std≈0.003).
+        #    Direct replacement forces decoder to use support-conditioned signal.
         if dpg_out.dense_prompt is not None:
-            no_mask = (
-                self.sam_decoder.prompt_encoder.no_mask_embed.weight
-                .view(1, -1, 1, 1)
-            )
-            alpha = self.dense_prompt_alpha.clamp(0.0, 1.0)  # [0,1] 约束
-            dense_override = (1.0 - alpha) * no_mask + alpha * dpg_out.dense_prompt
+            dense_override = dpg_out.dense_prompt
             tracer.section("AdaSAM.forward_train — Dense Override")
-            tracer.tensor("no_mask_embed [1,C,1,1]", no_mask)
-            tracer.tensor("dense_override [1,C,H,W]", dense_override, spatial=True)
-            tracer.tensor("dense_prompt_alpha",
-                          torch.tensor([[float(alpha)]], device=query_features.device))
+            tracer.tensor("dense_override [1,C,H,W] (=dense_prompt only)", dense_override, spatial=True)
         else:
             dense_override = None
 
