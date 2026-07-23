@@ -35,9 +35,8 @@ from adasam.adapters import CATAdapter  # noqa: E402
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone  # noqa: E402
 from adasam.datasets import ISAID_CATEGORIES  # noqa: E402
 from adasam.model import AdaSAMModel, AdaSAMModelConfig  # noqa: E402
-from adasam.prototype import PrototypeBuilder  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
-from adasam.utils.transforms import preprocess_image  # noqa: E402
+from adasam.utils.transforms import preprocess_image, resize_mask  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,7 +103,8 @@ def main() -> None:
     cfg = ckpt.get("config", {})
     if "prompt_generator" not in cfg:
         raise ValueError(f"old-format checkpoint (no 'prompt_generator' section): {args.checkpoint}")
-    embed_dim = int(cfg.get("prototype", {}).get("embed_dim", 256))
+    se_cfg = cfg.get("support_encoder", cfg.get("prototype", {}))
+    embed_dim = int(se_cfg.get("embed_dim", 256))
     mtype = cfg.get("backbone", {}).get("model_type", "vit_t")
     weights_path = _REPO_ROOT / cfg.get("backbone", {}).get("checkpoint", "weights/mobile_sam.pt")
     data_root = Path(args.data_root) if args.data_root else Path(
@@ -121,9 +121,12 @@ def main() -> None:
     sam = build_mobile_sam(str(weights_path), mtype, device)
     backbone = MobileSAMBackbone(sam.image_encoder, sam.image_encoder.img_size).to(device)
     model = AdaSAMModel(sam, AdaSAMModelConfig.from_dict(cfg)).to(device)
-    model.load_state_dict(ckpt["model"], strict=True)
+    missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+    if missing:
+        print(f"[viz] WARNING: missing keys (new code, old ckpt): {missing}")
+    if unexpected:
+        print(f"[viz] WARNING: unexpected keys (new ckpt, old code): {unexpected}")
     model.eval()
-    proto_builder = PrototypeBuilder(embed_dim)
 
     cat_adapter = None
     if "cat_adapter" in ckpt:
@@ -199,7 +202,7 @@ def main() -> None:
             fg |= coco_gt.annToMask(ann).astype(bool)
         return fg
 
-    # ── Prototype ──
+    # ── Build support features + masks (v2: no prototype) ──
     embs, masks = [], []
     for tid in support_tiles:
         fg = class_fg_mask(tid)
@@ -211,7 +214,12 @@ def main() -> None:
     if len(embs) < args.k_shot:
         print(f"[vis] ERROR: only {len(embs)} valid supports, need {args.k_shot}")
         return
-    prototype = proto_builder.build(embs, masks).to(device)
+
+    # Stack to [K, 256, 64, 64] features and [K, 64, 64] masks (resized to feature grid)
+    support_features = torch.stack(embs, dim=0).to(device)            # [K, 256, 64, 64]
+    support_masks = torch.stack(
+        [resize_mask(m, (64, 64)) for m in masks], dim=0
+    ).to(device)                                                      # [K, 64, 64]
 
     # ── Visualize each query tile ──
     for qi, qid in enumerate(query_tiles):
@@ -221,7 +229,9 @@ def main() -> None:
         emb, meta = embed(rgb)
 
         with torch.no_grad():
-            dpg_out, low_res, iou_pred = model.forward_train(emb, prototype)
+            dpg_out, low_res, iou_pred = model.forward_train(
+                emb, support_features, support_masks
+            )
             scores_all = (dpg_out.objectness_logits.sigmoid()
                           * iou_pred[:, 0].clamp(0.0, 1.0)).cpu().numpy()
             keep = scores_all >= args.score_thr

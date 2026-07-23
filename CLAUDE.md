@@ -26,22 +26,40 @@ python tools/train.py --epochs 1 --episodes 2          # smoke test
 # Evaluate (all paper numbers must come from this script)
 python tools/evaluate.py --checkpoint runs/.../best_model.pt --k-shot 5 --seed 42
 python tools/evaluate.py --checkpoint <ckpt> --limit 5 --no-zero-shot  # smoke
+
+# iSAID-5i (15-class semantic segmentation, 256² tiles, 3-fold, FSS Benchmark protocol)
+python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50              # train
+python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5    # smoke
+python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5               # single fold eval
+python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --all-folds   # 3-fold CV
+python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --seeds 42 123 456  # multi-seed
+python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --max-samples 10   # smoke
+python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --save-vis --diagnostics  # full
+
+# NEU-SEG (multi-class segmentation, 480x640, 35 images)
+python tools/train_neuseg.py --k-shot 3 --epochs 100               # train
+python tools/eval_neuseg.py --checkpoint <ckpt> --k-shot 3         # evaluate
+python tools/viz_neuseg.py --mode dataset                          # dataset overview
+python tools/viz_neuseg.py --mode support --k-shot 3               # support/query pairs
+python tools/viz_neuseg.py --mode predict --checkpoint <ckpt>      # prediction comparison
+python tools/viz_neuseg.py --mode all --checkpoint <ckpt>          # all visualizations
 ```
 
 ## Architecture
 
 AdaSAM is a **clean-slate** few-shot aerial instance segmentation framework. The single backbone is **MobileSAM** (TinyViT image encoder, frozen). Few-shot adaptation follows the PerSAM/Matcher paradigm: prototype → similarity peaks → point prompts → SAM MaskDecoder. Every paper number is produced by `tools/evaluate.py` under the frozen **Protocol V3**.
 
-### Data flow
+### Data flow (v2 — SAM-RSP style)
 
 ```
 Image (896² tile, RGB)
   → preprocess_image() [adasam/utils/transforms.py] → [3, 1024, 1024] normalized
   → MobileSAMBackbone.forward() → {"image_embedding": [B, 256, 64, 64]}
-  → PrototypeBuilder.build(K support embeddings + masks) → prototype [256]
-  → similarity_map(embedding, prototype) → [64, 64] cosine similarity
-  → Matcher.select(sim_map) → PromptPoints (top-K peaks via greedy NMS)
-  → PromptMaskDecoder.decode(image_embedding, prototype, points) → low-res logits
+  → SupportEncoder(K support embeddings + masks) → support_memory [M, 256]
+  → DensePromptGenerator(query_features, support_memory, dense_pe) → DPGOutput
+      (instance_queries [N,256], objectness_logits [N], mask_logits [N,64,64],
+       dense_prompt [1,256,1,1])
+  → QueryMaskDecoder.decode(image_embedding, instance_queries, dense_prompt_override)
   → upscale_logits() → per-instance masks at tile resolution (896²)
 ```
 
@@ -50,8 +68,8 @@ Image (896² tile, RGB)
 | Module | Input → Output | Trainable? |
 |---|---|---|
 | `adasam/backbone/` | `[B,3,1024,1024]` → `{"image_embedding":[B,256,64,64]}` | **No** — always frozen, `train()` overridden to no-op |
-| `adasam/prototype/` | K support (embedding + FG mask) → L2-normalized prototype [256] | **No** — purely algorithmic (masked average pooling) |
-| `adasam/decoder/` | `(image_embedding, prototype)` → `InstanceMasks(masks, scores)` | **Yes** — PrototypeAdapter (zero-init final layer) + MaskDecoder; PromptEncoder frozen |
+| `adasam/support_encoder/` | `([K,256,64,64], [K,64,64])` → support_memory `[M,256]` | **Yes** — TransformerEncoder + MemoryBank |
+| `adasam/decoder/` | `(image_embedding, instance_queries, dense_prompt_override?)` → `InstanceMasks(masks, scores)` | **Yes** — MaskDecoder; PromptEncoder frozen |
 | `adasam/losses/` | `(logits, targets)` → scalar (focal+dice+IoU-head MSE) | N/A |
 | `adasam/metrics/` | `(pred_masks, gt_masks)` → TP/FP/FN, Instance mIoU, COCO AP | N/A — pure numpy/pycocotools |
 

@@ -1,0 +1,76 @@
+# A/B New: coarse_prior + feedback ON
+# AdaSAM + SAM-RSP 创新 (RSP 空间先验 + Pixel Prototype + 层间 Feedback)
+# Identical to _ab_baseline.yaml except use_coarse_prior / use_feedback
+
+backbone:
+  model_type: vit_t
+  checkpoint: weights/mobile_sam.pt
+  image_size: 1024
+
+data:
+  data_root: data/iSAID-5i
+  tile_size: 256
+  num_classes: 15
+  fold: 0
+  eval_manifest: null
+
+fewshot:
+  k_shot: 1
+  min_tiles: 10
+  train_mode: novel
+
+support_encoder:
+  embed_dim: 256
+  n_support_tokens: 16
+  n_memory_tokens: 64
+  n_encoder_layers: 2
+  n_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
+
+prompt_generator:
+  num_queries: 16
+  num_layers: 3
+  num_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
+  use_coarse_prior: true        # ← ON (RSP + Pixel Prototype)
+  use_feedback: true             # ← ON (层间 mask 反馈)
+
+decoder:
+  train_mask_decoder: true
+  decode_chunk_size: 0
+
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  objectness_weight: 2.0
+  iou_weight: 1.0
+  aux_weight: 1.0
+  eos_coef: 0.1
+  focal_gamma: 5.0
+  focal_eps: 1.0e-4
+  match_cost_objectness: 2.0
+  match_cost_mask: 5.0
+  match_cost_dice: 5.0
+
+train:
+  epochs: 50
+  episodes_per_epoch: 200
+  val_every: 5
+  val_samples: 100
+  lr: 1.0e-4
+  sam_decoder_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  device: cuda
+  use_cat_adapter: false
+
+eval:
+  iou_thr: 0.5
+  score_thr: 0.3
+  min_area: 16
+  per_class: 20
+
+seed: 42
+output_dir: runs/ab_new

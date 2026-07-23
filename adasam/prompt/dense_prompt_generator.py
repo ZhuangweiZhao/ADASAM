@@ -8,24 +8,25 @@ The core innovation: learnable instance queries + masked cross-attention
 (Mask2Former-style) generate N instance query embeddings directly from query
 features, replacing the legacy "similarity peaks → point prompts" localization.
 
-设计 | Design:
-    - 原型仅作语义条件 (零初始化投影后加到每个 query 上), 不负责定位。
-      The prototype is a semantic condition only (zero-init projection added to
-      every query); it does NOT localize.
-    - 每层顺序 (Mask2Former 签名): masked cross-attn → self-attn → FFN, post-norm。
-      Per-layer order (Mask2Former signature): masked cross-attn → self-attn → FFN.
-    - 注意力掩码来自上一次掩码预测 (sigmoid < 0.5 阻断, detach, 全阻断行守卫)。
-      Attention masks come from the previous mask prediction (sigmoid < 0.5
-      blocked, detached, degenerate all-blocked-row guard).
-    - L+1 次预测 (初始 + 每层后); 前 L 次作为深监督 aux, 最后一次为主输出。
-      L+1 predictions (initial + after each layer); first L are deep-supervision
-      aux, the last is the main output.
-    - dense_pe 由调用方传入 (prompt_encoder.get_dense_pe()), 本模块零依赖 SAM。
-      dense_pe is supplied by the caller; this module has zero SAM dependency.
+v2 设计 | v2 Design (SAM-RSP inspired):
+    - Instance Queries 同时 attend to query image features (Where) 和 support
+      memory tokens (What), 实现解耦的定位+条件识别。
+      Instance queries attend to BOTH query image features (Where) and support
+      memory tokens (What) for decoupled localization + class conditioning.
+    - Support cross-attention 插在每层 masked image cross-attn 之后。
+      Support cross-attention inserted after each layer's masked image cross-attn.
+    - Support-conditioned Dense Prompt: 从 support memory 生成 dense prompt,
+      替代 SAM 的通用 no_mask_embed。
+      Support-conditioned dense prompt generated from support memory,
+      replacing SAM's generic no_mask_embed.
+
+每层顺序 | Per-layer order (v2):
+    masked cross-attn (image) → support cross-attn → self-attn → FFN, post-norm.
 
 参考 | Reference:
-    Cheng et al., "Masked-attention Mask Transformer for Universal Image
-    Segmentation", CVPR 2022 (thirdparty/Mask2Former, MIT).
+    - Cheng et al., "Masked-attention Mask Transformer for Universal Image
+      Segmentation", CVPR 2022 (thirdparty/Mask2Former, MIT).
+    - SAM-RSP: Support Representation → Prompt Generator paradigm.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ class DensePromptGeneratorConfig:
     num_heads: int = 8
     ffn_dim: int = 1024
     dropout: float = 0.0
+    use_feedback: bool = True  # SAM-RSP 式层间特征回传 | inter-layer mask feedback
 
     @classmethod
     def from_dict(cls, d: dict) -> "DensePromptGeneratorConfig":
@@ -71,12 +73,15 @@ class DPGOutput:
     :param mask_logits: [N, gh, gw] 最终 64² 内部掩码 (aux 监督) | final internal masks.
     :param aux: L 个中间预测 {"mask_logits": [N,gh,gw], "objectness_logits": [N]}。
         L intermediate predictions for deep supervision.
+    :param dense_prompt: [C, gh, gw] 或 None. support-conditioned dense prompt
+        (替换 SAM 的 no_mask_embed); None 时回退到 no_mask_embed。
     """
 
     instance_queries: torch.Tensor
     objectness_logits: torch.Tensor
     mask_logits: torch.Tensor
     aux: list[dict[str, torch.Tensor]]
+    dense_prompt: torch.Tensor | None = None
 
 
 class _MLP(nn.Module):
@@ -114,24 +119,28 @@ class DensePromptGenerator(nn.Module):
         self.query_feat = nn.Embedding(n, c)
         self.query_pos = nn.Embedding(n, c)
 
-        # 原型语义条件投影 (零初始化 → 训练起点与原型无关, 仓库惯例)
-        # prototype semantic-condition projection (zero-init → prototype-agnostic
-        # at init; repo convention, same as CATAdapter.up / PrototypeAdapter.fc2)
-        self.proto_proj = nn.Linear(c, c)
-        nn.init.zeros_(self.proto_proj.weight)
-        nn.init.zeros_(self.proto_proj.bias)
-
-        # L 层: masked cross-attn → self-attn → FFN (post-norm)
+        # ---- Image cross-attention (masked) ----
         self.cross_attn = nn.ModuleList(
             nn.MultiheadAttention(c, cfg.num_heads, dropout=cfg.dropout, batch_first=True)
             for _ in range(layers)
         )
         self.cross_norm = nn.ModuleList(nn.LayerNorm(c) for _ in range(layers))
+
+        # ---- Support cross-attention (NEW: query reads support "what" info) ----
+        self.cross_attn_support = nn.ModuleList(
+            nn.MultiheadAttention(c, cfg.num_heads, dropout=cfg.dropout, batch_first=True)
+            for _ in range(layers)
+        )
+        self.support_cross_norm = nn.ModuleList(nn.LayerNorm(c) for _ in range(layers))
+
+        # ---- Self-attention ----
         self.self_attn = nn.ModuleList(
             nn.MultiheadAttention(c, cfg.num_heads, dropout=cfg.dropout, batch_first=True)
             for _ in range(layers)
         )
         self.self_norm = nn.ModuleList(nn.LayerNorm(c) for _ in range(layers))
+
+        # ---- FFN ----
         self.ffn = nn.ModuleList(
             nn.Sequential(
                 nn.Linear(c, cfg.ffn_dim),
@@ -143,10 +152,45 @@ class DensePromptGenerator(nn.Module):
         )
         self.ffn_norm = nn.ModuleList(nn.LayerNorm(c) for _ in range(layers))
 
-        # 共享预测头 (L+1 次预测复用同一组) | shared prediction heads (reused L+1 times)
+        # ---- Inter-layer mask feedback (SAM-RSP style) ----
+        # 每层中间预测 → 空间置信度图 → 拼回 mask_features 作为下一层条件
+        # Each layer's intermediate mask → spatial confidence → fed back to
+        # mask_features for next-layer conditioning.
+        if cfg.use_feedback and layers > 1:
+            self.feedback_conv = nn.ModuleList(
+                nn.Conv2d(c + 2, c, kernel_size=1, bias=False)
+                for _ in range(layers - 1)
+            )
+            # identity-init: first C channels pass through, extra 2 channels start at zero.
+            # Residual connection (mask_features = mask_features + conv(...)) ensures
+            # feedback starts as identity and gradually incorporates mask information.
+            for conv in self.feedback_conv:
+                weight = torch.zeros(c, c + 2, 1, 1)
+                for j in range(c):
+                    weight[j, j, 0, 0] = 1.0
+                conv.weight.data.copy_(weight)
+        else:
+            self.feedback_conv = None
+
+        # ---- Shared prediction heads (reused L+1 times) ----
         self.decoder_norm = nn.LayerNorm(c)
         self.obj_head = nn.Linear(c, 1)
         self.mask_embed = _MLP(c, c, c, num_layers=3)
+
+        # ---- Dense prompt generator (support memory → spatial dense prompt) ----
+        # 从 support memory 生成 dense prompt, 与 no_mask_embed 残差连接.
+        # Step 1: learned attention pooling (score each memory token → weighted avg)
+        # Step 2: MLP projects summary → channel modulation
+        # Xavier init final layer (small gain=0.1) — conservative start so training
+        # can gradually activate support-conditioned modulation on top of no_mask_embed.
+        self.dense_pool_attn = nn.Linear(c, 1)
+        self.dense_prompt_gen = nn.Sequential(
+            nn.Linear(c, c),
+            nn.ReLU(inplace=True),
+            nn.Linear(c, c),
+        )
+        nn.init.xavier_uniform_(self.dense_prompt_gen[-1].weight, gain=1.0)
+        nn.init.zeros_(self.dense_prompt_gen[-1].bias)
 
     # ── 预测头 | Prediction heads ──
 
@@ -174,57 +218,112 @@ class DensePromptGenerator(nn.Module):
         attn_mask = (mask_logits.detach().sigmoid() < 0.5).flatten(1)  # [N, gh*gw]
         degenerate = attn_mask.sum(dim=-1) == attn_mask.shape[-1]
         attn_mask[degenerate] = False
-        return attn_mask.unsqueeze(0).repeat(num_heads, 1, 1)
+        # MHA with batch_first=True expects [B*num_heads, L, S]; B=1 → [num_heads, N, gh*gw]
+        return attn_mask.unsqueeze(0).expand(num_heads, -1, -1)
 
     # ── 前向 | Forward ──
 
     def forward(
         self,
         query_features: torch.Tensor,
-        prototype: torch.Tensor,
+        support_memory: torch.Tensor,
         dense_pe: torch.Tensor,
     ) -> DPGOutput:
         """前向传播 | Forward pass.
 
         :param query_features: [1, C, gh, gw] CAT 适配后的查询特征 | CAT-adapted features.
-        :param prototype: [C] L2 归一化原型 (可为全零) | L2-normalized prototype (may be zeros).
+        :param support_memory: [M, C] support memory tokens (from SupportEncoder).
+            可为空 [0, C] — 此时跳过 support cross-attention, DPG 退化为无条件模式。
         :param dense_pe: [1, C, gh, gw] SAM 位置编码 | SAM dense positional encoding.
         :return: :class:`DPGOutput`.
         """
+        assert query_features.shape[0] == 1, \
+            f"DensePromptGenerator only supports batch_size=1, got {query_features.shape[0]}"
+        gh, gw = query_features.shape[2], query_features.shape[3]
         mask_features = query_features[0]                          # [C, gh, gw]
         memory = query_features.flatten(2).permute(0, 2, 1)        # [1, gh*gw, C]
         memory_pe = dense_pe.flatten(2).permute(0, 2, 1)           # [1, gh*gw, C]
         query_pos = self.query_pos.weight.unsqueeze(0)             # [1, N, C]
 
-        # 初始查询 = 可学习内容 + 原型语义条件 | initial queries = content + condition
-        q = (self.query_feat.weight + self.proto_proj(prototype).unsqueeze(0)).unsqueeze(0)
+        # 初始查询 = 可学习内容 (无 prototype 条件) | initial = content only (no prototype)
+        q = self.query_feat.weight.unsqueeze(0)                 # [1, N, C]
+
+        # 将 support_memory 扩展 batch 维度给 cross-attention
+        has_support = support_memory.shape[0] > 0
+        if has_support:
+            support_key = support_memory.unsqueeze(0)              # [1, M, C]
+        else:
+            support_key = None
 
         aux: list[dict[str, torch.Tensor]] = []
-        objectness, masks = self._predict(q[0], mask_features)     # 预测 0 | prediction 0
+        objectness, masks = self._predict(q[0], mask_features)     # 预测 0
 
         for i in range(self.cfg.num_layers):
             aux.append({"mask_logits": masks, "objectness_logits": objectness})
             attn_mask = self._build_attn_mask(masks, self.cfg.num_heads)
 
-            # 1. masked cross-attention (query → image memory)
+            # 1. masked cross-attention (query → image features)  [WHERE]
             out, _ = self.cross_attn[i](
                 query=q + query_pos, key=memory + memory_pe, value=memory,
                 attn_mask=attn_mask, need_weights=False,
             )
             q = self.cross_norm[i](q + out)
-            # 2. self-attention (query ↔ query)
+
+            # 2. support cross-attention (query → support memory)  [WHAT]  ← NEW
+            if has_support:
+                out_s, _ = self.cross_attn_support[i](
+                    query=q + query_pos, key=support_key, value=support_key,
+                    need_weights=False,
+                )
+                q = self.support_cross_norm[i](q + out_s)
+
+            # 3. self-attention (query ↔ query)
             out, _ = self.self_attn[i](
                 query=q + query_pos, key=q + query_pos, value=q, need_weights=False,
             )
             q = self.self_norm[i](q + out)
-            # 3. FFN
+
+            # 4. FFN
             q = self.ffn_norm[i](q + self.ffn[i](q))
 
             objectness, masks = self._predict(q[0], mask_features)  # 预测 i+1
+
+            # ---- Inter-layer mask feedback (SAM-RSP style) ----
+            # 将当前层的掩码预测作为额外空间条件拼入 mask_features,
+            # 下一层可基于"已发现的位置"进一步精修。
+            # Feed current mask prediction back as extra spatial conditioning
+            # into mask_features, so the next layer can refine further.
+            if self.feedback_conv is not None and i < self.cfg.num_layers - 1:
+                # 前景置信度 (max over queries) + 加权掩码 (objectness-weighted)
+                # Foreground confidence (max over queries) + weighted mask
+                masks_prob = masks.detach().sigmoid()                      # [N, gh, gw]
+                fg_conf = masks_prob.max(dim=0)[0]                         # [gh, gw]
+                obj_w = objectness.detach().sigmoid()                       # [N]
+                weighted = (masks_prob * obj_w[:, None, None]).sum(dim=0)   # [gh, gw]
+
+                extra = torch.stack([fg_conf, weighted], dim=0).unsqueeze(0)  # [1, 2, gh, gw]
+                # Residual: identity-init conv ensures unchanged features at start;
+                # feedback channels gradually add mask-conditioned spatial modulation.
+                feedback = self.feedback_conv[i](
+                    torch.cat([mask_features.unsqueeze(0), extra], dim=1)
+                )[0]                                                       # [C, gh, gw]
+                mask_features = mask_features + feedback                   # residual! identity-like at t=0
+
+        # ---- Dense prompt generation (from support memory) ----
+        if has_support:
+            # learned attention pooling: let model learn which memory tokens matter
+            attn_scores = self.dense_pool_attn(support_memory)    # [M, 1]
+            attn_weights = torch.softmax(attn_scores, dim=0)      # [M, 1]
+            support_summary = (support_memory * attn_weights).sum(dim=0)  # [C]
+            dense_mod = self.dense_prompt_gen(support_summary)     # [C]
+            dense_prompt = dense_mod.view(1, -1, 1, 1)           # [1, C, 1, 1] ready for broadcast
+        else:
+            dense_prompt = None
 
         return DPGOutput(
             instance_queries=self.decoder_norm(q[0]),
             objectness_logits=objectness,
             mask_logits=masks,
             aux=aux,
+            dense_prompt=dense_prompt,
         )

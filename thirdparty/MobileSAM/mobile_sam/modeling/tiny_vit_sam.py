@@ -613,6 +613,36 @@ class TinyViT(nn.Module):
         x=self.neck(x)
         return x
 
+    def forward_multi_scale(self, x):
+        """Forward pass returning multi-scale features in BCHW format.
+
+        Returns dict with keys:
+            stage0: [B, 64, H/4, W/4]   — low-level edges/texture
+            stage1: [B, 128, H/8, W/8]  — mid-level patterns
+            stage2: [B, 160, H/16, W/16] — high-level parts
+            stage3: [B, 256, H/16, W/16] — SAM-aligned embedding (neck output)
+
+        Spatial dims are dynamic — works with any input size (not just 1024).
+        """
+        x = self.patch_embed(x)                       # BCHW [B, 64, H/4, W/4]
+        features = {"stage0": x}
+
+        x = self.layers[0](x)                         # ConvLayer → BHWC [B, H/8*W/8, 128]
+        B = x.shape[0]
+        hw = int(x.shape[1] ** 0.5)                   # H/8 = W/8 (square)
+        features["stage1"] = x.reshape(B, hw, hw, -1).permute(0, 3, 1, 2).contiguous()
+
+        x = self.layers[1](x)                         # BasicLayer → BHWC [B, H/16*W/16, 160]
+        hw = int(x.shape[1] ** 0.5)                   # H/16 = W/16
+        features["stage2"] = x.reshape(B, hw, hw, -1).permute(0, 3, 1, 2).contiguous()
+
+        for i in range(2, len(self.layers)):
+            x = self.layers[i](x)
+
+        x = x.view(B, hw, hw, -1).permute(0, 3, 1, 2)  # [B, 320, H/16, W/16]
+        features["stage3"] = self.neck(x)               # [B, 256, H/16, W/16]
+        return features
+
     def forward(self, x):
         x = self.forward_features(x)
         #x = self.norm_head(x)

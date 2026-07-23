@@ -14,7 +14,7 @@ The single evaluation entry of AdaSAM, strictly reusing the frozen Protocol V3
     6. 固定评估清单 (frozen manifest) → 跨运行/跨模型完全一致的 query 集合。
 
 模型输出如何成为实例 | How model output becomes instances:
-    DensePromptGenerator 生成 N 个实例查询, SAM MaskDecoder 逐查询解码掩码,
+    EfficientNetPromptGenerator 生成 N 个实例查询, SAM MaskDecoder 逐查询解码掩码,
     score = sigmoid(objectness) × iou_pred 过滤 —— 无点提示、无 top-k、无 NMS、
     无 oracle、无 GT 提示。The DensePromptGenerator emits N instance queries;
     the SAM MaskDecoder decodes one mask per query; predictions are filtered by
@@ -44,9 +44,8 @@ from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
 from adasam.metrics import COCOInstanceEvaluator, greedy_match, instance_miou
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
-from adasam.prototype import PrototypeBuilder
 from adasam.utils import set_seed
-from adasam.utils.transforms import preprocess_image
+from adasam.utils.transforms import preprocess_image, resize_mask
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -115,11 +114,12 @@ class Evaluator:
         self.split = args.split
         self.k_shot = args.k_shot
 
-        # ── checkpoint 加载一次, 其 config 作为默认来源 | load checkpoint once; its config is the default source ──
+        # ── checkpoint 加载一次, 其 config 作为默认来源 | load checkpoint once ──
         ckpt = torch.load(args.checkpoint, map_location=self.device)
         cfg = ckpt.get("config", {})
-        pcfg = cfg.get("prototype", {})
-        self.embed_dim = int(pcfg.get("embed_dim", 256))
+        se_cfg = cfg.get("support_encoder", cfg.get("prototype", {}))
+        self.embed_dim = int(se_cfg.get("embed_dim", 256))
+        self.gh_gw = (64, 64)  # MobileSAM feature grid
         mtype = cfg.get("backbone", {}).get("model_type", "vit_t")
         weights_path = self._resolve(cfg.get("backbone", {}).get("checkpoint", "weights/mobile_sam.pt"))
         self.data_root = Path(args.data_root) if args.data_root else self._resolve(
@@ -134,7 +134,7 @@ class Evaluator:
             self.logger.add_backend(ConsoleBackend())
             self.logger.add_backend(FileBackend(str(self.out_dir / "eval.jsonl")))
 
-        # ── 微调模型: backbone + AdaSAMModel (从 checkpoint 恢复) | fine-tuned model ──
+        # ── 微调模型: backbone + AdaSAMModel (从 checkpoint 恢复) ──
         if "prompt_generator" not in cfg:
             raise ValueError(
                 f"old-format checkpoint (no 'prompt_generator' config section): "
@@ -145,9 +145,12 @@ class Evaluator:
         self.backbone = MobileSAMBackbone(sam_ft.image_encoder, sam_ft.image_encoder.img_size).to(self.device)
         self.image_size = self.backbone.img_size
         self.model = AdaSAMModel(sam_ft, AdaSAMModelConfig.from_dict(cfg)).to(self.device)
-        self.model.load_state_dict(ckpt["model"], strict=True)
+        missing, unexpected = self.model.load_state_dict(ckpt["model"], strict=False)
+        if missing:
+            print(f"[eval] WARNING: missing keys (new code, old ckpt): {missing}")
+        if unexpected:
+            print(f"[eval] WARNING: unexpected keys (new ckpt, old code): {unexpected}")
         self.model.eval()
-        self.proto_builder = PrototypeBuilder(self.embed_dim)
 
         # ── CAT-SAM Adapter (optional) | CAT-SAM 适配器 (可选) ──
         self.cat_adapter = None
@@ -171,20 +174,20 @@ class Evaluator:
         self.stem_to_id = {Path(v["file_name"]).stem: k for k, v in self.coco.imgs.items()}
         self.class_index = self._build_class_index()
 
-        # ── 零样本 (独立 clean sam, 避免用到微调后的 mask_decoder) | zero-shot clean sam ──
+        # ── 零样本 (独立 clean sam, 避免用到微调后的 mask_decoder) ──
         self.zs_eval = None
         self._zs_generator = None
         if not args.no_zero_shot:
             self.zs_eval = COCOInstanceEvaluator(gt_path, iouType="segm")
             sam_zs = build_mobile_sam(weights_path, mtype, self.device)
-            from mobile_sam import SamAutomaticMaskGenerator  # vendored (path already injected)
+            from mobile_sam import SamAutomaticMaskGenerator
             self._zs_generator = SamAutomaticMaskGenerator(
                 sam_zs, points_per_side=args.zs_points_per_side)
 
         self.logger.log_info(
             "config",
-            f"AdaSAM Eval V3 | K={self.k_shot} seed={args.seed} split={self.split} "
-            f"device={self.device} → {self.out_dir}")
+            f"AdaSAM Eval V3 (v2 support-encoder) | K={self.k_shot} seed={args.seed} "
+            f"split={self.split} device={self.device} → {self.out_dir}")
 
     # ── 路径 | Paths ──
 
@@ -194,7 +197,7 @@ class Evaluator:
         p = Path(path)
         return p if p.is_absolute() else (_REPO_ROOT / p)
 
-    # ── 类别索引: cls → {源全图 → {tile stem}} | class → {source scene → {stems}} ──
+    # ── 类别索引: cls → {源全图 → {tile stem}} ──
 
     def _build_class_index(self) -> dict[int, dict[int, set[str]]]:
         idx: dict[int, dict[int, set[str]]] = defaultdict(lambda: defaultdict(set))
@@ -234,20 +237,27 @@ class Evaluator:
             fg |= self.coco.annToMask(ann).astype(bool)
         return torch.from_numpy(fg).float()
 
-    # ── 每类原型 + query 集合 (场景不相交) | per-class prototypes + query set ──
+    # ── 每类 support 表征 + query 集合 | per-class support repr + query set ──
 
-    def build_prototypes(self, manifest_stems: Optional[set[str]]):
+    def build_support_repr(self, manifest_stems: Optional[set[str]]):
+        """构建每类的 support features + masks 对 (替代 prototype)。
+
+        Build per-class support features + masks pairs (replaces prototypes).
+
+        :return: (class_support_data: dict, query_stems: set)
+            class_support_data[cls] = (features [K,256,64,64], masks [K,64,64]) or None
+        """
         rng = random.Random(self.args.seed)
-        class_protos: dict[int, torch.Tensor] = {}
+        class_support_data: dict[int, tuple[torch.Tensor, torch.Tensor] | None] = {}
         query_stems: set[str] = set(manifest_stems) if manifest_stems is not None else set()
 
         for cls, src_to_stems in sorted(self.class_index.items()):
             sources = list(src_to_stems)
             if len(sources) < self.k_shot + 1:
+                class_support_data[cls] = None
                 continue
 
             if manifest_stems is None:
-                # 首次: 确定性采样 query 源图 | first run: deterministic query sampling
                 n_q = min(self.args.per_class, len(sources) - self.k_shot)
                 q_sources = random.Random(self.args.seed + 99999).sample(sources, n_q)
                 for s in q_sources:
@@ -261,6 +271,7 @@ class Evaluator:
 
             support_pool = [s for s in sources if s not in query_src_set]
             if len(support_pool) < self.k_shot:
+                class_support_data[cls] = None
                 continue
             support_sources = rng.sample(support_pool, self.k_shot)
             support_stems = [s for src in support_sources for s in sorted(src_to_stems[src])]
@@ -277,10 +288,20 @@ class Evaluator:
                 embs.append(emb[0])
                 masks.append(fg)
             if embs:
-                class_protos[cls] = self.proto_builder.build(embs, masks)
-                self.logger.log_info("proto", f"class {cls:>2d} ({ISAID_CATEGORIES.get(cls,'?')}): "
-                                              f"K={self.k_shot} from {len(support_sources)} scenes")
-        return class_protos, query_stems
+                feats = torch.stack(embs, dim=0)               # [K, 256, 64, 64]
+                masks_grid = torch.stack(
+                    [resize_mask(m, self.gh_gw).to(self.device) for m in masks], dim=0
+                )                                                # [K, 64, 64]
+                if masks_grid.sum() >= 1.0:
+                    class_support_data[cls] = (feats, masks_grid)
+                    self.logger.log_info("support",
+                                         f"class {cls:>2d} ({ISAID_CATEGORIES.get(cls,'?')}): "
+                                         f"K={self.k_shot} from {len(support_sources)} scenes")
+                else:
+                    class_support_data[cls] = None
+            else:
+                class_support_data[cls] = None
+        return class_support_data, query_stems
 
     # ── 逐 tile 推理 | Per-tile inference ──
 
@@ -288,19 +309,23 @@ class Evaluator:
     def _predict_tile(
         self,
         rgb: np.ndarray,
-        class_protos: dict[int, torch.Tensor],
+        class_support_data: dict[int, tuple[torch.Tensor, torch.Tensor] | None],
     ):
         """→ {cls: [(mask bool[H,W], score float), ...]} | per-class predicted instances.
 
-        每类: 原型作为语义条件 → AdaSAMModel.predict (DPG 查询 → SAM 解码 → score 过滤)。
-        Per class: prototype as the semantic condition → AdaSAMModel.predict
-        (DPG queries → SAM decode → score filtering).
+        每类: support features + masks → SupportEncoder → DPG → SAM decode → score 过滤。
+        Per class: support features + masks → SupportEncoder → DPG → SAM decode.
         """
         emb, meta = self._embed(rgb)
         preds: dict[int, list[tuple[np.ndarray, float]]] = defaultdict(list)
-        for cls, proto in class_protos.items():
+        for cls, sup_data in class_support_data.items():
+            if sup_data is None:
+                continue
+            sup_feats, sup_masks = sup_data
             masks, scores = self.model.predict(
-                emb, proto.to(self.device),
+                emb,
+                sup_feats.to(self.device),
+                sup_masks.to(self.device),
                 meta.input_size, meta.original_size,
                 score_thr=self.args.score_thr,
             )
@@ -320,7 +345,7 @@ class Evaluator:
         manifest_existed = manifest_path.exists()
         manifest_stems = set(load_manifest(manifest_path)) if manifest_existed else None
 
-        class_protos, query_stems = self.build_prototypes(manifest_stems)
+        class_support_data, query_stems = self.build_support_repr(manifest_stems)
         if not manifest_existed:
             save_manifest(manifest_path, sorted(query_stems))
             self.logger.log_info("manifest", f"generated fixed eval set: {len(query_stems)} tiles")
@@ -344,7 +369,7 @@ class Evaluator:
             evaluated_image_ids.append(image_id)
             rgb = self._load_tile_rgb(stem)
 
-            preds = self._predict_tile(rgb, class_protos)
+            preds = self._predict_tile(rgb, class_support_data)
             for cls, insts in preds.items():
                 for mask, score in insts:
                     self.ft_eval.add_prediction(image_id, cls, mask, score)
@@ -420,7 +445,6 @@ class Evaluator:
                 "instance_miou": round(per_class_miou.get(cls, 0.0), 4),
             }
 
-        # overall precision / recall / f1 (aggregated across all classes)
         _all_tp = sum(c["tp"] for c in per_class_counts.values())
         _all_fp = sum(c["fp"] for c in per_class_counts.values())
         _all_fn = sum(c["fn"] for c in per_class_counts.values())

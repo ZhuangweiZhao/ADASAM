@@ -3,7 +3,6 @@
 from adasam.decoder.sam_mask_decoder import (
     QueryMaskDecoder,
     QueryMaskDecoderConfig,
-    PrototypeAdapter,
 )
 
-__all__ = ["QueryMaskDecoder", "QueryMaskDecoderConfig", "PrototypeAdapter"]
+__all__ = ["QueryMaskDecoder", "QueryMaskDecoderConfig"]

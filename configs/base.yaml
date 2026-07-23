@@ -24,9 +24,15 @@ fewshot:
   min_tiles: 30                                       # exclude classes with < 30 tiles
   train_mode: novel                                   # base | novel | all (training class set)
 
-# ── Prototype (semantic condition only | 仅语义条件, 不负责定位) ──
-prototype:
+# ── Support Encoder (replaces prototype) ──
+support_encoder:
   embed_dim: 256                                      # SAM prompt-token dim
+  n_support_tokens: 16                                # N_s tokens per support image
+  n_memory_tokens: 64                                 # M memory tokens (Stage 2 compression)
+  n_encoder_layers: 2                                 # L_s self-attention layers (Stage 2)
+  n_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
 
 # ── Dense Prompt Generator (核心创新 | core innovation) ──
 prompt_generator:
@@ -35,10 +41,11 @@ prompt_generator:
   num_heads: 8
   ffn_dim: 1024
   dropout: 0.0
+  use_coarse_prior: true                              # SAM-RSP coarse prior (RSP + pixel prototype)
+  use_feedback: true                                  # inter-layer mask feedback
 
 # ── SAM decoder wrapper ──
 decoder:
-  use_proto_token: true                               # prepend zero-init prototype token
   train_mask_decoder: true
   decode_chunk_size: 0                                # 0 = all N at once; 32 if OOM
 

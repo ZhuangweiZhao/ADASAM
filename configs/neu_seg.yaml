@@ -1,0 +1,55 @@
+# AdaSAM NEU_Seg (FastSAM-aligned) | NEU_Seg Configuration.
+# ==========================================================
+# 对齐 AdaTile-FastSAM 最佳实践:
+#   - 无 1024 preprocess (pad to 32, 原生分辨率)
+#   - 无 prototype (PureDecoderP3P4)
+#   - Focal Loss γ=5.0 + Dice Loss
+#   - InstanceNorm + Kaiming init
+
+backbone:
+  model_type: vit_t
+  checkpoint: weights/mobile_sam.pt
+  freeze: true
+  img_size: 224            # 200→pad to 224 (32x), 原生分辨率, 无需 1024
+
+data:
+  data_root: data/NEU_Seg
+  image_size: [200, 200]
+  num_classes: 4
+  class_names: ["background", "Inclusion", "Patch", "Scratch"]
+
+augmentation:
+  enabled: true
+  p_flip: 0.5
+  p_rotate: 0.5
+  brightness: 0.2
+  contrast: 0.2
+  noise_std: 0.02
+
+fewshot:
+  k_shot: 3
+  steps_per_epoch: 200
+
+decoder:
+  p3_channels: 128       # stage1 (H/8)
+  p4_channels: 256       # neck (H/16)
+  mid_channels: 256      # base channel dim (higher = more capacity)
+  out_channels: 4
+
+loss:
+  ce_weight: 0.5          # alpha: Focal vs Dice balance
+  focal_gamma: 5.0        # γ=5 for extreme class imbalance
+
+train:
+  epochs: 200
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  device: cuda
+  eval_every: 5
+
+eval:
+  num_classes: 4
+
+seed: 42
+output_dir: runs

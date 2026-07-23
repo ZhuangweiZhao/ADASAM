@@ -74,7 +74,11 @@ class HungarianMatcher:
         """
         n, m = mask_logits.shape[0], gt_masks.shape[0]
         if m > n:
-            raise ValueError(f"more GT instances ({m}) than queries ({n}); cap GT first")
+            # Cap GT to top-n by area (largest first), keeping the most salient instances
+            areas = gt_masks.flatten(1).sum(dim=1)
+            _, top_idx = areas.topk(n)
+            gt_masks = gt_masks[top_idx]
+            m = n
         if m == 0:
             raise ValueError("gt_masks is empty; caller must skip empty episodes")
 

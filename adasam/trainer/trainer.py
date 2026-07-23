@@ -40,7 +40,8 @@ from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
 from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
-from adasam.prototype import PrototypeBuilder
+# PrototypeBuilder removed in v2 — support info now preserved as token sequence
+# via SupportEncoder (inside AdaSAMModel)
 from adasam.utils import set_seed
 from adasam.utils.transforms import preprocess_image
 
@@ -85,10 +86,10 @@ class Trainer:
         self.backbone = MobileSAMBackbone(sam.image_encoder, sam.image_encoder.img_size).to(self.device)
         self.image_size = self.backbone.img_size
 
-        self.embed_dim = int(config.get("prototype", {}).get("embed_dim", 256))
+        self.embed_dim = int(config.get("support_encoder", {}).get("embed_dim", 256))
         self.model = AdaSAMModel(sam, AdaSAMModelConfig.from_dict(config)).to(self.device)
         self.num_queries = self.model.num_queries
-        self.proto_builder = PrototypeBuilder(self.embed_dim)
+        self.embed_dim = int(config.get("support_encoder", {}).get("embed_dim", 256))
 
         # ── 匹配器 / 损失准则 | Matcher / criterion ──
         loss_cfg = config.get("loss", {})
@@ -115,11 +116,10 @@ class Trainer:
         # ── 优化器: 全新模块全 lr, 预训练 MaskDecoder 降 lr | Optimizer param groups ──
         lr = float(tcfg.get("lr", 1e-4))
         sam_mult = float(tcfg.get("sam_decoder_lr_mult", 0.1))
-        param_groups = [{"params": list(self.model.dpg.parameters()), "lr": lr}]
-        if self.model.sam_decoder.proto_adapter is not None:
-            param_groups.append(
-                {"params": list(self.model.sam_decoder.proto_adapter.parameters()), "lr": lr}
-            )
+        param_groups = [
+            {"params": list(self.model.dpg.parameters()), "lr": lr},
+            {"params": list(self.model.support_encoder.parameters()), "lr": lr},
+        ]
         param_groups.append({
             "params": [p for p in self.model.sam_decoder.mask_decoder.parameters()
                        if p.requires_grad],
@@ -168,16 +168,20 @@ class Trainer:
             emb = self.cat_adapter(emb)
         return emb
 
-    # ── 原型构建 (仅语义条件) | Prototype build (semantic condition only) ──
+    # ── Support 表征构建 | Build support representation ──
 
-    def _build_prototype(self, support_indices: list[int], class_id: int) -> Optional[torch.Tensor]:
-        """由 K 张 support 构建类原型 | Build class prototype from K supports.
+    def _build_support_memory(
+        self, support_indices: list[int], class_id: int
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """由 K 张 support 构建 support features + masks 对 (供 SupportEncoder 使用)。
 
-        support 批量过冻结骨干, 再过可训练 CATAdapter (Siamese, 梯度经原型流入适配器)。
-        Supports are batch-encoded by the frozen backbone, then pass the trainable
-        CATAdapter (Siamese; gradients flow into the adapter through the prototype).
+        Build support features + masks pairs from K supports (fed to SupportEncoder).
 
-        :return: [256] L2 归一化原型, 无有效 support 时 None | prototype or None.
+        不再压缩为单一 prototype; 保留 [K, C, gh, gw] 空间信息。
+        No longer compresses to a single prototype; preserves [K, C, gh, gw] spatial info.
+
+        :return: (support_features [K, 256, 64, 64], support_masks [K, 64, 64]),
+            无有效 support 时返回 None | None if no valid support.
         """
         images, masks = [], []
         for idx in support_indices:
@@ -194,12 +198,19 @@ class Trainer:
         feats = self.backbone(torch.stack(images, dim=0))["image_embedding"]  # [K,256,64,64]
         if self.cat_adapter is not None:
             feats = self.cat_adapter(feats)
-        prototype = self.proto_builder.build(
-            [feats[k] for k in range(feats.shape[0])], masks
-        )
-        if float(prototype.detach().norm()) == 0.0:
+
+        # Resize masks to feature grid [64, 64]
+        gh, gw = feats.shape[2], feats.shape[3]
+        from adasam.utils.transforms import resize_mask
+        masks_resized = torch.stack(
+            [resize_mask(m, (gh, gw)).to(self.device) for m in masks], dim=0
+        )  # [K, gh, gw]
+
+        # Filter out all-zero masks (no FG in any support)
+        if masks_resized.sum() < 1.0:
             return None
-        return prototype
+
+        return feats, masks_resized
 
     @staticmethod
     def _class_foreground(instances: list[dict], class_id: int, size: int) -> Optional[torch.Tensor]:
@@ -217,10 +228,11 @@ class Trainer:
     def _train_episode(self, episode: dict) -> Optional[dict]:
         cls = episode["class_id"]
 
-        # 1. 原型 (语义条件) | prototype (semantic condition)
-        prototype = self._build_prototype(episode["support_indices"], cls)
-        if prototype is None:
+        # 1. Support representation (support features + masks → SupportEncoder)
+        support_data = self._build_support_memory(episode["support_indices"], cls)
+        if support_data is None:
             return None
+        support_features, support_masks_grid = support_data  # [K,256,64,64], [K,64,64]
 
         # 2. query GT 实例 (该类全部, 超出查询数时随机截断) | class GT instances
         query = self.dataset[episode["query_index"]]
@@ -233,7 +245,9 @@ class Trainer:
 
         # 3. 前向 + 匹配损失 | forward + matched loss
         emb = self._embed(query["image"])                        # [1,256,64,64]
-        dpg_out, low_res, iou_pred = self.model.forward_train(emb, prototype)
+        dpg_out, low_res, iou_pred = self.model.forward_train(
+            emb, support_features, support_masks_grid
+        )
         losses = self.criterion(low_res[:, 0], iou_pred[:, 0], dpg_out, gt_masks)
 
         # 4. 反传 | backward

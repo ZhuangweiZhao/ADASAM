@@ -1,0 +1,84 @@
+# AdaSAM iSAID-5i 配置 | Configuration for iSAID-5i Few-shot Segmentation
+# ==========================================================================
+# 基于 base.yaml, 覆盖数据/小样本参数。Inherits from base.yaml; overrides data/fewshot.
+
+# ── Backbone (MobileSAM, frozen) ──
+backbone:
+  model_type: vit_t
+  checkpoint: weights/mobile_sam.pt
+  image_size: 1024                                    # 256² tiles → upsampled to 1024²
+
+# ── Data (iSAID-5i Few-shot Segmentation) ──
+data:
+  data_root: data/iSAID-5i
+  tile_size: 256                                      # raw tile resolution
+  num_classes: 15
+  fold: 0                                             # 0/1/2
+  eval_manifest: null                                 # not used for iSAID-5i
+
+# ── Few-shot episode ──
+fewshot:
+  k_shot: 5
+  min_tiles: 10
+  train_mode: novel                                   # "base" | "novel" | "all"
+
+# ── Support Encoder ──
+support_encoder:
+  embed_dim: 256
+  n_support_tokens: 16
+  n_memory_tokens: 64
+  n_encoder_layers: 2
+  n_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
+
+# ── Dense Prompt Generator ──
+prompt_generator:
+  num_queries: 16                                     # fewer queries (semantic, not instance)
+  num_layers: 3
+  num_heads: 8
+  ffn_dim: 1024
+  dropout: 0.0
+  use_coarse_prior: true                              # SAM-RSP coarse prior (RSP + pixel prototype)
+  use_feedback: true                                  # inter-layer mask feedback
+
+# ── SAM decoder wrapper ──
+decoder:
+  train_mask_decoder: true
+  decode_chunk_size: 0
+
+# ── Loss / Hungarian matching ──
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  objectness_weight: 2.0
+  iou_weight: 1.0
+  aux_weight: 0.3      # reduced from 1.0 — was dominating 77% of total loss
+  eos_coef: 0.1
+  focal_gamma: 5.0
+  focal_eps: 1.0e-4
+  match_cost_objectness: 2.0
+  match_cost_mask: 5.0
+  match_cost_dice: 5.0
+
+# ── Training ──
+train:
+  epochs: 50
+  episodes_per_epoch: 200
+  lr: 1.0e-4
+  sam_decoder_lr_mult: 0.1
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  device: cuda
+  use_cat_adapter: false
+
+# ── Evaluation ──
+eval:
+  iou_thr: 0.5
+  score_thr: 0.3
+  min_area: 16
+  per_class: 20
+
+# ── Reproducibility ──
+seed: 42
+output_dir: runs
