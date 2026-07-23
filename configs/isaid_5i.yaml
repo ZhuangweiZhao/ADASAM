@@ -71,6 +71,8 @@ train:
   sam_decoder_lr_mult: 0.1
   weight_decay: 1.0e-4
   grad_clip: 1.0
+  val_every: 10          # 每 N 个 epoch 验证一次 (默认 10)
+  val_samples: 30        # 验证时采样多少张 tile (默认 30, 全量 3010)
   device: cuda
   use_cat_adapter: false
 
@@ -84,3 +86,9 @@ eval:
 # ── Reproducibility ──
 seed: 42
 output_dir: runs
+
+# ── Debug trace ──
+debug:
+  enabled: false         # true = 启用数据流追踪
+  level: 2               # 0=shapes only, 1=+stats, 2=+spatial, 3=+gradients
+  log_every: 50          # 每 N 个 episode 打印一次 (避免刷屏)

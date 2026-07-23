@@ -51,6 +51,7 @@ from adasam.logging.backends import ConsoleBackend, FileBackend
 from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
 from adasam.utils import set_seed
+from adasam.utils.debug_trace import configure_from_config, tracer
 from adasam.utils.transforms import preprocess_image, resize_mask
 
 
@@ -173,6 +174,9 @@ class ISAID5iTrainer:
         exp = f"isaid5i_fold{self.fold}_k{self.k_shot}_{self.mode}_seed{self.seed}"
         self.out_dir = self._resolve(cfg.get("output_dir", "runs")) / exp
         self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # ── Debug tracer (数据流追踪) | Data-flow tracer ──
+        configure_from_config(cfg, output_dir=self.out_dir)
         self.logger = get_logger("trainer.isaid5i")
         if not self.logger.backends:
             self.logger.add_backend(ConsoleBackend())
@@ -294,7 +298,17 @@ class ISAID5iTrainer:
         self.optimizer.zero_grad()
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(self._trainable, self.grad_clip)
+
+        # ── Debug: gradient trace ──
+        if tracer.should_log and tracer.level >= 3:
+            tracer.grad("spatial_prompt_scale", self.model.dpg.spatial_prompt_scale)
+            tracer.grad_summary(self.model.dpg, prefix="DPG")
+            tracer.section("AdaSAM — Post-backward gradient check")
+
         self.optimizer.step()
+
+        # ── Debug: advance step counter ──
+        tracer.step()
 
         return {
             "loss": float(losses["loss"].detach()),
@@ -574,6 +588,8 @@ class ISAID5iTrainer:
         )
 
         self.logger.flush()
+        tracer.summary()
+        tracer.close()
         return best_path
 
     def _save(self, path: Path, epoch: int, metrics: dict) -> None:
@@ -619,6 +635,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default=None)
     p.add_argument("--data-root", default=None)
     p.add_argument("--weights", default=None, help="MobileSAM weights path override")
+    p.add_argument("--debug", type=int, default=None, choices=[0, 1, 2, 3],
+                   help="enable data-flow debug trace (0=off, 1=shape, 2=+spatial, 3=+grad)")
+    p.add_argument("--val-every", type=int, default=None,
+                   help="validate every N epochs (default: 10)")
+    p.add_argument("--val-samples", type=int, default=None,
+                   help="validation tile samples (default: 30)")
     return p.parse_args()
 
 
@@ -639,6 +661,8 @@ def load_config(args: argparse.Namespace) -> dict:
         (("train", "epochs"), args.epochs),
         (("train", "episodes_per_epoch"), args.steps),
         (("train", "lr"), args.lr),
+        (("train", "val_every"), args.val_every),
+        (("train", "val_samples"), args.val_samples),
         (("train", "device"), args.device),
         (("seed",), args.seed),
         (("output_dir",), args.output_dir),
@@ -663,6 +687,11 @@ def main() -> None:
     """
     args = parse_args()
     cfg = load_config(args)
+    # CLI --debug 覆盖 yaml debug.enabled
+    if args.debug is not None:
+        cfg.setdefault("debug", {})["enabled"] = True
+        cfg["debug"]["level"] = args.debug
+        cfg["debug"]["log_every"] = 1
     trainer = ISAID5iTrainer(cfg, args)
     best = trainer.train()
     print(f"\n[train_isaid_5i] done. best: {best}")

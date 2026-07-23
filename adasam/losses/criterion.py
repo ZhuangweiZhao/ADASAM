@@ -30,6 +30,7 @@ import torch.nn.functional as F
 from adasam.losses.hungarian_matcher import HungarianMatcher
 from adasam.losses.seg_losses import dice_loss, focal_loss, mask_iou
 from adasam.prompt import DPGOutput
+from adasam.utils.debug_trace import tracer
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,20 @@ class SetCriterion(nn.Module):
                 probs[~matched_mask].mean() if (~matched_mask).any()
                 else torch.zeros_like(mean_matched)
             )
+
+        # ── Debug trace: loss breakdown ──
+        tracer.section("SetCriterion — Loss Breakdown")
+        tracer.tensor_dict("loss", {
+            "total":    loss.detach(),
+            "focal":    focal.detach(),
+            "dice":     dice.detach(),
+            "obj":      obj.detach(),
+            "iou_head": iou_head.detach(),
+            "aux":      aux_total.detach(),
+            "prompt":   prompt_loss.detach(),
+            "var":      var_loss.detach(),
+        })
+        tracer.tensor("n_matched", torch.as_tensor(float(pred_idx.numel())).unsqueeze(0))
 
         return {
             "loss": loss,

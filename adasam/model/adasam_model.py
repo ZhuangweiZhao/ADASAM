@@ -32,6 +32,7 @@ from adasam.decoder import QueryMaskDecoder, QueryMaskDecoderConfig
 from adasam.prompt import DensePromptGenerator, DensePromptGeneratorConfig, DPGOutput
 from adasam.prompt.coarse_prior import CoarsePriorModule
 from adasam.support_encoder import SupportEncoder, SupportEncoderConfig
+from adasam.utils.debug_trace import tracer
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,13 @@ class AdaSAMModel(nn.Module):
         self.dpg = DensePromptGenerator(cfg.dpg)
         self.sam_decoder = QueryMaskDecoder(sam.prompt_encoder, sam.mask_decoder, cfg.decoder)
 
+        # V3.4: 可学习 dense prompt 混合权重 | learnable dense prompt blend
+        # no_mask_embed (std≈0.03) 的幅值 >> spatial dense_prompt (std≈0.002),
+        # 直接相加会淹没空间结构。可学习 α 让训练自动决定支持多少空间信息。
+        # no_mask_embed magnitude >> spatial dense_prompt → direct addition drowns
+        # spatial structure. Learnable alpha lets training find the right balance.
+        self.dense_prompt_alpha = nn.Parameter(torch.tensor(0.5))
+
         # SAM-RSP 式粗先验模块 (opt-in, 默认启用)
         # SAM-RSP style coarse prior module (opt-in, enabled by default)
         if cfg.use_coarse_prior:
@@ -101,12 +109,21 @@ class AdaSAMModel(nn.Module):
         :param support_masks: [K, gh, gw] K 张 FG 掩码 (已 resize 到特征图尺寸).
         :return: (dpg_out, low_res_logits [N,1,256,256], iou_pred [N,1]).
         """
+        # 0. Trace inputs
+        tracer.section("AdaSAM.forward_train — Inputs")
+        tracer.tensor("query_features", query_features, spatial=True)
+        tracer.tensor("support_features", support_features, spatial=True)
+        tracer.tensor("support_masks", support_masks)
+
         # 1. Build support memory tokens
         support_memory = self.support_encoder(support_features, support_masks)  # [M, C]
+        tracer.tensor("support_memory", support_memory, detail=True)
 
         # 2. Coarse Prior (SAM-RSP style): enrich query features with RSP + pixel prototype
         if self.coarse_prior is not None:
             query_features, _rsp_map = self.coarse_prior(query_features, support_memory)
+            tracer.section("AdaSAM.forward_train — CoarsePrior")
+            tracer.tensor("query_features (after coarse_prior)", query_features, spatial=True)
 
         # 3. DPG: generate instance queries + dense prompt (with support conditioning)
         #    V3: pass support_features + support_masks for spatial dense prompt
@@ -115,15 +132,33 @@ class AdaSAMModel(nn.Module):
                            support_features=support_features,
                            support_masks_grid=support_masks)
 
+        tracer.section("AdaSAM.forward_train — DPG Output")
+        tracer.tensor("instance_queries", dpg_out.instance_queries, detail=True)
+        tracer.tensor("objectness_logits", dpg_out.objectness_logits.unsqueeze(0))
+        tracer.tensor("mask_logits (64²)", dpg_out.mask_logits.unsqueeze(0))
+        tracer.tensor("dense_prompt", dpg_out.dense_prompt, spatial=True)
+        tracer.tensor("prompt_mask", dpg_out.prompt_mask)
+        if dpg_out.aux:
+            aux_0 = dpg_out.aux[0]
+            tracer.tensor("aux[0].mask_logits (64²)", aux_0["mask_logits"].unsqueeze(0))
+            tracer.tensor("aux[0].objectness_logits", aux_0["objectness_logits"].unsqueeze(0))
+
         # 4. Build dense prompt for SAM decoder:
-        #    V3 spatial: [1,C,gh,gw] — residual with no_mask_embed broadcast
-        #    V2 legacy: [1,C,1,1] — global channel modulation
+        #    V3.4: 可学习混合 — alpha × spatial_prompt + (1-alpha) × no_mask
+        #    解决 no_mask (std≈0.03) 淹没 spatial_prompt (std≈0.002) 的问题。
+        #    Learnable blend: alpha controls how much spatial structure vs SAM prior.
         if dpg_out.dense_prompt is not None:
             no_mask = (
                 self.sam_decoder.prompt_encoder.no_mask_embed.weight
                 .view(1, -1, 1, 1)
             )
-            dense_override = no_mask + dpg_out.dense_prompt   # broadcast: [1,C,1,1] + [1,C,H,W]
+            alpha = self.dense_prompt_alpha.clamp(0.0, 1.0)  # [0,1] 约束
+            dense_override = (1.0 - alpha) * no_mask + alpha * dpg_out.dense_prompt
+            tracer.section("AdaSAM.forward_train — Dense Override")
+            tracer.tensor("no_mask_embed [1,C,1,1]", no_mask)
+            tracer.tensor("dense_override [1,C,H,W]", dense_override, spatial=True)
+            tracer.tensor("dense_prompt_alpha",
+                          torch.tensor([[float(alpha)]], device=query_features.device))
         else:
             dense_override = None
 
@@ -131,6 +166,13 @@ class AdaSAMModel(nn.Module):
         low_res, iou_pred = self.sam_decoder(
             query_features, dpg_out.instance_queries, dense_override
         )
+        tracer.section("AdaSAM.forward_train — SAM Decoder Output")
+        tracer.tensor("low_res_masks [N,1,256,256]", low_res)
+        tracer.tensor("iou_pred [N,1]", iou_pred)
+        # scores (before threshold)
+        scores = dpg_out.objectness_logits.sigmoid() * iou_pred[:, 0].clamp(0.0, 1.0)
+        tracer.tensor("scores (obj×iou)", scores.unsqueeze(0))
+
         return dpg_out, low_res, iou_pred
 
     @torch.no_grad()
