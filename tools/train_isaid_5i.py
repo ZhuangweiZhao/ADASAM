@@ -407,6 +407,13 @@ class ISAID5iTrainer:
         bg_union = 0.0
         pixel_correct = 0.0
         pixel_total = 0.0
+        # Diagnostics: track prediction quality
+        n_total_calls = 0        # total predict() calls
+        n_nonempty = 0           # predict() returned ≥1 mask
+        n_score_filtered = 0     # all masks filtered by score threshold
+        n_exception = 0          # predict() raised exception
+        score_sum = 0.0          # sum of max scores (for averaging)
+        area_sum = 0.0           # sum of prediction areas
 
         for idx in tqdm(val_tiles, desc="validate", leave=False):
             sample = self.val_ds[idx]
@@ -429,6 +436,7 @@ class ISAID5iTrainer:
                         gt = gt | inst["mask"].numpy()
 
                 # Predict
+                n_total_calls += 1
                 try:
                     masks_pred, scores = self.model.predict(
                         emb, sup_feat, sup_mask,
@@ -437,11 +445,17 @@ class ISAID5iTrainer:
                     # Merge all instance masks into one FG mask
                     if len(masks_pred) > 0:
                         pred = masks_pred.cpu().numpy().any(axis=0)
+                        n_nonempty += 1
+                        area_sum += float(pred.sum())
                     else:
                         pred = np.zeros((256, 256), dtype=bool)
+                        n_score_filtered += 1
+                    if len(scores) > 0:
+                        score_sum += float(scores.max())
                 except (RuntimeError, ValueError, IndexError) as exc:
                     print(f"[WARN] prediction failed for tile {idx} class {cls}: {exc}")
                     pred = np.zeros((256, 256), dtype=bool)
+                    n_exception += 1
 
                 # Per-class IoU
                 inter = float((pred & gt).sum())
@@ -485,6 +499,27 @@ class ISAID5iTrainer:
         fb_iou = fb_iou / n_components if n_components > 0 else 0.0
 
         pixel_acc = pixel_correct / max(pixel_total, 1.0)
+
+        # ── Validation Diagnostics ──
+        pct_nonempty = 100.0 * n_nonempty / max(n_total_calls, 1)
+        pct_filtered = 100.0 * n_score_filtered / max(n_total_calls, 1)
+        pct_exc = 100.0 * n_exception / max(n_total_calls, 1)
+        avg_score = score_sum / max(n_nonempty, 1)
+        avg_area = area_sum / max(n_nonempty, 1)
+        print(f"\n[val diag] calls={n_total_calls} | "
+              f"nonempty={n_nonempty} ({pct_nonempty:.1f}%) | "
+              f"score_filtered={n_score_filtered} ({pct_filtered:.1f}%) | "
+              f"exception={n_exception} ({pct_exc:.1f}%)")
+        print(f"[val diag] avg_max_score={avg_score:.4f} | "
+              f"avg_pred_area={avg_area:.0f} px | "
+              f"valid_classes={len(valid_ious)}")
+        # Per-class detail
+        for cls in sorted(self.val_classes):
+            inter = cls_inter[cls]
+            union = cls_union[cls]
+            iou = per_class_iou[cls]
+            iou_str = f"{iou:.4f}" if not math.isnan(iou) else "NaN"
+            print(f"[val diag]   cls {cls:>2d}: inter={inter:.0f} union={union:.0f} IoU={iou_str}")
 
         if was_training:
             self.model.train()
