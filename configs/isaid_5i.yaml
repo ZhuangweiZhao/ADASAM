@@ -54,6 +54,7 @@ loss:
   objectness_weight: 2.0
   iou_weight: 1.0
   aux_weight: 0.3      # reduced from 1.0 — was dominating 77% of total loss
+  prompt_weight: 0.5   # V3: BCE+Dice on dense_prompt projection → class-spatial supervision
   eos_coef: 0.1
   focal_gamma: 5.0
   focal_eps: 1.0e-4

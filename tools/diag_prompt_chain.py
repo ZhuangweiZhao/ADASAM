@@ -227,9 +227,8 @@ def test2_prompt_ablation(model, backbone, dataset, device: str):
             )
             iou_n = _compute_iou(masks_n, gt)
 
-            # Path B: Zero dense prompt (dense_prompt_override = zeros)
-            # We hijack the decoder call by manually setting dense_override
-            zero_dense = torch.zeros(1, 256, 1, 1, device=device)
+            # Path B: Zero dense prompt (dense_prompt_override = zeros, spatial)
+            zero_dense = torch.zeros(1, 256, 64, 64, device=device)
             z_mask = model.sam_decoder(
                 qf, dpg_out.instance_queries, zero_dense
             )

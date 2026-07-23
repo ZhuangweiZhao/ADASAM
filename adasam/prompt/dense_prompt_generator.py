@@ -73,8 +73,10 @@ class DPGOutput:
     :param mask_logits: [N, gh, gw] 最终 64² 内部掩码 (aux 监督) | final internal masks.
     :param aux: L 个中间预测 {"mask_logits": [N,gh,gw], "objectness_logits": [N]}。
         L intermediate predictions for deep supervision.
-    :param dense_prompt: [C, gh, gw] 或 None. support-conditioned dense prompt
+    :param dense_prompt: [1, C, gh, gw] 或 None. support-conditioned dense prompt
         (替换 SAM 的 no_mask_embed); None 时回退到 no_mask_embed。
+    :param prompt_mask: [1, 1, gh, gw] 或 None. V3 新增: dense prompt 投影粗掩码,
+        用于辅助 BCE 监督 (prompt auxiliary mask loss).
     """
 
     instance_queries: torch.Tensor
@@ -82,6 +84,7 @@ class DPGOutput:
     mask_logits: torch.Tensor
     aux: list[dict[str, torch.Tensor]]
     dense_prompt: torch.Tensor | None = None
+    prompt_mask: torch.Tensor | None = None
 
 
 class _MLP(nn.Module):
@@ -177,12 +180,32 @@ class DensePromptGenerator(nn.Module):
         self.obj_head = nn.Linear(c, 1)
         self.mask_embed = _MLP(c, c, c, num_layers=3)
 
-        # ---- Dense prompt generator (support memory → spatial dense prompt) ----
-        # 从 support memory 生成 dense prompt, 与 no_mask_embed 残差连接.
-        # Step 1: learned attention pooling (score each memory token → weighted avg)
-        # Step 2: MLP projects summary → channel modulation
-        # Xavier init final layer (small gain=0.1) — conservative start so training
-        # can gradually activate support-conditioned modulation on top of no_mask_embed.
+        # ---- Spatial Dense Prompt Generator (V3) ----
+        # 从 support 特征图生成空间 dense prompt [C, H, W], 取代旧的全局 [C, 1, 1].
+        # support_features [K, C, H, W] × support_masks [K, H, W] → masked avg →
+        # conv spatial projector → spatial prompt [1, C, H, W].
+        # Generate spatial dense prompt from support feature maps, replacing the old
+        # global [C, 1, 1] vector. support spatial features contain mask-conditioned
+        # spatial structure that tells SAM decoder WHERE (not just WHETHER) to segment.
+        self.spatial_prompt_proj = nn.Sequential(
+            nn.Conv2d(c, c, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c, c, 3, padding=1),
+        )
+        nn.init.xavier_uniform_(self.spatial_prompt_proj[-1].weight, gain=1.0)
+        nn.init.zeros_(self.spatial_prompt_proj[-1].bias)
+
+        # ---- Prompt auxiliary mask head (V3 BCE supervision) ----
+        # 1×1 Conv 将 dense prompt [1,C,H,W] 投影为粗掩码 logits [1,1,H,W],
+        # 用于辅助 BCE+Dice 监督 — 迫使 dense prompt 学习类别判别的空间激活。
+        # 1×1 Conv projects dense prompt to a single-channel coarse mask logits,
+        # supervised by BCE+Dice against GT union — forces the dense prompt
+        # to learn class-discriminative spatial activation patterns.
+        self.prompt_mask_head = nn.Conv2d(c, 1, 1)
+        nn.init.xavier_uniform_(self.prompt_mask_head.weight, gain=1.0)
+        nn.init.zeros_(self.prompt_mask_head.bias)
+
+        # Legacy: global dense prompt (kept for backward compat when no spatial input)
         self.dense_pool_attn = nn.Linear(c, 1)
         self.dense_prompt_gen = nn.Sequential(
             nn.Linear(c, c),
@@ -228,6 +251,8 @@ class DensePromptGenerator(nn.Module):
         query_features: torch.Tensor,
         support_memory: torch.Tensor,
         dense_pe: torch.Tensor,
+        support_features: torch.Tensor | None = None,
+        support_masks_grid: torch.Tensor | None = None,
     ) -> DPGOutput:
         """前向传播 | Forward pass.
 
@@ -235,6 +260,10 @@ class DensePromptGenerator(nn.Module):
         :param support_memory: [M, C] support memory tokens (from SupportEncoder).
             可为空 [0, C] — 此时跳过 support cross-attention, DPG 退化为无条件模式。
         :param dense_pe: [1, C, gh, gw] SAM 位置编码 | SAM dense positional encoding.
+        :param support_features: [K, C, gh, gw] (V3 新增) support 空间特征图,
+            用于生成空间 dense prompt。None 时退化为全局 prompt。
+            (V3 new) support spatial feature maps for spatial dense prompt.
+        :param support_masks_grid: [K, gh, gw] (V3 新增) support FG masks (已 resize).
         :return: :class:`DPGOutput`.
         """
         assert query_features.shape[0] == 1, \
@@ -309,14 +338,30 @@ class DensePromptGenerator(nn.Module):
                 )[0]                                                       # [C, gh, gw]
                 mask_features = mask_features + feedback                   # residual! identity-like at t=0
 
-        # ---- Dense prompt generation (from support memory) ----
-        if has_support:
-            # learned attention pooling: let model learn which memory tokens matter
+        # ---- Dense prompt generation ----
+        # V3 spatial path (preferred): support features × masks → spatial prompt [1,C,gh,gw]
+        # V2 legacy path (fallback): support memory → global prompt [1,C,1,1]
+        prompt_mask = None  # auxiliary mask from dense_prompt projection
+        if has_support and support_features is not None and support_masks_grid is not None:
+            # ── V3 Spatial Dense Prompt ──
+            masked = support_features * support_masks_grid.unsqueeze(1)    # [K, C, gh, gw]
+            support_spatial = masked.sum(dim=0, keepdim=True)              # [1, C, gh, gw]
+            n_pixels = support_masks_grid.sum() + 1e-8
+            support_spatial = support_spatial / n_pixels.sqrt()            # normalize
+
+            # Spatial projector: conv layers learn to transform support spatial
+            # features into a query-focused spatial attention map.
+            dense_prompt = self.spatial_prompt_proj(support_spatial)       # [1, C, gh, gw]
+
+            # Auxiliary prompt mask: 1×1 Conv → coarse mask logits for BCE supv
+            prompt_mask = self.prompt_mask_head(dense_prompt)              # [1, 1, gh, gw]
+        elif has_support:
+            # ── V2 Legacy: Global Dense Prompt (fallback) ──
             attn_scores = self.dense_pool_attn(support_memory)    # [M, 1]
             attn_weights = torch.softmax(attn_scores, dim=0)      # [M, 1]
             support_summary = (support_memory * attn_weights).sum(dim=0)  # [C]
             dense_mod = self.dense_prompt_gen(support_summary)     # [C]
-            dense_prompt = dense_mod.view(1, -1, 1, 1)           # [1, C, 1, 1] ready for broadcast
+            dense_prompt = dense_mod.view(1, -1, 1, 1)           # [1, C, 1, 1]
         else:
             dense_prompt = None
 
@@ -326,4 +371,5 @@ class DensePromptGenerator(nn.Module):
             mask_logits=masks,
             aux=aux,
             dense_prompt=dense_prompt,
+            prompt_mask=prompt_mask,
         )

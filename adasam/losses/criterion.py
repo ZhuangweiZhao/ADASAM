@@ -45,6 +45,7 @@ class CriterionConfig:
     objectness_weight: float = 2.0
     iou_weight: float = 1.0
     aux_weight: float = 1.0
+    prompt_weight: float = 0.5  # V3: BCE+Dice on dense_prompt projection mask
     eos_coef: float = 0.1
     focal_gamma: float = 5.0
     focal_eps: float = 1.0e-4
@@ -143,6 +144,26 @@ class SetCriterion(nn.Module):
         iou_target = mask_iou(torch.sigmoid(sam_mask_logits[pred_idx]), gt_256[gt_idx] > 0.5)
         iou_head = F.mse_loss(iou_pred[pred_idx], iou_target)
 
+        # ── Prompt auxiliary mask loss (V3): BCE + Dice on dense prompt projection ──
+        # 将 dense prompt 投影掩码与 GT 并集对齐, 迫使 prompt 学习类别-空间判别.
+        # Align dense prompt projection with GT union → forces class-spatial discrimination.
+        if dpg_out.prompt_mask is not None and cfg.prompt_weight > 0:
+            prompt_grid = self._soft_resize(
+                gt_masks, tuple(dpg_out.prompt_mask.shape[-2:])
+            )                                                          # [M, h, w]
+            # Merge all GT instances → single foreground mask
+            gt_union = prompt_grid.amax(dim=0, keepdim=True)           # [1, h, w]
+            prompt_logits = dpg_out.prompt_mask[0]                      # [1, h, w]
+            prompt_focal = focal_loss(
+                prompt_logits, gt_union, gamma=cfg.focal_gamma, eps=cfg.focal_eps,
+            )
+            prompt_dice = dice_loss(prompt_logits, gt_union)
+            prompt_loss = cfg.focal_weight * prompt_focal + cfg.dice_weight * prompt_dice
+        else:
+            prompt_loss = torch.tensor(0.0, device=sam_mask_logits.device)
+            prompt_focal = torch.tensor(0.0, device=sam_mask_logits.device)
+            prompt_dice = torch.tensor(0.0, device=sam_mask_logits.device)
+
         # ── aux: DPG 最终层掩码用主匹配索引耦合监督 | final DPG masks, main indices ──
         aux_total = self._focal_dice(dpg_out.mask_logits[pred_idx], gt_grid[gt_idx])
 
@@ -164,6 +185,7 @@ class SetCriterion(nn.Module):
             + cfg.objectness_weight * obj
             + cfg.iou_weight * iou_head
             + cfg.aux_weight * aux_total
+            + cfg.prompt_weight * prompt_loss
         )
 
         # ── 监控指标 (objectness 塌缩监视) | monitoring (objectness-collapse watch) ──
@@ -184,6 +206,9 @@ class SetCriterion(nn.Module):
             "obj": obj.detach(),
             "iou_head": iou_head.detach(),
             "aux": aux_total.detach(),
+            "prompt_focal": prompt_focal.detach(),
+            "prompt_dice": prompt_dice.detach(),
+            "prompt": prompt_loss.detach(),
             "n_matched": torch.as_tensor(float(pred_idx.numel())),
             "mean_obj_matched": mean_matched,
             "mean_obj_unmatched": mean_unmatched,

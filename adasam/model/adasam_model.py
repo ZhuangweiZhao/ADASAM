@@ -109,19 +109,21 @@ class AdaSAMModel(nn.Module):
             query_features, _rsp_map = self.coarse_prior(query_features, support_memory)
 
         # 3. DPG: generate instance queries + dense prompt (with support conditioning)
+        #    V3: pass support_features + support_masks for spatial dense prompt
         dense_pe = self.sam_decoder.prompt_encoder.get_dense_pe()
-        dpg_out = self.dpg(query_features, support_memory, dense_pe)
+        dpg_out = self.dpg(query_features, support_memory, dense_pe,
+                           support_features=support_features,
+                           support_masks_grid=support_masks)
 
         # 4. Build dense prompt for SAM decoder:
-        #    优先使用 support-conditioned dense prompt, 与 no_mask_embed 残差融合
-        #    prefer support-conditioned dense prompt; residual with no_mask_embed
+        #    V3 spatial: [1,C,gh,gw] — residual with no_mask_embed broadcast
+        #    V2 legacy: [1,C,1,1] — global channel modulation
         if dpg_out.dense_prompt is not None:
             no_mask = (
                 self.sam_decoder.prompt_encoder.no_mask_embed.weight
                 .view(1, -1, 1, 1)
             )
-            # residual: no_mask_embed + support_dense (zero-init → identity start)
-            dense_override = no_mask + dpg_out.dense_prompt
+            dense_override = no_mask + dpg_out.dense_prompt   # broadcast: [1,C,1,1] + [1,C,H,W]
         else:
             dense_override = None
 
