@@ -565,6 +565,8 @@ def main():
     p.add_argument("--ckpt-samrsp", default=None)
     p.add_argument("--device", default="cuda")
     p.add_argument("--skip-grad", action="store_true")
+    p.add_argument("--data-root", default="data/iSAID-5i",
+                   help="iSAID dataset root directory (parent of iSAID/)")
     args = p.parse_args()
 
     # Auto-detect
@@ -589,7 +591,17 @@ def main():
     print(f"Device: {device}")
     print(f"Checkpoints: {[c[1] for c in checkpoints]}")
 
-    dataset = ISAID5iDataset(root="data/iSAID-5i", fold=0, split="val", mode="novel")
+    # Read fold/mode from checkpoint config if available, else defaults
+    fold, mode = 0, "novel"
+    if checkpoints:
+        ckpt_data = torch.load(checkpoints[0][0], map_location="cpu")
+        if "config" in ckpt_data:
+            fold = int(ckpt_data["config"].get("data", {}).get("fold", 0))
+            mode = ckpt_data["config"].get("fewshot", {}).get("train_mode", "novel")
+            if "fold" in ckpt_data:  # checkpoint-level override
+                fold = int(ckpt_data["fold"])
+
+    dataset = ISAID5iDataset(root=args.data_root, fold=fold, split="val", mode=mode)
     print(f"Val tiles: {len(dataset)}, classes: {dataset.visible_classes()}")
 
     results = {}
