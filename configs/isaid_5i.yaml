@@ -71,8 +71,8 @@ train:
   sam_decoder_lr_mult: 0.1
   weight_decay: 1.0e-4
   grad_clip: 1.0
-  val_every: 10          # 每 N 个 epoch 验证一次 (默认 10)
-  val_samples: 30        # 验证时采样多少张 tile (默认 30, 全量 3010)
+  val_every: 5         # 每 N 个 epoch 验证一次 (默认 10)
+  val_samples: 100        # 验证时采样多少张 tile (默认 30, 全量 3010)
   device: cuda
   use_cat_adapter: false
 

@@ -440,7 +440,7 @@ class ISAID5iTrainer:
                 try:
                     masks_pred, scores = self.model.predict(
                         emb, sup_feat, sup_mask,
-                        (1024, 1024), (256, 256), score_thr=0.3,
+                        (1024, 1024), (256, 256), score_thr=0.1,  # 降低: 冷启动时 0.3 过严
                     )
                     # Merge all instance masks into one FG mask
                     if len(masks_pred) > 0:
@@ -585,7 +585,7 @@ class ISAID5iTrainer:
                 )
                 masks_pred, scores = self.model.predict(
                     emb, sup_feat, sup_mask,
-                    (1024, 1024), (256, 256), score_thr=0.3,
+                    (1024, 1024), (256, 256), score_thr=0.1,
                 )
             except (RuntimeError, ValueError, IndexError):
                 continue
