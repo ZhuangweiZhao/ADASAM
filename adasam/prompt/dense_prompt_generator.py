@@ -195,11 +195,13 @@ class DensePromptGenerator(nn.Module):
         nn.init.xavier_uniform_(self.spatial_prompt_proj[-1].weight, gain=1.0)
         nn.init.zeros_(self.spatial_prompt_proj[-1].bias)
 
-        # Learnable scale for spatial prompt (starts small for stable warm-up,
-        # training can amplify as prompt becomes useful). Prevents the spatial
-        # signal from being drowned by pretrained no_mask_embed.
-        # 可学习缩放因子: 从小值开始, 训练可逐步放大空间信号的贡献。
-        self.spatial_prompt_scale = nn.Parameter(torch.tensor(0.1))
+        # Learnable scale for spatial prompt. Plan A (no no_mask_embed) removes
+        # the need for conservative init — scale=1.0 gives the spatial signal
+        # enough magnitude to drive prompt_mask_head learning (previously stuck
+        # at sigmoid(0)=0.5 because input was ~0.0003).
+        # 可学习缩放因子: Plan A 无需保守初始化, scale=1.0 给空间信号足够的幅度
+        # 驱动 prompt_mask_head 学习 (之前因为输入≈0.0003 卡在 sigmoid(0)=0.5)。
+        self.spatial_prompt_scale = nn.Parameter(torch.tensor(1.0))
 
         # ---- Prompt auxiliary mask head (V3 BCE supervision) ----
         # 1×1 Conv 将 dense prompt [1,C,H,W] 投影为粗掩码 logits [1,1,H,W],
