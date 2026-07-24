@@ -10,7 +10,7 @@ on a low-RAM machine. Images are still read from the original directory (not cop
 
 用法 | Usage::
 
-    python tools/make_subset.py \
+    python tools/analysis/make_subset.py \
         --src  <data_root>/annotations/instances_train.json \
         --dst  data/subsets/instances_train_novel_fold0.json \
         --fold 0 --max-tiles-per-class 200
@@ -26,7 +26,7 @@ from pathlib import Path
 
 import ijson
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

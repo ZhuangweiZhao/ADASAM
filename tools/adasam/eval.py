@@ -12,19 +12,19 @@ multi-seed Mean±Std).
 用法 | Usage::
 
     # 单 fold 评估
-    python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5
+    python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5
 
     # 三折交叉验证 (Fold0/1/2/Mean)
-    python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --all-folds
+    python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --all-folds
 
     # 多 seed Mean±Std
-    python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --seeds 42 123 456
+    python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --seeds 42 123 456
 
     # 全量: 3 folds × 3 seeds
-    python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --all-folds --seeds 42 123 456
+    python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --all-folds --seeds 42 123 456
 
     # 保存预测 + 诊断
-    python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --save-predictions --diagnostics
+    python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --save-predictions --diagnostics
 
 指标 | Metrics:
     - mIoU: 所有可见类的平均 IoU (核心指标)
@@ -48,7 +48,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

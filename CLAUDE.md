@@ -21,43 +21,43 @@ black adasam/ tools/ tests/
 
 # AdaSAM Two-Stage Training Protocol (iSAID-5i)
 # Stage 1: Domain Adaptation (standard semantic segmentation, no few-shot)
-python tools/train_stage1.py --fold 0 --epochs 50
-python tools/train_stage1.py --fold 0 --epochs 1 --steps 5    # smoke
+python tools/adasam/train_stage1.py --fold 0 --epochs 50
+python tools/adasam/train_stage1.py --fold 0 --epochs 1 --steps 5    # smoke
 
 # Stage 2: Few-shot Semantic Learning (episodic, requires Stage 1 adapter)
-python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50 \
+python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 50 \
     --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
-python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \
+python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \
     --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt    # smoke
 
 # Evaluation (iSAID-5i, FSS Benchmark protocol)
-python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5               # single fold
-python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --all-folds   # 3-fold CV
-python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --seeds 42 123 456  # multi-seed
-python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --max-samples 10   # smoke
-python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --save-vis --diagnostics  # full
+python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5               # single fold
+python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --all-folds   # 3-fold CV
+python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --seeds 42 123 456  # multi-seed
+python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --max-samples 10   # smoke
+python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --save-vis --diagnostics  # full
 
 # NEU-SEG (multi-class segmentation, 480x640, 35 images)
-python tools/train_neuseg.py --k-shot 3 --epochs 100               # train
-python tools/eval_neuseg.py --checkpoint <ckpt> --k-shot 3         # evaluate
-python tools/viz_neuseg.py --mode dataset                          # dataset overview
-python tools/viz_neuseg.py --mode support --k-shot 3               # support/query pairs
-python tools/viz_neuseg.py --mode predict --checkpoint <ckpt>      # prediction comparison
-python tools/viz_neuseg.py --mode all --checkpoint <ckpt>          # all visualizations
+python tools/neuseg/train.py --k-shot 3 --epochs 100               # train
+python tools/neuseg/eval.py --checkpoint <ckpt> --k-shot 3         # evaluate
+python tools/neuseg/viz.py --mode dataset                          # dataset overview
+python tools/neuseg/viz.py --mode support --k-shot 3               # support/query pairs
+python tools/neuseg/viz.py --mode predict --checkpoint <ckpt>      # prediction comparison
+python tools/neuseg/viz.py --mode all --checkpoint <ckpt>          # all visualizations
 
 # SAM-RSP 3-Stage Reproduction on iSAID-5i
-python tools/sam_rsp_prepare_isaid.py --data-root data/iSAID-5i
-python tools/sam_rsp_stage1.py --fold 0 --epochs 100
-python tools/sam_rsp_stage2.py --fold 0 --shot 1 --epochs 50 \
+python tools/sam_rsp/prepare.py --data-root data/iSAID-5i
+python tools/sam_rsp/stage1_train.py --fold 0 --epochs 100
+python tools/sam_rsp/stage2_train.py --fold 0 --shot 1 --epochs 50 \
     --stage1-ckpt runs/sam_rsp_stage1/fold0/best_model.pth
-python tools/download_sam_weight.py
-python tools/sam_rsp_stage3.py --fold 0 --shot 1 --epochs 50 \
+python tools/sam_rsp/download_sam.py
+python tools/sam_rsp/stage3_train.py --fold 0 --shot 1 --epochs 50 \
     --stage2-ckpt runs/sam_rsp_stage2/fold0_shot1/best_model.pth \
     --sam-ckpt weights/sam_vit_h_4b8939.pth
 
 # [DEPRECATED] Legacy instance segmentation pipeline
-python tools/train.py --fold 0 --k-shot 5 --epochs 50
-python tools/evaluate.py --checkpoint runs/.../best_model.pt --k-shot 5 --seed 42
+python tools/deprecated/train.py --fold 0 --k-shot 5 --epochs 50
+python tools/deprecated/evaluate.py --checkpoint runs/.../best_model.pt --k-shot 5 --seed 42
 ```
 
 ## Architecture
@@ -130,7 +130,7 @@ MobileSAM is vendored under `thirdparty/MobileSAM/` and injected via `sys.path` 
 
 ### Evaluation (FSS Benchmark Protocol)
 
-Core metrics computed by `tools/eval_isaid_5i.py`:
+Core metrics computed by `tools/adasam/eval.py`:
 1. **mIoU** — per-class IoU averaged over all visible classes
 2. **FB-IoU** — foreground-background IoU (FSS standard, FG=union of all visible classes)
 3. **Per-class IoU** — with GT tile counts and support tile counts

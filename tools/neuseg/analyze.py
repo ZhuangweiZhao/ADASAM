@@ -16,8 +16,8 @@ NEU-SEG 数据集分析 | Neu-SEG Dataset Analysis.
 
 用法 | Usage::
 
-    python tools/analyze_neuseg.py
-    python tools/analyze_neuseg.py --data-root E:/.../Neu_seg --plots
+    python tools/neuseg/analyze.py
+    python tools/neuseg/analyze.py --data-root E:/.../Neu_seg --plots
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

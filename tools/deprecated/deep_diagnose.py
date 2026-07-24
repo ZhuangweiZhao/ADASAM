@@ -15,9 +15,9 @@
   5. Mask 质量 (预测面积 vs GT 面积)?
 
 用法:
-  python tools/deep_diagnose.py
-  python tools/deep_diagnose.py --ckpt-baseline runs/fix_baseline/.../best_model.pt
-  python tools/deep_diagnose.py --ckpt-samrsp runs/fix_samrsp/.../best_model.pt --single
+  python tools/deprecated/deep_diagnose.py
+  python tools/deprecated/deep_diagnose.py --ckpt-baseline runs/fix_baseline/.../best_model.pt
+  python tools/deprecated/deep_diagnose.py --ckpt-samrsp runs/fix_samrsp/.../best_model.pt --single
 """
 
 import argparse
@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone

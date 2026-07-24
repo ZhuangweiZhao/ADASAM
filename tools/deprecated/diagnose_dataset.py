@@ -10,9 +10,9 @@ iSAID-5i 数据集结构诊断脚本
   5. Support/Query scene-disjoint 后的实际可用统计?
 
 用法:
-  python tools/diagnose_dataset.py                     # 全部诊断
-  python tools/diagnose_dataset.py --fold 0             # 只查 fold 0
-  python tools/diagnose_dataset.py --detail             # 逐个 tile 输出多实例详情
+  python tools/deprecated/diagnose_dataset.py                     # 全部诊断
+  python tools/deprecated/diagnose_dataset.py --fold 0             # 只查 fold 0
+  python tools/deprecated/diagnose_dataset.py --detail             # 逐个 tile 输出多实例详情
 """
 
 import argparse

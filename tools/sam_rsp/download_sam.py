@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = _REPO_ROOT / "weights" / "sam_vit_h_4b8939.pth"
 URL = "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
 

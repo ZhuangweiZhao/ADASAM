@@ -8,7 +8,7 @@ few-shot FG/BG episodes (base classes only).
 
 用法 | Usage::
 
-    python tools/sam_rsp_stage2.py --fold 0 --shot 1 --epochs 50 \\
+    python tools/sam_rsp/stage2_train.py --fold 0 --shot 1 --epochs 50 \\
         --stage1-ckpt runs/sam_rsp_stage1/fold0/best_model.pth
 
 输出 | Output::
@@ -30,170 +30,18 @@ from torch.optim import SGD
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.sam_rsp.bam import BAMModel
-from adasam.sam_rsp.dataset import FewShotEpisodeDataset, ISAID5I_FOLDS, IMAGENET_MEAN, IMAGENET_STD
+from adasam.sam_rsp.dataset import FewShotEpisodeDataset, ISAID5I_FOLDS
 from adasam.utils import set_seed
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Transforms (same design as Stage 1)
-# ═══════════════════════════════════════════════════════════════════
-
-class Compose:
-    def __init__(self, transforms: list):
-        self.transforms = transforms
-
-    def __call__(self, image, mask):
-        for t in self.transforms:
-            image, mask = t(image, mask)
-        return image, mask
-
-
-class RandomScale:
-    def __init__(self, scale_range=(0.5, 2.0)):
-        self.scale_range = scale_range
-
-    def __call__(self, image, mask):
-        import cv2
-        scale = np.random.uniform(*self.scale_range)
-        h, w = image.shape[:2]
-        new_h, new_w = int(h * scale), int(w * scale)
-        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-        return image, mask
-
-
-class RandomCrop:
-    def __init__(self, size):
-        self.size = (size, size) if isinstance(size, int) else size
-
-    def __call__(self, image, mask):
-        import cv2
-        h, w = image.shape[:2]
-        th, tw = self.size
-        if h < th or w < tw:
-            image = cv2.resize(image, (max(w, tw), max(h, th)), interpolation=cv2.INTER_LINEAR)
-            mask = cv2.resize(mask, (max(w, tw), max(h, th)), interpolation=cv2.INTER_NEAREST)
-            h, w = image.shape[:2]
-        y = np.random.randint(0, h - th + 1)
-        x = np.random.randint(0, w - tw + 1)
-        return image[y:y + th, x:x + tw], mask[y:y + th, x:x + tw]
-
-
-class RandomHorizontalFlip:
-    def __init__(self, p=0.5):
-        self.p = p
-
-    def __call__(self, image, mask):
-        if np.random.random() < self.p:
-            image = np.ascontiguousarray(np.fliplr(image))
-            mask = np.ascontiguousarray(np.fliplr(mask))
-        return image, mask
-
-
-class Resize:
-    def __init__(self, size):
-        self.size = (size, size) if isinstance(size, int) else size
-
-    def __call__(self, image, mask):
-        import cv2
-        image = cv2.resize(image, self.size, interpolation=cv2.INTER_LINEAR)
-        mask = cv2.resize(mask, self.size, interpolation=cv2.INTER_NEAREST)
-        return image, mask
-
-
-class Normalize:
-    def __init__(self, mean=IMAGENET_MEAN, std=IMAGENET_STD):
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, image, mask):
-        image = (image - self.mean) / self.std
-        return image, mask
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Dataset wrapper: applies transforms to query + all support pairs
-# ═══════════════════════════════════════════════════════════════════
-
-class EpisodeTransformWrapper:
-    """Apply transform to query and each support image/mask independently."""
-
-    def __init__(self, base_dataset: FewShotEpisodeDataset, transform):
-        self.base = base_dataset
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.base)
-
-    def __getitem__(self, idx):
-        item = self.base[idx]
-        q_image = item["query_image"].numpy().transpose(1, 2, 0)  # [3,H,W] → [H,W,3]
-        q_mask = item["query_mask"].numpy()                        # [H,W]
-
-        # Apply transform to query
-        q_image, q_mask = self.transform(q_image, q_mask)
-
-        # Apply transform to each support
-        s_images = item["support_images"].numpy()  # [K, 3, H, W]
-        s_masks = item["support_masks"].numpy()    # [K, H, W]
-        K = s_images.shape[0]
-        s_imgs_out, s_msks_out = [], []
-        for k in range(K):
-            s_img_k = s_images[k].transpose(1, 2, 0)  # [3,H,W] → [H,W,3]
-            s_msk_k = s_masks[k]
-            si, sm = self.transform(s_img_k, s_msk_k)
-            s_imgs_out.append(torch.from_numpy(si).permute(2, 0, 1))  # [3,H,W]
-            s_msks_out.append(torch.from_numpy(sm))
-
-        return {
-            "query_image": torch.from_numpy(q_image).permute(2, 0, 1).float(),  # [3,H,W]
-            "query_mask": torch.from_numpy(q_mask).long(),                       # [H,W]
-            "support_images": torch.stack(s_imgs_out, 0).float(),                # [K,3,H,W]
-            "support_masks": torch.stack(s_msks_out, 0).long(),                  # [K,H,W]
-            "class_id": item["class_id"],
-            "subcls": item["subcls"],
-        }
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Training
-# ═══════════════════════════════════════════════════════════════════
-
-def poly_lr(optimizer, base_lr, current_iter, max_iter, power=0.9, warmup=False, warmup_step=0):
-    """Poly learning rate schedule (same as SAM-RSP original)."""
-    if warmup and current_iter < warmup_step:
-        lr = base_lr * (current_iter + 1) / warmup_step
-    else:
-        lr = base_lr * (1 - float(current_iter) / float(max_iter)) ** power
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
-
-
-def compute_fb_iou(pred: np.ndarray, target: np.ndarray) -> dict:
-    """Foreground-Background IoU.
-
-    Args:
-        pred: [H, W] binary prediction (1=FG, 0=BG)
-        target: [H, W] binary ground truth
-    """
-    fg_pred = pred == 1
-    fg_gt = target == 1
-    bg_pred = ~fg_pred
-    bg_gt = ~fg_gt
-
-    fg_inter = (fg_pred & fg_gt).sum()
-    fg_union = (fg_pred | fg_gt).sum()
-    bg_inter = (bg_pred & bg_gt).sum()
-    bg_union = (bg_pred | bg_gt).sum()
-
-    fg_iou = fg_inter / max(fg_union, 1)
-    bg_iou = bg_inter / max(bg_union, 1)
-    return {"FG-IoU": fg_iou, "BG-IoU": bg_iou, "FB-IoU": (fg_iou + bg_iou) / 2}
+from tools.sam_rsp.common import (
+    Compose, RandomScale, RandomCrop, RandomHorizontalFlip,
+    Resize, Normalize, EpisodeTransformWrapper,
+    poly_lr, compute_fb_iou, IMAGENET_MEAN, IMAGENET_STD,
+)
 
 
 def train(args: argparse.Namespace) -> Path:

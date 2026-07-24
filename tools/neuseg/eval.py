@@ -3,8 +3,8 @@ NEU_Seg 评估 (FastSAM-aligned) | Evaluation.
 =============================================
 
 用法 | Usage::
-    python tools/eval_neuseg.py --checkpoint runs/neuseg_p3p4_k3_s42/best_model.pt
-    python tools/eval_neuseg.py --checkpoint <ckpt> --save-vis
+    python tools/neuseg/eval.py --checkpoint runs/neuseg_p3p4_k3_s42/best_model.pt
+    python tools/neuseg/eval.py --checkpoint <ckpt> --save-vis
 """
 
 from __future__ import annotations
@@ -14,13 +14,13 @@ from pathlib import Path
 
 import cv2, numpy as np, torch, torch.nn.functional as F
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.backbone import MultiScaleMobileSAMBackbone
 from adasam.datasets import NEUSegDataset
 from adasam.utils import set_seed
-from tools.train_neuseg import PureDecoderP3P4, pad_to_32
+from tools.neuseg.train import PureDecoderP3P4, pad_to_32
 
 CLASS_NAMES = NEUSegDataset.CLASS_NAMES
 CLASS_COLORS = {0: (128,128,128), 1: (255,0,0), 2: (0,255,0), 3: (0,0,255)}

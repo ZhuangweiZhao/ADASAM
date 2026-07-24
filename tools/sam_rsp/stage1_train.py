@@ -8,7 +8,7 @@ weights for the BAM (Rough Segment Prompt Generator).
 
 用法 | Usage::
 
-    python tools/sam_rsp_stage1.py --fold 0 --epochs 100 --data-root data/iSAID-5i
+    python tools/sam_rsp/stage1_train.py --fold 0 --epochs 100 --data-root data/iSAID-5i
 
 输出 | Output::
 
@@ -32,7 +32,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -41,90 +41,12 @@ _SAM_RSP = _REPO_ROOT / "thirdparty" / "SAM-RSP"
 if str(_SAM_RSP) not in sys.path:
     sys.path.insert(0, str(_SAM_RSP))
 
-from adasam.sam_rsp.dataset import PSPNetDataset, ISAID5I_FOLDS, IMAGENET_MEAN, IMAGENET_STD
+from adasam.sam_rsp.dataset import PSPNetDataset, ISAID5I_FOLDS
 from adasam.utils import set_seed
-
-
-# ═══════════════════════════════════════════════════════════════════
-# Transforms
-# ═══════════════════════════════════════════════════════════════════
-
-class Compose:
-    def __init__(self, transforms: list):
-        self.transforms = transforms
-
-    def __call__(self, image, mask):
-        for t in self.transforms:
-            image, mask = t(image, mask)
-        return image, mask
-
-
-class Resize:
-    def __init__(self, size):
-        self.size = (size, size) if isinstance(size, int) else size
-
-    def __call__(self, image, mask):
-        import cv2
-        image = cv2.resize(image, self.size, interpolation=cv2.INTER_LINEAR)
-        mask = cv2.resize(mask, self.size, interpolation=cv2.INTER_NEAREST)
-        return image, mask
-
-
-class RandomHorizontalFlip:
-    def __init__(self, p=0.5):
-        self.p = p
-
-    def __call__(self, image, mask):
-        if np.random.random() < self.p:
-            image = np.fliplr(image).copy()
-            mask = np.fliplr(mask).copy()
-        return image, mask
-
-
-class RandomScale:
-    def __init__(self, scale_range=(0.5, 2.0)):
-        self.scale_range = scale_range
-
-    def __call__(self, image, mask):
-        import cv2
-        scale = np.random.uniform(*self.scale_range)
-        h, w = image.shape[:2]
-        new_h, new_w = int(h * scale), int(w * scale)
-        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        mask = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
-        return image, mask
-
-
-class RandomCrop:
-    def __init__(self, size):
-        self.size = (size, size) if isinstance(size, int) else size
-
-    def __call__(self, image, mask):
-        import cv2
-        h, w = image.shape[:2]
-        th, tw = self.size
-        if h < th or w < tw:
-            image = cv2.resize(image, (max(w, tw), max(h, th)), interpolation=cv2.INTER_LINEAR)
-            mask = cv2.resize(mask, (max(w, tw), max(h, th)), interpolation=cv2.INTER_NEAREST)
-            h, w = image.shape[:2]
-        y = np.random.randint(0, h - th + 1)
-        x = np.random.randint(0, w - tw + 1)
-        return image[y:y+th, x:x+tw], mask[y:y+th, x:x+tw]
-
-
-class Normalize:
-    def __init__(self, mean=IMAGENET_MEAN, std=IMAGENET_STD):
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, image, mask):
-        image = (image - self.mean) / self.std
-        return image, mask
-
-
-class ToTensor:
-    def __call__(self, image, mask):
-        return image, mask
+from tools.sam_rsp.common import (
+    Compose, RandomScale, RandomCrop, RandomHorizontalFlip,
+    Resize, Normalize, ToTensor, IMAGENET_MEAN, IMAGENET_STD,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════

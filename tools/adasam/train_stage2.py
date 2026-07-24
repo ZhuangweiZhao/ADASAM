@@ -11,11 +11,11 @@ PromptFusion + SAM Decoder. Novel classes inferred directly (no finetune).
 用法 | Usage::
 
     # 完整训练 (需先完成 Stage 1)
-    python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50 \\
+    python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 50 \\
         --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
 
     # 烟测试
-    python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \\
+    python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \\
         --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
 """
 
@@ -38,7 +38,7 @@ from tqdm import tqdm
 
 # 将 repo 根目录加入 sys.path, 确保可直接导入 adasam 包
 # Add repo root to sys.path so adasam imports work without pip install -e
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
@@ -887,7 +887,7 @@ def main() -> None:
     # --stage1-ckpt is required
     if not Path(args.stage1_ckpt).exists():
         print(f"ERROR: Stage 1 checkpoint not found: {args.stage1_ckpt}")
-        print("  Run Stage 1 first: python tools/train_stage1.py --fold 0 --epochs 50")
+        print("  Run Stage 1 first: python tools/adasam/train_stage1.py --fold 0 --epochs 50")
         sys.exit(1)
 
     cfg = load_config(args)

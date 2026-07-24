@@ -3,9 +3,9 @@ NEU_Seg 可视化 (FastSAM-aligned) | Visualization.
 ==================================================
 
 用法 | Usage::
-    python tools/viz_neuseg.py --mode dataset
-    python tools/viz_neuseg.py --mode support --k-shot 3
-    python tools/viz_neuseg.py --mode predict --checkpoint <ckpt>
+    python tools/neuseg/viz.py --mode dataset
+    python tools/neuseg/viz.py --mode support --k-shot 3
+    python tools/neuseg/viz.py --mode predict --checkpoint <ckpt>
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch, torch.nn.functional as F
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.backbone import MultiScaleMobileSAMBackbone
 from adasam.datasets import NEUSegDataset
 from adasam.utils import set_seed
-from tools.train_neuseg import PureDecoderP3P4, pad_to_32
+from tools.neuseg.train import PureDecoderP3P4, pad_to_32
 
 CLASS_NAMES = NEUSegDataset.CLASS_NAMES
 CLASS_COLORS = {0: [0.5,0.5,0.5], 1: [1.0,0.0,0.0], 2: [0.0,1.0,0.0], 3: [0.0,0.0,1.0]}

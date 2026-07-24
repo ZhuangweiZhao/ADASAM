@@ -13,10 +13,10 @@ initialization for Stage 2 few-shot learning.
 用法 | Usage::
 
     # 完整训练
-    python tools/train_stage1.py --fold 0 --epochs 50
+    python tools/adasam/train_stage1.py --fold 0 --epochs 50
 
     # 冒烟测试
-    python tools/train_stage1.py --fold 0 --epochs 1 --steps 5
+    python tools/adasam/train_stage1.py --fold 0 --epochs 1 --steps 5
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import random
 from tqdm import tqdm
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

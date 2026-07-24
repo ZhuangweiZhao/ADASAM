@@ -13,12 +13,12 @@
 用法 | Usage::
 
     # 单张图可视化
-    python tools/viz_ab.py \
+    python tools/analysis/viz_ab.py \
         --checkpoint runs/ab_new/.../best_model.pt \
         --k-shot 1 --num-tiles 4
 
     # 对比两个模型 (baseline vs new)
-    python tools/viz_ab.py \
+    python tools/analysis/viz_ab.py \
         --checkpoint runs/ab_new/.../best_model.pt \
         --checkpoint-baseline runs/ab_baseline/.../best_model.pt \
         --k-shot 1 --num-tiles 4
@@ -38,7 +38,7 @@ import numpy as np
 import torch
 import yaml
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

@@ -23,10 +23,14 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 DEPRECATED = {
     "adasam/evaluator/evaluate.py",
     "adasam/trainer/trainer.py",
-    "tools/visualize.py",                # legacy COCO-based visualization
-    "tools/deep_diagnose.py",            # legacy diagnostic tool
-    "tools/diag_prompt_chain.py",        # legacy diagnostic tool
-    "tools/post_train_check.py",         # legacy diagnostic tool
+    "tools/analysis/visualize.py",            # legacy COCO-based visualization
+    "tools/analysis/viz_ab.py",               # legacy A/B visualization (old DPG API)
+    "tools/deprecated/train.py",              # [DEPRECATED] old training entry
+    "tools/deprecated/evaluate.py",           # [DEPRECATED] old eval entry
+    "tools/deprecated/deep_diagnose.py",      # legacy diagnostic tool
+    "tools/deprecated/diag_prompt_chain.py",  # legacy diagnostic tool
+    "tools/deprecated/post_train_check.py",   # legacy diagnostic tool
+    "tools/deprecated/diagnose_dataset.py",   # legacy diagnostic tool
 }
 
 # ── Forbidden patterns (never allowed in active code) ──

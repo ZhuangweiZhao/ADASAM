@@ -11,8 +11,8 @@ NEU_Seg 多类别分割训练 (FastSAM-aligned Edition) | Multi-class Segmentati
     - 丰富数据增强
 
 用法 | Usage::
-    python tools/train_neuseg.py --device cuda --epochs 200
-    python tools/train_neuseg.py --device cuda --epochs 200 --k-shot 5
+    python tools/neuseg/train.py --device cuda --epochs 200
+    python tools/neuseg/train.py --device cuda --epochs 200 --k-shot 5
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
