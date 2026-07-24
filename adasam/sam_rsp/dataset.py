@@ -184,10 +184,19 @@ class FewShotEpisodeDataset(Dataset):
         visible_str = ",".join(
             f"{c}({CLASS_NAMES[c]})" for c in self.visible_classes
         )
+        n_tiles = len(self._data_list)
+        n_pairs = sum(len(v) for v in self._class_tiles.values())
         print(f"[FewShotEpisode] fold={fold} {'base' if use_base else 'novel'}"
-              f" {split} shot={shot}: {len(self._data_list)} tiles, "
-              f"{sum(len(v) for v in self._class_tiles.values())} class-tile pairs")
+              f" {split} shot={shot}: {n_tiles} tiles, {n_pairs} class-tile pairs")
         print(f"  visible: {visible_str}")
+
+        if n_tiles == 0:
+            raise RuntimeError(
+                f"No tiles found for fold={fold} {'base' if use_base else 'novel'} {split}.\n"
+                f"Expected data at: {base}\n"
+                "Run the data preparation script first:\n"
+                f"  python tools/sam_rsp_prepare_isaid.py --data-root {self.data_root}"
+            )
 
     def __len__(self) -> int:
         return len(self._data_list)
