@@ -22,7 +22,6 @@ Key dimensions (1024² input):
 
 from __future__ import annotations
 
-import copy
 import math
 import sys
 from pathlib import Path
@@ -307,7 +306,7 @@ class SAMRSPModel(nn.Module):
         # ── Step 5: ViT decoder blocks with deep supervision ──
         aux_outputs = []
         for idx, blk in enumerate(self.blocks):
-            blk_input = copy.deepcopy(merge_feat)
+            blk_input = merge_feat.clone()
             merge_feat = blk(blk_input)                   # [B, 64, 64, 256] (NHWC)
 
             if idx < len(self.inner_cls):
