@@ -1,6 +1,9 @@
 """
-训练流程 | Training pipeline.
-============================
+[DEPRECATED] 训练流程 (Protocol V3 实例分割) | Training pipeline (Protocol V3 instance seg).
+=============================================================================================
+
+**已废弃**: 项目已统一为语义分割。请使用 tools/train_isaid_5i.py。
+**Deprecated**: project unified to semantic segmentation. Use tools/train_isaid_5i.py instead.
 
 AdaSAM 的**唯一**训练入口 (单一 Trainer 类, 无 if-mode 分支)。
 The single training entry point of AdaSAM (one Trainer class, no if-mode branches).
@@ -35,10 +38,13 @@ from tqdm import tqdm
 
 from adasam.adapters import CATAdapter
 from adasam.backbone import build_mobile_sam, MobileSAMBackbone
-from adasam.datasets import EpisodeSampler, ISAIDInstanceDataset
+from adasam.datasets import EpisodeSampler
+from adasam.datasets.isaid import ISAIDInstanceDataset  # [DEPRECATED] direct import from source
 from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
-from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
+# [DEPRECATED] SetCriterion/HungarianMatcher removed; trainer is deprecated.
+# from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
+from adasam.losses import SemanticSegLoss
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
 # PrototypeBuilder removed in v2 — support info now preserved as token sequence
 # via SupportEncoder (inside AdaSAMModel)

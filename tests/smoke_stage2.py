@@ -1,4 +1,4 @@
-"""Smoke test: verify Trainer initialization with Stage 2 architecture."""
+"""Smoke test: verify AdaSAM Stage 2 architecture (SPG + GeometricPrior + PromptFusion)."""
 import sys
 sys.path.insert(0, 'thirdparty/MobileSAM')
 from pathlib import Path
@@ -8,11 +8,12 @@ print("1. Testing imports...")
 from adasam.support_encoder import SupportEncoder, SupportEncoderConfig
 print("   SupportEncoder: OK")
 
-from adasam.prompt import DensePromptGenerator, DensePromptGeneratorConfig, DPGOutput
-print("   DensePromptGenerator + DPGOutput: OK")
+from adasam.prompt import SemanticPriorGenerator, SemanticPriorGeneratorConfig, SPGOutput
+from adasam.prompt import GeometricPriorModule, PromptFusion
+print("   SPG + GeometricPrior + PromptFusion: OK")
 
-from adasam.decoder import QueryMaskDecoder, QueryMaskDecoderConfig
-print("   QueryMaskDecoder: OK")
+from adasam.decoder import SemanticMaskDecoder, SemanticMaskDecoderConfig
+print("   SemanticMaskDecoder: OK")
 
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
 print("   AdaSAMModel: OK")
@@ -20,18 +21,19 @@ print("   AdaSAMModel: OK")
 # Check config round-trip
 print("\n2. Testing config round-trip...")
 cfg_dict = {
-    'prompt_generator': {'num_queries': 64, 'num_layers': 3},
+    'semantic_prior': {'num_probes': 64, 'num_layers': 3},
     'decoder': {'train_mask_decoder': True},
     'support_encoder': {
         'n_support_tokens': 16, 'n_memory_tokens': 64,
         'n_encoder_layers': 2, 'n_heads': 8, 'ffn_dim': 1024,
     },
+    'geometric_prior': {'enabled': True},
+    'prompt_fusion': {'enabled': True, 'mode': 'concat'},
 }
 model_cfg = AdaSAMModelConfig.from_dict(cfg_dict)
-print(f"   dpg.num_queries={model_cfg.dpg.num_queries}")
-print(f"   support_encoder.n_support_tokens={model_cfg.support_encoder.n_support_tokens}")
-print(f"   support_encoder.n_encoder_layers={model_cfg.support_encoder.n_encoder_layers}")
-print(f"   support_encoder.is_stage2={model_cfg.support_encoder.is_stage2}")
+print(f"   spg.num_probes={model_cfg.spg.num_probes}")
+print(f"   use_geometric_prior={model_cfg.use_geometric_prior}")
+print(f"   use_prompt_fusion={model_cfg.use_prompt_fusion}")
 
 # Verify weights exist
 weights = Path('weights/mobile_sam.pt')
@@ -47,34 +49,46 @@ sam = build_mobile_sam(str(weights), 'vit_t', 'cpu')
 model = AdaSAMModel(sam, model_cfg)
 total_params = sum(p.numel() for p in model.parameters())
 print(f"   Model built: {total_params/1e6:.2f}M params")
+print(f"   geometric_prior: {'ON' if model.geometric_prior else 'OFF'}")
+print(f"   prompt_fusion: {'ON' if model.prompt_fusion else 'OFF'}")
+print(f"   num_probes: {model.num_probes}")
 
 # Verify forward works
-print("\n4. Testing forward shapes...")
+print("\n4. Testing forward shapes (SPG unified output, no dense_prompt/sparse_token)...")
 K, C, H, W = 5, 256, 64, 64
 emb = torch.randn(1, C, H, W)
 sf = torch.randn(K, C, H, W)
 sm = torch.rand(K, H, W) > 0.3
 
 with torch.no_grad():
-    dpg_out, low_res, iou_pred = model.forward_train(emb, sf, sm.float())
+    spg_out, low_res, iou_pred = model.forward_train(emb, sf, sm.float())
 
-assert dpg_out.instance_queries.shape == (64, 256)
-assert low_res.shape == (64, 1, 256, 256)
-assert iou_pred.shape == (64, 1)
-assert dpg_out.dense_prompt is not None
-assert dpg_out.dense_prompt.shape == (1, 256, 1, 1)
-assert len(dpg_out.aux) == 3
+# SPG: unified outputs only (no dense_prompt/sparse_token)
+assert spg_out.semantic_prior.shape == (1, 256, 64, 64)
+assert spg_out.prior_mask.shape == (1, 1, 64, 64)
+# Single mask from SAM decoder
+assert low_res.shape == (1, 1, 256, 256)
+assert iou_pred.shape == (1, 1)
+# prior_aux: unified [1, gh, gw] per layer (NOT per-probe [N, gh, gw])
+assert len(spg_out.prior_aux) == 3
+for a in spg_out.prior_aux:
+    assert a["prior_mask"].shape == (1, 64, 64)
 print("   All shapes OK!")
+print(f"   semantic_prior: {spg_out.semantic_prior.shape}")
+print(f"   low_res: {low_res.shape}")
 
 # Verify predict
 print("\n5. Testing predict...")
 masks, scores = model.predict(emb, sf, sm.float(), (896, 896), (896, 896))
-print(f"   {masks.shape[0]} predicted instances")
+print(f"   masks: {masks.shape}, scores: {scores}")
 
 # Verify gradient flow
 print("\n6. Testing gradient flow...")
-dpg_out, low_res, iou_pred = model.forward_train(emb, sf, sm.float())
-loss = low_res.sum() + dpg_out.objectness_logits.sum()
+spg_out, low_res, iou_pred = model.forward_train(emb, sf, sm.float())
+# Include all SPG outputs in loss: semantic_prior + prior_mask + prior_aux
+loss = low_res.sum() + spg_out.semantic_prior.sum() + spg_out.prior_mask.sum()
+for a in spg_out.prior_aux:
+    loss = loss + a["prior_mask"].sum()
 loss.backward()
 
 grad_count = 0
@@ -93,14 +107,26 @@ if no_grad_modules:
 else:
     print(f"   All {grad_count} trainable parameters received gradients!")
 
-# Verify dense_prompt_gen gets gradient (dense_alpha removed in v2 fix)
-assert model.dpg.dense_prompt_gen[-1].weight.grad is not None
-assert model.dpg.dense_prompt_gen[-1].bias.grad is not None
-print(f"   dense_prompt_gen.2.weight.grad_sum = {model.dpg.dense_prompt_gen[-1].weight.grad.abs().sum():.2f}")
-print(f"   dense_prompt_gen.2.bias.grad_sum = {model.dpg.dense_prompt_gen[-1].bias.grad.abs().sum():.2f}")
+# Verify SPG probe gradients
+assert model.spg.probe_feat.weight.grad is not None
+print(f"   probe_feat grad = {model.spg.probe_feat.weight.grad.abs().sum():.2f}")
 
 # Verify support_encoder gradients
 se_has_grad = sum(1 for p in model.support_encoder.parameters() if p.grad is not None)
 print(f"   support_encoder params with grad: {se_has_grad}")
+
+# Verify geometric_prior gradients
+if model.geometric_prior is not None:
+    gp_grad = sum(1 for p in model.geometric_prior.parameters() if p.grad is not None)
+    print(f"   geometric_prior params with grad: {gp_grad}")
+
+# Verify prompt_fusion gradients
+if model.prompt_fusion is not None:
+    pf_grad = sum(1 for p in model.prompt_fusion.parameters() if p.grad is not None)
+    print(f"   prompt_fusion params with grad: {pf_grad}")
+
+# Verify spatial_prompt_proj gradients (now in AdaSAMModel)
+sp_has_grad = sum(1 for p in model.spatial_prompt_proj.parameters() if p.grad is not None)
+print(f"   spatial_prompt_proj params with grad: {sp_has_grad}")
 
 print("\n=== ALL STAGE 2 TESTS PASSED ===")

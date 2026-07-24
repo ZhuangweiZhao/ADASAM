@@ -12,25 +12,26 @@ pip install -e ".[dev]"
 pytest tests/ -q
 
 # Run a single test file or test
-pytest tests/test_instance_match.py -q
-pytest tests/test_instance_match.py::test_greedy_perfect_match -q
+pytest tests/test_semantic_prior_generator.py -q
+pytest tests/test_model_forward.py -q
 
 # Lint / format
 ruff check adasam/ tools/ tests/
 black adasam/ tools/ tests/
 
-# Train (config from configs/base.yaml, CLI overrides)
-python tools/train.py --fold 0 --k-shot 5 --epochs 50
-python tools/train.py --epochs 1 --episodes 2          # smoke test
+# AdaSAM Two-Stage Training Protocol (iSAID-5i)
+# Stage 1: Domain Adaptation (standard semantic segmentation, no few-shot)
+python tools/train_stage1.py --fold 0 --epochs 50
+python tools/train_stage1.py --fold 0 --epochs 1 --steps 5    # smoke
 
-# Evaluate (all paper numbers must come from this script)
-python tools/evaluate.py --checkpoint runs/.../best_model.pt --k-shot 5 --seed 42
-python tools/evaluate.py --checkpoint <ckpt> --limit 5 --no-zero-shot  # smoke
+# Stage 2: Few-shot Semantic Learning (episodic, requires Stage 1 adapter)
+python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50 \
+    --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
+python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \
+    --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt    # smoke
 
-# iSAID-5i (15-class semantic segmentation, 256² tiles, 3-fold, FSS Benchmark protocol)
-python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50              # train
-python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5    # smoke
-python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5               # single fold eval
+# Evaluation (iSAID-5i, FSS Benchmark protocol)
+python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5               # single fold
 python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --all-folds   # 3-fold CV
 python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --seeds 42 123 456  # multi-seed
 python tools/eval_isaid_5i.py --checkpoint <ckpt> --k-shot 5 --max-samples 10   # smoke
@@ -45,74 +46,111 @@ python tools/viz_neuseg.py --mode predict --checkpoint <ckpt>      # prediction 
 python tools/viz_neuseg.py --mode all --checkpoint <ckpt>          # all visualizations
 
 # SAM-RSP 3-Stage Reproduction on iSAID-5i
-# Stage 0: data preparation
 python tools/sam_rsp_prepare_isaid.py --data-root data/iSAID-5i
-# Stage 1: PSPNet pretraining
 python tools/sam_rsp_stage1.py --fold 0 --epochs 100
-# Stage 2: BAM meta-learner training (requires Stage 1 ckpt)
-python tools/sam_rsp_stage2.py --fold 0 --shot 1 --epochs 50 \\
+python tools/sam_rsp_stage2.py --fold 0 --shot 1 --epochs 50 \
     --stage1-ckpt runs/sam_rsp_stage1/fold0/best_model.pth
-# Download SAM ViT-H weights (once, ~2.4GB)
 python tools/download_sam_weight.py
-# Stage 3: SAM-RSP full model training (requires Stage 2 ckpt + SAM weights)
-python tools/sam_rsp_stage3.py --fold 0 --shot 1 --epochs 50 \\
-    --stage2-ckpt runs/sam_rsp_stage2/fold0_shot1/best_model.pth \\
+python tools/sam_rsp_stage3.py --fold 0 --shot 1 --epochs 50 \
+    --stage2-ckpt runs/sam_rsp_stage2/fold0_shot1/best_model.pth \
     --sam-ckpt weights/sam_vit_h_4b8939.pth
+
+# [DEPRECATED] Legacy instance segmentation pipeline
+python tools/train.py --fold 0 --k-shot 5 --epochs 50
+python tools/evaluate.py --checkpoint runs/.../best_model.pt --k-shot 5 --seed 42
 ```
 
 ## Architecture
 
-AdaSAM is a **clean-slate** few-shot aerial instance segmentation framework. The single backbone is **MobileSAM** (TinyViT image encoder, frozen). Few-shot adaptation follows the PerSAM/Matcher paradigm: prototype → similarity peaks → point prompts → SAM MaskDecoder. Every paper number is produced by `tools/evaluate.py` under the frozen **Protocol V3**.
+AdaSAM is a **dual-branch semantic prior** few-shot aerial semantic segmentation framework:
+- **Stage 1 (Domain Adaptation)**: MobileSAM (frozen) + CATAdapter + SegHead → standard semantic segmentation on base classes → domain-aware feature initialization.
+- **Stage 2 (Few-shot Semantic Learning)**: SupportEncoder → GeometricPrior + SPG → PromptFusion → SAM Decoder. Episodic training on base classes. Novel classes inferred directly (no finetune).
+- Core metrics: **mIoU** and **FB-IoU** under the **FSS Benchmark protocol**.
 
-### Data flow (v2 — SAM-RSP style)
+### Data flow (v5 — Protocol-Aligned SPG)
 
 ```
-Image (896² tile, RGB)
-  → preprocess_image() [adasam/utils/transforms.py] → [3, 1024, 1024] normalized
-  → MobileSAMBackbone.forward() → {"image_embedding": [B, 256, 64, 64]}
-  → SupportEncoder(K support embeddings + masks) → support_memory [M, 256]
-  → DensePromptGenerator(query_features, support_memory, dense_pe) → DPGOutput
-      (instance_queries [N,256], objectness_logits [N], mask_logits [N,64,64],
-       dense_prompt [1,256,1,1])
-  → QueryMaskDecoder.decode(image_embedding, instance_queries, dense_prompt_override)
-  → upscale_logits() → per-instance masks at tile resolution (896²)
+Stage 1:
+  Image (256² tile, RGB)
+    → MobileSAMBackbone.forward() → {"image_embedding": [B, 256, 64, 64]}
+    → CATAdapter (trainable) → [B, 256, 64, 64]
+    → SegHead (1×1 Conv) → [B, num_base, 256, 256] logits
+    → CE + Focal + Dice (multiclass)
+
+Stage 2:
+  Support (K tiles) → MobileSAM + frozen Adapter → SupportEncoder → support_memory [M, 256]
+  Query (1 tile)   → MobileSAM + frozen Adapter → query_features [1, 256, 64, 64]
+                          │                              │
+                          ├──→ GeometricPrior ──────────┤
+                          │    (cosine similarity)       │
+                          │    geometric_prior [1,C,H,W] │
+                          │                              │
+                          └──→ SPG ──────────────────────┤
+                               (N internal probes,        │
+                                aggregated to unified)    │
+                               semantic_prior [1,C,H,W]   │
+                               prior_mask [1,1,H,W]       │
+                                                          │
+                          PromptFusion ←──────────────────┘
+                               │
+                     dense_prompt [1,C,H,W] + sparse_token [1,C]
+                               │
+                          SAM Decoder (boundary refinement)
+                               │
+                          Fine Mask [1, 256, 256]
+
+  Dense prompt fallback (when PromptFusion disabled):
+    AdaSAMModel._build_dense_prompt() — spatial path (support features × masks)
+    or legacy global path (attention-pooled support memory).
+
+  Loss = L_main(CE+Focal+Dice on mask) + λ₁·L_prior(BCE+Dice on unified prior_mask) + λ₂·L_reg
 ```
 
-### Module contracts (no legacy `if` branches)
+### Module contracts
 
 | Module | Input → Output | Trainable? |
 |---|---|---|
-| `adasam/backbone/` | `[B,3,1024,1024]` → `{"image_embedding":[B,256,64,64]}` | **No** — always frozen, `train()` overridden to no-op |
-| `adasam/support_encoder/` | `([K,256,64,64], [K,64,64])` → support_memory `[M,256]` | **Yes** — TransformerEncoder + MemoryBank |
-| `adasam/decoder/` | `(image_embedding, instance_queries, dense_prompt_override?)` → `InstanceMasks(masks, scores)` | **Yes** — MaskDecoder; PromptEncoder frozen |
-| `adasam/losses/` | `(logits, targets)` → scalar (focal+dice+IoU-head MSE) | N/A |
-| `adasam/metrics/` | `(pred_masks, gt_masks)` → TP/FP/FN, Instance mIoU, COCO AP | N/A — pure numpy/pycocotools |
+| `adasam/backbone/` | `[B,3,1024,1024]` → `{"image_embedding":[B,256,64,64]}` | **No** — always frozen |
+| `adasam/adapters/` | `[B,256,64,64]` → `[B,256,64,64]` | **Stage 1 only** — frozen in Stage 2 |
+| `adasam/support_encoder/` | `([K,256,64,64], [K,64,64])` → support_memory `[M,256]` | **Stage 2** — TransformerEncoder + MemoryBank |
+| `adasam/prompt/` (SPG) | `(query_features, support_memory, pe)` → `SPGOutput` (semantic_prior, prior_mask, prior_aux) | **Stage 2** |
+| `adasam/prompt/` (GeometricPrior) | `(query_features, support_memory)` → `geometric_prior [1,C,H,W]` | **Stage 2** |
+| `adasam/prompt/` (PromptFusion) | `(geometric_prior, semantic_prior)` → `(dense_prompt, sparse_token)` | **Stage 2** |
+| `adasam/decoder/` | `(image_embedding, sparse_token [1,C], dense_prompt)` → `(low_res [1,1,256²], iou_pred [1,1])` | **Stage 2** — MaskDecoder; PromptEncoder frozen |
+| `adasam/losses/` | `(pred, gt, prior_masks?, prior_mask?)` → `{loss, L_main, L_prior, L_reg}` | N/A |
 
-Training uses **teacher forcing**: GT interior points (distance-transform peaks) as prompts → decode → supervise with focal+dice. Inference uses prototype-similarity peaks. Both share `PromptMaskDecoder.decode()` — no if-mode branches.
+SPG internally uses N learnable semantic probes (Mask2Former-style) but externally exposes
+only unified semantic_prior + prior_mask. Dense prompt / sparse token are produced
+exclusively by PromptFusion (or AdaSAMModel fallback). L_prior directly supervises
+unified prior_mask — no per-probe max-pool aggregation.
 
 ### Vendored third-party code
 
 MobileSAM is vendored under `thirdparty/MobileSAM/` and injected via `sys.path` at runtime by `adasam/backbone/mobile_sam.py:_ensure_mobile_sam_on_path()`. It is NOT declared as a pip package. The weights file (`weights/mobile_sam.pt`, ~40 MB) is gitignored. Tests that depend on weights auto-skip when the file is absent.
 
-### Evaluation Protocol V3 (frozen)
+### Evaluation (FSS Benchmark Protocol)
 
-All paper numbers must come from `tools/evaluate.py`. The protocol:
-1. **Instance-level, never union masks** — each GT/prediction is an independent entity
-2. **One-to-one greedy matching** (by descending score) — a prediction cannot match multiple GT
-3. **COCO AP** from official pycocotools via `COCOInstanceEvaluator` (the only file allowed to call `COCOeval` directly)
-4. **Instance mIoU** — per-GT max-IoU prediction, averaged (intentionally does NOT enforce one-to-one; separate from greedy_match)
-5. **Zero-shot** — MobileSAM everything-mode, class-agnostic, non-oracle
-6. **Frozen manifest** — `evaluation_manifest_val.json` locks the query tile set across runs
+Core metrics computed by `tools/eval_isaid_5i.py`:
+1. **mIoU** — per-class IoU averaged over all visible classes
+2. **FB-IoU** — foreground-background IoU (FSS standard, FG=union of all visible classes)
+3. **Per-class IoU** — with GT tile counts and support tile counts
+4. **3-fold CV** — fold 0/1/2 with mean
+5. **Multi-seed** — Mean±Std for reproducibility
 
-The audit guard at `tests/test_protocol_audit.py` scans the entire repo for forbidden legacy patterns (oracle zero-shot, self-rolled AP, raw `COCOeval` outside the sanctioned file, non-deterministic `hash()` in sampling).
+Support cache is fixed per evaluation run (FSS standard protocol).
 
 ### Configuration
 
-Single config source: `configs/base.yaml`. Read by both `tools/train.py` and `tools/evaluate.py`. CLI arguments override YAML fields. The checkpoint's embedded config is the default source during evaluation (weights path, embed_dim, matcher params are read from the checkpoint, not the yaml).
+- Stage 1: `configs/stage1.yaml`
+- Stage 2: `configs/base.yaml` and `configs/isaid_5i.yaml`
+CLI arguments override YAML fields. The checkpoint's embedded config is the default source during evaluation.
 
 ### Dataset
 
-iSAID Instance Few-Shot Split — 896² COCO tiles, 15 classes, 3-fold base/novel splits. Data is **referenced by path** (`configs/base.yaml:data_root`), not copied. `EpisodeSampler` enforces scene-disjoint sampling (support and query from different source images) with a `min_tiles` filter. The sampler depends only on a query interface (`visible_classes`, `class_to_tiles`, `source_image_id`), decoupled from the concrete dataset.
+- **iSAID-5i**: 15-class semantic segmentation (PNG annotations), 256² tiles, 3-fold base/novel splits. FSS Benchmark protocol.
+- **NEU-SEG**: 6-class industrial defect segmentation, 480×640, 35 images.
+
+`EpisodeSampler` enforces scene-disjoint sampling (support and query from different source images) with a `min_tiles` filter.
 
 ### Logging
 
@@ -120,4 +158,4 @@ Structured logging system (`adasam/logging/`) — all observable values go throu
 
 ### Experiment tracking
 
-`EXPERIMENT_MANIFEST.md` is the traceability registry. Every paper number binds: ID → Protocol → Manifest → Seed → Checkpoint → Commit. A number may enter a paper table only with Protocol=V3, a frozen Manifest, a Checkpoint, and a Commit hash.
+`EXPERIMENT_MANIFEST.md` is the traceability registry. Every paper number binds: ID → Protocol → Manifest → Seed → Checkpoint → Commit.

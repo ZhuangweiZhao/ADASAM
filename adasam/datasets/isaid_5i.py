@@ -27,7 +27,7 @@ Standard iSAID-5i few-shot protocol: 15 classes, 3-fold cross-validation
 
     {
         "image":      Tensor[3, H, W] float32, RGB, ∈ [0, 1],
-        "instances":  list[{"category_id": int, "mask": Tensor[H,W] bool}],
+        "regions":    list[{"category_id": int, "mask": Tensor[H,W] bool}],
         "image_id":   int,           # 内部索引 | internal index
         "image_size": (H, W),        # 原始尺寸 (256, 256)
         "classes":    set[int],      # 该 tile 中的类别 | classes present
@@ -59,7 +59,7 @@ logger = get_logger("dataset.isaid5i")
 
 # ── iSAID-5i 类别 | Class constants ──
 NUM_CLASSES = 15  # foreground classes only (1-15), 0=BG
-MIN_INSTANCE_AREA = 16  # 小于此像素面积的实例丢弃 | drop instances below this pixel area
+MIN_REGION_AREA = 16  # 最小前景区域面积 (像素) | minimum foreground region area in pixels
 CLASS_NAMES = [
     "BG", "ship", "storage_tank", "baseball_diamond", "tennis_court",
     "basketball_court", "ground_track_field", "bridge", "large_vehicle",
@@ -219,8 +219,8 @@ class ISAID5iDataset(Dataset):
                 f"Cannot read annotation: {self._ann_dir / f'{tile_id}_instance_color_RGB.png'}"
             )
 
-        # Build per-class instance list — split connected components
-        instances = []
+        # Build per-class region list — split connected components
+        regions = []
         present = self._tile_class_map.get(tile_id, [])
         for cls in present:
             if int(cls) not in self._visible_classes:
@@ -228,21 +228,21 @@ class ISAID5iDataset(Dataset):
             cls_mask = (ann == cls).astype(np.uint8)
             if cls_mask.sum() == 0:
                 continue
-            # Split connected components into separate instances
+            # Split connected components into separate regions
             num_labels, labels = cv2.connectedComponents(cls_mask, connectivity=8)
             for label_id in range(1, num_labels):  # skip 0 (background)
                 comp_mask = (labels == label_id)
                 area = int(comp_mask.sum())
-                if area < MIN_INSTANCE_AREA:
+                if area < MIN_REGION_AREA:
                     continue
-                instances.append({
+                regions.append({
                     "category_id": int(cls),
                     "mask": torch.from_numpy(comp_mask),  # [H, W] bool
                 })
 
         return {
             "image": image,
-            "instances": instances,
+            "regions": regions,
             "image_id": index,
             "image_size": (H, W),
             "tile_id": tile_id,
@@ -276,6 +276,27 @@ class ISAID5iDataset(Dataset):
     def class_stats(self) -> dict[int, int]:
         """{class_id: tile_count} 统计."""
         return {c: len(t) for c, t in self._class_tiles.items()}
+
+    def get_class_mask(self, index: int, class_id: int) -> torch.Tensor | None:
+        """获取指定 tile 上某个类别的合并语义前景 mask | Get merged semantic FG mask for a class.
+
+        直接从标注中提取类别 mask, 无需手动逐区域 OR 合并。
+        Extracts class mask directly from annotation, no manual per-region OR-merge needed.
+
+        :param index: tile 索引 | tile index.
+        :param class_id: 类别 ID (1-15) | class ID.
+        :return: [H, W] float binary mask, 或 None (类别不存在) | or None if class absent.
+        """
+        tile_id = self._tiles[index]
+        ann = cv2.imread(
+            str(self._ann_dir / f"{tile_id}_instance_color_RGB.png"), cv2.IMREAD_UNCHANGED
+        )
+        if ann is None:
+            return None
+        cls_mask = (ann == class_id)
+        if cls_mask.sum() == 0:
+            return None
+        return torch.from_numpy(cls_mask).float()
 
 
 # ═══════════════════════════════════════════════════════════════════

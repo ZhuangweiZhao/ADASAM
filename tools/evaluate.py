@@ -1,8 +1,11 @@
 """
-评估入口 | Evaluation entry point.
-==================================
+[DEPRECATED] 评估入口 (Protocol V3 实例分割) | Evaluation entry point (Protocol V3 instance seg).
+==================================================================================================
 
-AdaSAM 唯一评估脚本 (协议 V3)。所有论文数字必须来自此脚本。
+**已废弃**: 项目已统一为语义分割。请使用 tools/eval_isaid_5i.py。
+**Deprecated**: project unified to semantic segmentation. Use tools/eval_isaid_5i.py instead.
+
+AdaSAM 评估脚本 (协议 V3)。所有论文数字必须来自此脚本。
 The single evaluation script (Protocol V3). All paper numbers must come from here.
 
 用法 | Usage::

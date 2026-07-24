@@ -1,6 +1,8 @@
 """
-SAM-RSP 改进可视化 | Visualize SAM-RSP Improvements.
-=====================================================
+[DEPRECATED] SAM-RSP 改进可视化 | Visualize SAM-RSP Improvements.
+=================================================================
+⚠️ 此工具引用旧 DPG API (dpg_out.fg_queries, dpg_out.fg_logits, model.coarse_prior,
+   model.dpg.feedback_conv), 与新 SPG 架构不兼容, 运行会崩溃。需更新后才能使用。
 
 可视化 DPG 管线中的关键中间产物:
   - RSP Map: support-query 相似度生成的粗空间先验 (CoarsePriorModule 输出)
@@ -108,11 +110,11 @@ def inference_with_rsp(
     else:
         dense_override = None
 
-    low_res, iou_pred = model.sam_decoder(enriched, dpg_out.instance_queries, dense_override)
+    low_res, iou_pred = model.sam_decoder(enriched, dpg_out.fg_queries, dense_override)
 
     # Score filtering — 使用较低阈值，因为 IoU 预测头在早期训练中未校准
     # Use lower threshold since IoU head is uncalibrated in early training
-    scores = dpg_out.objectness_logits.sigmoid() * iou_pred[:, 0].clamp(0.0, 1.0)
+    scores = dpg_out.fg_logits.sigmoid() * iou_pred[:, 0].clamp(0.0, 1.0)
     # Sort by score, take top-K instances
     sorted_idx = scores.argsort(descending=True)
     keep = sorted_idx[:8]  # top-8 queries regardless of absolute score
@@ -196,6 +198,12 @@ def make_figure(
 
 
 def main() -> None:
+    print("=" * 60)
+    print("[DEPRECATED] viz_ab.py 引用旧 DPG API, 与新 SPG 架构不兼容。")
+    print("请使用 tools/viz_neuseg.py 或 tools/eval_isaid_5i.py --save-vis 替代。")
+    print("=" * 60)
+    import sys; sys.exit(1)
+
     p = argparse.ArgumentParser(description="Visualize SAM-RSP improvements")
     p.add_argument("--checkpoint", required=True, help="新模型 checkpoint 路径")
     p.add_argument("--checkpoint-baseline", default=None,
@@ -279,7 +287,7 @@ def main() -> None:
     for si in support_idx:
         sup = train_ds[int(si)]
         fg = None
-        for inst in sup["instances"]:
+        for inst in sup["regions"]:
             if inst["category_id"] == target_cls:
                 fg = inst["mask"].clone() if fg is None else (fg | inst["mask"])
         if fg is None:
@@ -305,7 +313,7 @@ def main() -> None:
         sample = val_ds[int(qi)]
         query_img_np = (sample["image"].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         gt_mask = None
-        for inst in sample["instances"]:
+        for inst in sample["regions"]:
             if inst["category_id"] == target_cls:
                 gt_mask = inst["mask"].numpy() if gt_mask is None else (gt_mask | inst["mask"].numpy())
         if gt_mask is None:

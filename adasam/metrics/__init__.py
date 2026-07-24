@@ -1,33 +1,28 @@
 """
-adasam.metrics — 评测指标 (V3 冻结核心) | Evaluation Metrics (V3 frozen core).
-==============================================================================
+adasam.metrics — 语义分割评测指标 | Semantic Segmentation Evaluation Metrics.
+=============================================================================
 
-只包含论文评估协议 V3 所需的**冻结**度量, 语义与 AdaTile-FastSAM 逐字一致:
-Only the **frozen** metrics required by Evaluation Protocol V3, byte-identical
-semantics to AdaTile-FastSAM:
+纯 numpy 语义分割度量, 无外部 COCO API 依赖:
+Pure-numpy semantic segmentation metrics, no COCO API dependency:
 
-    - COCOInstanceEvaluator — 官方 pycocotools AP 封装 | official pycocotools AP wrapper
-    - pairwise_iou / greedy_match / instance_miou — 纯 numpy 实例级度量 | pure-numpy metrics
-
-设计约束 | Design constraint:
-    coco_eval.py 是**唯一**允许直接调用 pycocotools.COCOeval 的文件。
-    coco_eval.py is the ONLY file allowed to call pycocotools.COCOeval directly.
+    - mIoU: 各类 IoU 均值 | mean IoU across classes
+    - FB-IoU: 前景-背景 IoU (FSS 标准) | foreground-background IoU (FSS standard)
+    - Pixel Accuracy: 像素正确率 | pixel-wise accuracy
+    - pairwise_iou: 通用成对 IoU 矩阵 | generic pairwise IoU matrix
 """
 
-from adasam.metrics.coco_eval import (
-    COCOInstanceEvaluator,
-    mask_to_bbox,
-)
-from adasam.metrics.instance_match import (
+from adasam.metrics.semantic_metrics import (
     pairwise_iou,
-    greedy_match,
-    instance_miou,
+    compute_miou,
+    compute_fb_iou,
+    compute_fb_iou_from_accum,
+    compute_pixel_accuracy,
 )
 
 __all__ = [
-    "COCOInstanceEvaluator",
-    "mask_to_bbox",
     "pairwise_iou",
-    "greedy_match",
-    "instance_miou",
+    "compute_miou",
+    "compute_fb_iou",
+    "compute_fb_iou_from_accum",
+    "compute_pixel_accuracy",
 ]

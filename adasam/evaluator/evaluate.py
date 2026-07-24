@@ -1,6 +1,9 @@
 """
-实例分割评估器 V3 | Instance Segmentation Evaluator V3.
-========================================================
+[DEPRECATED] 实例分割评估器 (Protocol V3) | Instance Segmentation Evaluator (Protocol V3).
+===========================================================================================
+
+**已废弃**: 项目已统一为语义分割。请使用 tools/eval_isaid_5i.py。
+**Deprecated**: project unified to semantic segmentation. Use tools/eval_isaid_5i.py instead.
 
 AdaSAM 唯一评估入口, 严格复用冻结的评估协议 V3 (与 AdaTile-FastSAM 逐字一致的度量语义):
 The single evaluation entry of AdaSAM, strictly reusing the frozen Protocol V3
@@ -42,7 +45,12 @@ from adasam.backbone import build_mobile_sam, MobileSAMBackbone
 from adasam.datasets import ISAID_CATEGORIES
 from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
-from adasam.metrics import COCOInstanceEvaluator, greedy_match, instance_miou
+# [DEPRECATED] Instance metrics removed; evaluator is deprecated.
+# from adasam.metrics import COCOInstanceEvaluator, greedy_match, instance_miou
+try:
+    from adasam.metrics.semantic_metrics import pairwise_iou
+except ImportError:
+    pairwise_iou = None  # type: ignore
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
 from adasam.utils import set_seed
 from adasam.utils.transforms import preprocess_image, resize_mask

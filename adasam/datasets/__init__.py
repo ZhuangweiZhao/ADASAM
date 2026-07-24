@@ -1,11 +1,15 @@
-"""adasam.datasets — iSAID 实例数据与 episode 采样 | iSAID data & episode sampling."""
+"""adasam.datasets — 语义分割数据集与 episode 采样 | Semantic segmentation data & episode sampling."""
 
+# [DEPRECATED] Legacy instance dataset — no longer imported.
+# ISAID_CATEGORIES / DEFAULT_FOLDS are kept as re-exports for backward-compat with
+# any scripts that still reference them via adasam.datasets.
+# These constants are also available from adasam.datasets.isaid_5i (ISAID5I_CATEGORIES, etc.).
 from adasam.datasets.isaid import (
-    ISAIDInstanceDataset,
     ISAID_CATEGORIES,
     DEFAULT_FOLDS,
-    MIN_INSTANCE_AREA,
 )
+# [DEPRECATED] MIN_INSTANCE_AREA → renamed to MIN_REGION_AREA in isaid_5i
+from adasam.datasets.isaid import MIN_INSTANCE_AREA  # noqa: F401 — backward compat
 from adasam.datasets.neu_seg import (
     NEUSegDataset,
     NEUSEG_CLASS_ID,
@@ -21,10 +25,8 @@ from adasam.datasets.isaid_5i import (
 from adasam.datasets.episode import EpisodeSampler, Episode
 
 __all__ = [
-    "ISAIDInstanceDataset",
     "ISAID_CATEGORIES",
     "DEFAULT_FOLDS",
-    "MIN_INSTANCE_AREA",
     "NEUSegDataset",
     "NEUSEG_CLASS_ID",
     "NEUSEG_CLASS_NAME",

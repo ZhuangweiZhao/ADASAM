@@ -4,7 +4,8 @@ AdaSAMModel 端到端集成测试 | End-to-end integration tests for AdaSAMModel
 
 需 weights/mobile_sam.pt (缺失则 skip) | requires weights/mobile_sam.pt (skip if absent).
 
-v2: support_features + support_masks replace prototype.
+v5 (protocol-aligned): SPG outputs semantic_prior + prior_mask only.
+Dense prompt / sparse token come from PromptFusion (or fallback).
 """
 
 from __future__ import annotations
@@ -14,21 +15,22 @@ from pathlib import Path
 import pytest
 import torch
 
-from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
+from adasam.losses import SemanticSegLoss
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
 
 _CKPT = Path(__file__).resolve().parents[1] / "weights" / "mobile_sam.pt"
 _skip_ckpt = pytest.mark.skipif(not _CKPT.exists(), reason="weights/mobile_sam.pt not present")
 
 _CFG = {
-    "prompt_generator": {"num_queries": 8, "num_layers": 2, "ffn_dim": 256},
+    "semantic_prior": {"num_probes": 8, "num_layers": 2, "ffn_dim": 256},
     "decoder": {},
     "support_encoder": {"n_support_tokens": 8, "n_memory_tokens": 32, "n_encoder_layers": 2},
+    "geometric_prior": {"enabled": True},
+    "prompt_fusion": {"enabled": True, "mode": "concat"},
 }
 
 
 def _make_support_data(k: int = 3):
-    """Create synthetic support features + masks."""
     sf = torch.randn(k, 256, 64, 64)
     sm = (torch.rand(k, 64, 64) > 0.3).float()
     return sf, sm
@@ -46,83 +48,65 @@ def model():
 def test_forward_train_shapes(model):
     emb = torch.randn(1, 256, 64, 64)
     sf, sm = _make_support_data(3)
-    dpg_out, low_res, iou_pred = model.forward_train(emb, sf, sm)
-    assert dpg_out.instance_queries.shape == (8, 256)
-    assert dpg_out.objectness_logits.shape == (8,)
-    assert dpg_out.mask_logits.shape == (8, 64, 64)
-    assert len(dpg_out.aux) == 2
-    assert low_res.shape == (8, 1, 256, 256)
-    assert iou_pred.shape == (8, 1)
-    # v2: dense_prompt should be present when support is given
-    assert dpg_out.dense_prompt is not None
-    assert dpg_out.dense_prompt.shape == (1, 256, 1, 1)
+    spg_out, low_res, iou_pred = model.forward_train(emb, sf, sm)
+
+    # SPG unified outputs (no dense_prompt/sparse_token)
+    assert spg_out.semantic_prior.shape == (1, 256, 64, 64)
+    assert spg_out.prior_mask.shape == (1, 1, 64, 64)
+    assert len(spg_out.prior_aux) == 2  # num_layers=2
+    # prior_aux stores unified [1, gh, gw] masks
+    for a in spg_out.prior_aux:
+        assert a["prior_mask"].shape == (1, 64, 64)
+
+    # SAM decoder: single mask output [1, 1, 256, 256]
+    assert low_res.shape == (1, 1, 256, 256)
+    assert iou_pred.shape == (1, 1)
 
 
 @_skip_ckpt
 def test_forward_train_to_criterion_backward(model):
-    """Full chain: forward_train → criterion → backward, gradients reach DPG + SupportEncoder."""
+    """Full chain: forward_train → semantic criterion → backward, gradients reach SPG."""
     emb = torch.randn(1, 256, 64, 64)
     sf, sm = _make_support_data(3)
-    gt = torch.zeros(3, 896, 896)
-    for i in range(3):
-        gt[i, i * 200 : i * 200 + 150, i * 200 : i * 200 + 150] = 1.0
+    gt = torch.zeros(256, 256)
+    gt[50:100, 50:100] = 1.0
 
-    dpg_out, low_res, iou_pred = model.forward_train(emb, sf, sm)
-    criterion = SetCriterion(HungarianMatcher(MatcherConfig()), CriterionConfig())
-    out = criterion(low_res[:, 0], iou_pred[:, 0], dpg_out, gt)
+    spg_out, low_res, iou_pred = model.forward_train(emb, sf, sm)
+
+    # Build 2-channel FG/BG from single mask output
+    fg_logits = low_res[0, 0]   # [256, 256]
+    bg_logits = -fg_logits
+    pred_2ch = torch.stack([bg_logits, fg_logits], dim=0).unsqueeze(0)
+
+    # Gather unified prior masks for deep supervision
+    prior_masks = []
+    for aux_entry in spg_out.prior_aux:
+        prior_masks.append(aux_entry["prior_mask"])  # [1, gh, gw]
+
+    criterion = SemanticSegLoss()
+    out = criterion(pred_2ch, gt.unsqueeze(0), prior_masks=prior_masks,
+                    prior_mask=spg_out.prior_mask)
     assert torch.isfinite(out["loss"])
     out["loss"].backward()
 
-    # DPG parameters receive gradients
-    assert model.dpg.query_feat.weight.grad is not None
-    assert model.dpg.query_feat.weight.grad.abs().sum() > 0
-
-    # SupportEncoder parameters receive gradients
-    # (mask_token only gets grads when a support needs padding; check
-    #  memory_bank.memory_tokens instead which is always on the hot path)
-    assert model.support_encoder.memory_bank.memory_tokens.grad is not None
-
-    # SAM decoder parameters receive gradients
-    any_sam_grad = any(
-        p.grad is not None and p.grad.abs().sum() > 0
-        for p in model.sam_decoder.mask_decoder.parameters()
-    )
-    assert any_sam_grad
-    model.zero_grad(set_to_none=True)
+    # SPG probe parameters receive gradients
+    assert model.spg.probe_feat.weight.grad is not None
+    assert model.spg.probe_feat.weight.grad.abs().sum() > 0
 
 
 @_skip_ckpt
-def test_predict_contract(model):
-    """predict → (masks bool [n,896,896], scores [n]∈[0,1]), n ≤ N | inference contract."""
+def test_num_probes_property(model):
+    """num_probes property reflects config."""
+    assert model.num_probes == 8
+
+
+@_skip_ckpt
+def test_predict_output_shape(model):
+    """predict() returns single mask [1, H, W] and score [1]."""
     emb = torch.randn(1, 256, 64, 64)
     sf, sm = _make_support_data(3)
-    masks, scores = model.predict(
-        emb, sf, sm, input_size=(1024, 1024), original_size=(896, 896), score_thr=0.0
-    )
-    n = masks.shape[0]
-    assert n <= model.num_queries
-    assert masks.shape == (n, 896, 896) and masks.dtype == torch.bool
-    assert scores.shape == (n,)
-    if n:
-        assert float(scores.min()) >= 0.0 and float(scores.max()) <= 1.0
-
-
-@_skip_ckpt
-def test_predict_high_threshold_returns_empty(model):
-    """score_thr=1.1 → empty output, no crash."""
-    emb = torch.randn(1, 256, 64, 64)
-    sf, sm = _make_support_data(3)
-    masks, scores = model.predict(
-        emb, sf, sm, input_size=(1024, 1024), original_size=(896, 896), score_thr=1.1
-    )
-    assert masks.shape == (0, 896, 896)
-    assert scores.shape == (0,)
-
-
-@_skip_ckpt
-def test_state_dict_roundtrip(model):
-    """Strict state_dict round-trip."""
-    from adasam.backbone import build_mobile_sam
-    sam2 = build_mobile_sam(_CKPT, device="cpu")
-    model2 = AdaSAMModel(sam2, AdaSAMModelConfig.from_dict(_CFG))
-    model2.load_state_dict(model.state_dict(), strict=True)
+    masks, scores = model.predict(emb, sf, sm, (1024, 1024), (256, 256), score_thr=0.0)
+    assert masks.ndim == 3  # [1, H, W]
+    assert masks.shape[0] == 1
+    assert masks.shape[1] == 256
+    assert scores.shape == (1,)

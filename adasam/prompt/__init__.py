@@ -1,15 +1,17 @@
-"""adasam.prompt — 密集提示生成 | Dense prompt generation (instance queries)."""
+"""adasam.prompt — 语义先验生成 & 融合 | Semantic prior generation & fusion."""
 
-from adasam.prompt.coarse_prior import CoarsePriorModule
-from adasam.prompt.dense_prompt_generator import (
-    DensePromptGenerator,
-    DensePromptGeneratorConfig,
-    DPGOutput,
+from adasam.prompt.geometric_prior import GeometricPriorModule
+from adasam.prompt.prompt_fusion import PromptFusion
+from adasam.prompt.semantic_prior_generator import (
+    SemanticPriorGenerator,
+    SemanticPriorGeneratorConfig,
+    SPGOutput,
 )
 
 __all__ = [
-    "CoarsePriorModule",
-    "DensePromptGenerator",
-    "DensePromptGeneratorConfig",
-    "DPGOutput",
+    "GeometricPriorModule",
+    "PromptFusion",
+    "SemanticPriorGenerator",
+    "SemanticPriorGeneratorConfig",
+    "SPGOutput",
 ]

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-训练后一键检查 | Post-Training One-Click Check
-==============================================
+[DEPRECATED] 训练后一键检查 | Post-Training One-Click Check
+============================================================
+⚠️ 此工具引用旧 DPG API (dpg.spatial_prompt_scale, dpg.spatial_prompt_proj,
+   dpg.prompt_mask_head, dpg_out.fg_queries, dpg_out.fg_logits, model.coarse_prior,
+   model.dpg.feedback_conv), 与新 SPG 架构不兼容, 运行会崩溃。需更新后才能使用。
+
 训练完成后运行此脚本, 自动完成:
   1. checkpoint 关键参数检查 (spatial_prompt_scale, prompt_mask_head, etc.)
   2. Dense Prompt 诊断 (diag_prompt_chain 全部 5 项测试)
@@ -156,7 +160,7 @@ def build_support(model, backbone, dataset, class_id: int, k_shot: int, device: 
         sample = dataset[idx]
         img = sample["image"]
         cls_mask = None
-        for inst in sample["instances"]:
+        for inst in sample["regions"]:
             if inst["category_id"] == class_id:
                 cls_mask = inst["mask"] if cls_mask is None else cls_mask | inst["mask"]
         if cls_mask is None:
@@ -347,7 +351,7 @@ def test2_prompt_ablation(model, backbone, dataset, device: str):
             qf = emb["image_embedding"]
 
             gt = torch.zeros(256, 256, dtype=torch.bool, device=device)
-            for inst in sample["instances"]:
+            for inst in sample["regions"]:
                 if inst["category_id"] == cls:
                     gt = gt | inst["mask"].to(device)
 
@@ -361,9 +365,9 @@ def test2_prompt_ablation(model, backbone, dataset, device: str):
 
             # Path B: Zero dense prompt
             zero_dense = torch.zeros(1, 256, 64, 64, device=device)
-            z_mask = model.sam_decoder(qf, dpg_out.instance_queries, zero_dense)
+            z_mask = model.sam_decoder(qf, dpg_out.fg_queries, zero_dense)
             z_logits = z_mask[0]
-            z_scores = dpg_out.objectness_logits.sigmoid() * z_mask[1][:, 0].clamp(0, 1)
+            z_scores = dpg_out.fg_logits.sigmoid() * z_mask[1][:, 0].clamp(0, 1)
             keep = z_scores >= 0.3
             if keep.any():
                 z_up = model.sam_decoder.upscale_logits(
@@ -375,15 +379,15 @@ def test2_prompt_ablation(model, backbone, dataset, device: str):
             iou_z = _compute_iou(masks_z, gt)
 
             # Path C: SAM default no_mask_embed
-            nm_dense = no_mask.expand(dpg_out.instance_queries.shape[0], -1, 64, 64)
+            nm_dense = no_mask.expand(dpg_out.fg_queries.shape[0], -1, 64, 64)
             nm_mask_out = model.sam_decoder.mask_decoder(
                 image_embeddings=qf,
                 image_pe=model.sam_decoder.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=dpg_out.instance_queries.unsqueeze(1),
+                sparse_prompt_embeddings=dpg_out.fg_queries.unsqueeze(1),
                 dense_prompt_embeddings=nm_dense,
                 multimask_output=False,
             )
-            nm_scores = dpg_out.objectness_logits.sigmoid() * nm_mask_out[1][:, 0].clamp(0, 1)
+            nm_scores = dpg_out.fg_logits.sigmoid() * nm_mask_out[1][:, 0].clamp(0, 1)
             keep_nm = nm_scores >= 0.3
             if keep_nm.any():
                 nm_up = model.sam_decoder.upscale_logits(
@@ -452,7 +456,7 @@ def test3_query_similarity(model, backbone, dataset, device: str):
             dpg_out, _, _ = model.forward_train(
                 emb["image_embedding"], sup_feat, sup_mask
             )
-            q = dpg_out.instance_queries
+            q = dpg_out.fg_queries
             qn = F.normalize(q, dim=1)
             cos = torch.mm(qn, qn.t())
 
@@ -460,7 +464,7 @@ def test3_query_similarity(model, backbone, dataset, device: str):
             off_diag = cos[mask]
             all_cos.append(off_diag.cpu())
 
-            obj = dpg_out.objectness_logits.sigmoid().cpu()
+            obj = dpg_out.fg_logits.sigmoid().cpu()
             all_obj.append(obj)
 
     if not all_cos:
@@ -588,7 +592,7 @@ def test5_gradient_check(model, backbone, dataset, device: str):
     proc, _ = preprocess_image(sample["image"], backbone.img_size)
     proc = proc.unsqueeze(0).to(device)
 
-    gt_list = [inst["mask"] for inst in sample["instances"] if inst["category_id"] == cls]
+    gt_list = [inst["mask"] for inst in sample["regions"] if inst["category_id"] == cls]
     if not gt_list:
         print("  No GT for this class")
         return {}
@@ -610,7 +614,7 @@ def test5_gradient_check(model, backbone, dataset, device: str):
     )
 
     losses = []
-    for qi in range(min(dpg_out.objectness_logits.shape[0], gt_masks.shape[0])):
+    for qi in range(min(dpg_out.fg_logits.shape[0], gt_masks.shape[0])):
         pred = low_res[qi, 0].sigmoid()
         gt_256 = F.interpolate(
             gt_masks[qi].unsqueeze(0).unsqueeze(0).float(),
@@ -686,6 +690,12 @@ def run_evaluation(ckpt_path: str, data_root: str, k_shot: int, device: str):
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main():
+    print("=" * 60)
+    print("[DEPRECATED] post_train_check.py 引用旧 DPG API, 与新 SPG 架构不兼容。")
+    print("请使用 tools/eval_isaid_5i.py --diagnostics 替代。")
+    print("=" * 60)
+    import sys; sys.exit(1)
+
     p = argparse.ArgumentParser(
         description="训练后一键检查 | Post-Training One-Click Check"
     )

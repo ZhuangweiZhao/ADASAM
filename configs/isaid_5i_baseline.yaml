@@ -1,6 +1,7 @@
 # AdaSAM iSAID-5i Baseline — 纯 DPG + SupportEncoder + SAM Decoder
 # SAM-RSP 创新 (coarse_prior + feedback) 全部关闭
-# 与 isaid_5i.yaml 完全一致，仅 close coarse_prior 和 feedback
+# 与 isaid_5i.yaml 完全一致, 仅关闭 coarse_prior 和 feedback
+# [NOTE] This config is for A/B experiments; use isaid_5i.yaml as the primary config.
 
 backbone:
   model_type: vit_t
@@ -12,7 +13,6 @@ data:
   tile_size: 256
   num_classes: 15
   fold: 0
-  eval_manifest: null
 
 fewshot:
   k_shot: 5
@@ -29,7 +29,7 @@ support_encoder:
   dropout: 0.0
 
 prompt_generator:
-  num_queries: 16
+  num_probes: 16
   num_layers: 3
   num_heads: 8
   ffn_dim: 1024
@@ -41,19 +41,14 @@ decoder:
   train_mask_decoder: true
   decode_chunk_size: 0
 
+# Semantic segmentation loss (CE + Focal + Dice + Aux deep supervision)
 loss:
   focal_weight: 1.0
   dice_weight: 1.0
-  objectness_weight: 2.0
-  iou_weight: 1.0
   aux_weight: 0.3      # reduced from 1.0 — was dominating 77% of total loss
   prompt_weight: 0.5   # V3: BCE+Dice on dense_prompt projection → class-spatial supervision
-  eos_coef: 0.1
   focal_gamma: 5.0
   focal_eps: 1.0e-4
-  match_cost_objectness: 2.0
-  match_cost_mask: 5.0
-  match_cost_dice: 5.0
 
 train:
   epochs: 50
@@ -65,11 +60,9 @@ train:
   device: cuda
   use_cat_adapter: false
 
+# Semantic evaluation (mIoU + FB-IoU)
 eval:
-  iou_thr: 0.5
   score_thr: 0.3
-  min_area: 16
-  per_class: 20
 
 seed: 42
 output_dir: runs

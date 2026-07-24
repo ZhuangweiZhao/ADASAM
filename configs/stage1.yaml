@@ -1,0 +1,45 @@
+# AdaSAM Stage 1 — Domain Adaptation Configuration
+# ==================================================
+# Stage 1: MobileSAM (frozen) + Adapter + SegHead → 标准语义分割训练.
+# 目标: 让 MobileSAM 学会 iSAID 遥感特征 (Domain-aware Initialization).
+#
+# Stage 1: MobileSAM (frozen) + Adapter + SegHead → standard semantic
+# segmentation training. Goal: domain-aware feature initialization.
+
+# ── Backbone (MobileSAM, frozen) ──
+backbone:
+  model_type: vit_t
+  checkpoint: weights/mobile_sam.pt
+  image_size: 1024
+
+# ── Data ──
+data:
+  data_root: data/iSAID-5i
+  tile_size: 256
+  num_classes: 15
+  fold: 0
+
+# ── Adapter ──
+adapter:
+  type: "cat"                # cat | lora
+  bottleneck: 64
+
+# ── Training ──
+train:
+  epochs: 50
+  batch_size: 8
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  val_every: 5
+  device: cuda
+
+# ── Loss ──
+loss:
+  focal_weight: 1.0
+  dice_weight: 1.0
+  focal_gamma: 5.0
+  focal_eps: 1.0e-4
+
+# ── Reproducibility ──
+seed: 42
+output_dir: runs

@@ -1,9 +1,9 @@
 """
-训练入口 | Training entry point.
-================================
+[DEPRECATED] 训练入口 (Protocol V3 实例分割) | Training entry point (Protocol V3 instance seg).
+================================================================================================
 
-AdaSAM 唯一训练脚本。读取 configs/base.yaml, 应用 CLI 覆盖, 运行 Trainer。
-The single training script. Reads configs/base.yaml, applies CLI overrides, runs Trainer.
+**已废弃**: 项目已统一为语义分割。请使用 tools/train_isaid_5i.py。
+**Deprecated**: project unified to semantic segmentation. Use tools/train_isaid_5i.py instead.
 
 用法 | Usage::
 
@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", default=None)
     # ── Dense Prompt Generator ──
     p.add_argument("--num-queries", type=int, default=None,
-                   help="instance queries per image (prompt_generator.num_queries)")
+                   help="[DEPRECATED] FG queries (prompt_generator.num_queries)")
     # ── CAT-SAM Adapter ──
     p.add_argument("--cat-adapter", action="store_true", default=None,
                    help="enable CAT-SAM feature adapter (bottleneck residual conv)")

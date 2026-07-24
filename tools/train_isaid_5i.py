@@ -1,18 +1,22 @@
 """
-iSAID-5i 小样本语义分割训练 | Few-shot Semantic Segmentation Training.
-======================================================================
+AdaSAM Stage 2 — Few-shot Semantic Learning.
+=============================================
 
-基于 AdaSAM Stage 2 架构 (DPG + SupportEncoder + SAM Decoder) 在 iSAID-5i
-标准小样本协议上训练。
+Stage 2: 加载 Stage 1 Domain Adapter (冻结) → Episode 训练 SPG + GeometricPrior +
+PromptFusion + SAM Decoder。Novel 类直接推理, 不再训练。
 
-Train AdaSAM Stage 2 architecture (DPG + SupportEncoder + SAM Decoder) on
-the standard iSAID-5i few-shot protocol (15 classes, 3-fold cross-validation).
+Loads Stage 1 adapter (frozen) → Episode training of SPG + GeometricPrior +
+PromptFusion + SAM Decoder. Novel classes inferred directly (no finetune).
 
 用法 | Usage::
 
-    python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50         # 5-shot fold 0
-    python tools/train_isaid_5i.py --fold 1 --k-shot 1 --epochs 50         # 1-shot fold 1
-    python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5  # smoke test
+    # 完整训练 (需先完成 Stage 1)
+    python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 50 \\
+        --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
+
+    # 烟测试
+    python tools/train_isaid_5i.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \\
+        --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
 """
 
 from __future__ import annotations
@@ -48,11 +52,14 @@ from adasam.datasets.isaid_5i import (
 )
 from adasam.logging import get_logger
 from adasam.logging.backends import ConsoleBackend, FileBackend
-from adasam.losses import CriterionConfig, HungarianMatcher, MatcherConfig, SetCriterion
+from adasam.losses import SemanticSegLoss
 from adasam.model import AdaSAMModel, AdaSAMModelConfig
 from adasam.utils import set_seed
 from adasam.utils.debug_trace import configure_from_config, tracer
 from adasam.utils.transforms import preprocess_image, resize_mask
+
+# Import new prompt modules for type hints
+from adasam.prompt import SPGOutput
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -63,15 +70,16 @@ class ISAID5iTrainer:
     """iSAID-5i 小样本训练器 | Few-shot trainer for iSAID-5i."""
 
     def __init__(self, cfg: dict, args: argparse.Namespace) -> None:
-        """初始化训练器 | Initialize the trainer.
+        """初始化 Stage 2 训练器 | Initialize Stage 2 trainer.
 
-        完成以下设置: 随机种子/设备、数据集+Episode Sampler、模型+Backbone、
-        Loss+Matcher、优化器+学习率调度器、输出目录+日志。
-        Sets up: random seed/device, dataset + episode sampler, model + backbone,
-        loss + matcher, optimizer + scheduler, output dir + logger.
+        完成以下设置: 随机种子/设备、数据集+Episode Sampler、加载 Stage 1 Adapter、
+        模型+Backbone、Loss、优化器+学习率调度器、输出目录+日志。
+        Sets up: random seed/device, dataset + episode sampler, load Stage 1 adapter,
+        model + backbone, loss, optimizer + scheduler, output dir + logger.
         """
         self.cfg = cfg
         self.args = args
+        self.stage1_ckpt_path: Path = Path(args.stage1_ckpt)
         self.seed = int(cfg.get("seed", 42))
         set_seed(self.seed)
         self.device = torch.device(
@@ -82,25 +90,25 @@ class ISAID5iTrainer:
         # ── 数据 | Data ──
         self.fold = int(cfg["data"].get("fold", 0))
         self.k_shot = int(cfg["fewshot"].get("k_shot", 5))
-        self.mode = cfg["fewshot"].get("train_mode", "novel")
         data_root = self._resolve(cfg["data"]["data_root"])
 
-        # 训练数据集 + 类别统计 | Training dataset + class stats
+        # Stage 2 trains on base classes only (novel → direct inference, no training)
+        self.mode = "base"
         self.train_ds = ISAID5iDataset(root=data_root, fold=self.fold, split="train", mode=self.mode)
         self.train_classes = self.train_ds.visible_classes()
-        print(f"[iSAID-5i] fold={self.fold} mode={self.mode} classes={self.train_classes}")
+        print(f"[Stage2] fold={self.fold} mode={self.mode} classes={self.train_classes}")
         for cls in self.train_classes:
             n = len(self.train_ds.class_to_tiles(cls))
             name = ISAID5I_CATEGORIES.get(cls, f"cls{cls}")
             print(f"  class {cls:>2d} ({name:<20s}): {n} tiles")
 
-        # Episode Sampler — 保证 support 和 query 来自不同场景 | ensures scene-disjoint
+        # Episode Sampler
         self.sampler = ISAID5iEpisodeSampler(
             self.train_ds, k_shot=self.k_shot, seed=self.seed,
             min_tiles=int(cfg["fewshot"].get("min_tiles", 10)),
         )
         self.eligible = self.sampler.eligible_classes()
-        print(f"[iSAID-5i] eligible classes after filtering: {len(self.eligible)}")
+        print(f"[Stage2] eligible classes after filtering: {len(self.eligible)}")
 
         # ── 验证集 | Validation ──
         tcfg = cfg["train"]
@@ -108,93 +116,141 @@ class ISAID5iTrainer:
         self.val_samples = int(tcfg.get("val_samples", 30))
         self.val_ds = ISAID5iDataset(root=data_root, fold=self.fold, split="val", mode=self.mode)
         self.val_classes = self.val_ds.visible_classes()
-        print(f"[iSAID-5i] val classes: {len(self.val_classes)}, "
+        print(f"[Stage2] val classes: {len(self.val_classes)}, "
               f"val_every={self.val_every}, val_samples={self.val_samples}")
 
         # ── 模型 | Model ──
-        # MobileSAM backbone 始终冻结 | MobileSAM backbone is always frozen
         ckpt_path = self._resolve(cfg["backbone"]["checkpoint"])
         sam = build_mobile_sam(ckpt_path, cfg["backbone"].get("model_type", "vit_t"), self.device)
         self.backbone = MobileSAMBackbone(sam.image_encoder, sam.image_encoder.img_size).to(self.device)
         self.image_size = self.backbone.img_size
         self.embed_dim = int(cfg.get("support_encoder", {}).get("embed_dim", 256))
         self.model = AdaSAMModel(sam, AdaSAMModelConfig.from_dict(cfg)).to(self.device)
-        self.num_queries = self.model.num_queries
+        self.num_probes = self.model.num_probes
 
-        # ── 损失函数 | Criterion ──
-        # Hungarian Matcher + Focal/Dice/Objectness loss
-        loss_cfg = cfg.get("loss", {})
-        self.criterion = SetCriterion(
-            HungarianMatcher(MatcherConfig.from_dict(loss_cfg)),
-            CriterionConfig.from_dict(loss_cfg),
-        )
+        # ── Stage 1 Adapter: 加载并冻结 | Load and freeze ──
+        if not self.stage1_ckpt_path.exists():
+            raise FileNotFoundError(f"Stage 1 checkpoint not found: {self.stage1_ckpt_path}")
+        self.cat_adapter = self._load_stage1_adapter(self.stage1_ckpt_path)
 
         # ── 优化器 & 学习率调度 | Optimizer & LR Scheduler ──
-        tcfg = cfg["train"]
+        self.grad_clip = float(tcfg.get("grad_clip", 1.0))
         self.epochs = int(tcfg.get("epochs", 50))
         self.episodes_per_epoch = int(tcfg.get("episodes_per_epoch", 200))
-        self.grad_clip = float(tcfg.get("grad_clip", 1.0))
-        lr = float(tcfg.get("lr", 1e-4))
-        sam_mult = float(tcfg.get("sam_decoder_lr_mult", 0.1))
 
-        # CAT-Adapter (可选 | optional): 轻量特征适配 | lightweight feature adaptation
-        self.cat_adapter = None
-        if bool(tcfg.get("use_cat_adapter", False)):
-            adapter_cfg = tcfg.get("cat_adapter", {})
-            self.cat_adapter = CATAdapter(
-                dim=self.embed_dim,
-                bottleneck=int(adapter_cfg.get("bottleneck", 64)),
-            ).to(self.device)
-
-        # 参数分组: DPG + SupportEncoder 全速, SAM Decoder 低速 (×sam_mult)
-        # Param groups: DPG + SupportEncoder full-rate, SAM Decoder reduced (×sam_mult)
-        param_groups = [
-            {"params": list(self.model.dpg.parameters()), "lr": lr},
-            {"params": list(self.model.support_encoder.parameters()), "lr": lr},
-            {"params": [
-                p for p in self.model.sam_decoder.mask_decoder.parameters()
-                if p.requires_grad
-            ], "lr": lr * sam_mult},
-        ]
-        if self.model.coarse_prior is not None:
-            param_groups.append(
-                {"params": list(self.model.coarse_prior.parameters()), "lr": lr}
-            )
-        if self.cat_adapter is not None:
-            param_groups.append({"params": list(self.cat_adapter.parameters()), "lr": lr})
-        # 收集所有可训练参数 (用于 gradient clipping)
-        # Collect all trainable params (for gradient clipping)
+        lr = float(cfg["train"].get("lr", 1e-4))
+        param_groups = self._build_param_groups(cfg, lr)
         self._trainable = [p for g in param_groups for p in g["params"]]
         self.optimizer = AdamW(
             param_groups, lr=lr, weight_decay=float(tcfg.get("weight_decay", 1e-4))
         )
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.epochs)
 
+        # ── 损失函数 | Criterion ──
+        loss_cfg = cfg.get("loss", {})
+        self.criterion = SemanticSegLoss(
+            prior_weight=float(loss_cfg.get("prior_weight", 0.3)),
+            reg_weight=float(loss_cfg.get("reg_weight", 0.0)),
+            focal_weight=float(loss_cfg.get("focal_weight", 1.0)),
+            dice_weight=float(loss_cfg.get("dice_weight", 1.0)),
+            focal_gamma=float(loss_cfg.get("focal_gamma", 5.0)),
+            focal_eps=float(loss_cfg.get("focal_eps", 1e-4)),
+        )
+
         # ── 输出目录 & 日志 | Output & Logging ──
-        exp = f"isaid5i_fold{self.fold}_k{self.k_shot}_{self.mode}_seed{self.seed}"
+        exp = f"stage2_fold{self.fold}_k{self.k_shot}_seed{self.seed}"
         self.out_dir = self._resolve(cfg.get("output_dir", "runs")) / exp
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
-        # ── Debug tracer (数据流追踪) | Data-flow tracer ──
+        # ── Debug tracer ──
         configure_from_config(cfg, output_dir=self.out_dir)
-        self.logger = get_logger("trainer.isaid5i")
+        self.logger = get_logger("trainer.stage2")
         if not self.logger.backends:
             self.logger.add_backend(ConsoleBackend())
             self.logger.add_backend(FileBackend(str(self.out_dir / "train.jsonl")))
 
         n_train = sum(p.numel() for p in self._trainable) / 1e6
-        self.logger.log_info(
-            "init",
-            f"fold={self.fold} k={self.k_shot} mode={self.mode} device={self.device} "
-            f"trainable={n_train:.2f}M queries={self.num_queries} "
-            f"classes={self.eligible} out={self.out_dir}",
+        init_info = (
+            f"stage2 fold={self.fold} k={self.k_shot} "
+            f"device={self.device} trainable={n_train:.2f}M probes={self.num_probes} "
+            f"classes={self.eligible} out={self.out_dir} "
+            f"stage1_ckpt={self.stage1_ckpt_path}"
         )
+        self.logger.log_info("init", init_info)
 
     @staticmethod
     def _resolve(path: str | Path) -> Path:
         """将相对路径转为相对于 repo 根目录的绝对路径 | Resolve relative path to repo root."""
         p = Path(path)
         return p if p.is_absolute() else (_REPO_ROOT / p)
+
+    # ── Stage 1 Adapter 加载 | Stage 1 Adapter Loading ──
+
+    def _load_stage1_adapter(self, ckpt_path: Path) -> CATAdapter:
+        """从 Stage 1 checkpoint 加载 Domain Adapter 并冻结。
+
+        Load domain-adapted CATAdapter from Stage 1 checkpoint and freeze it.
+        Stage 1 adapter provides domain-aware feature initialization for Stage 2.
+
+        :return: CATAdapter loaded from Stage 1 (frozen).
+        """
+        ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        adapter_state = ckpt.get("adapter")
+        if adapter_state is None:
+            raise KeyError(f"Stage 1 checkpoint {ckpt_path} has no 'adapter' key. "
+                           f"Keys: {list(ckpt.keys())}")
+
+        adapter_cfg = ckpt.get("config", {}).get("adapter", {})
+        adapter = CATAdapter(
+            dim=self.embed_dim,
+            bottleneck=int(adapter_cfg.get("bottleneck", 64)),
+        ).to(self.device)
+        adapter.load_state_dict(adapter_state)
+        # Freeze: adapter weights are fixed during Stage 2
+        for p in adapter.parameters():
+            p.requires_grad_(False)
+        adapter.eval()
+
+        s1_epoch = ckpt.get("epoch", "?")
+        s1_fold = ckpt.get("fold", "?")
+        print(f"[load_stage1] adapter from: {ckpt_path}")
+        print(f"  stage1 epoch={s1_epoch} fold={s1_fold} "
+              f"params={sum(p.numel() for p in adapter.parameters()):,}")
+        return adapter
+
+    # ── 优化器参数分组 | Optimizer Param Groups ──
+
+    def _build_param_groups(self, cfg: dict, lr: float) -> list[dict]:
+        """Stage 2 参数分组 | Stage 2 param groups.
+
+        SPG + SupportEncoder + GeometricPrior + PromptFusion 全速,
+        SAM MaskDecoder 低速 (×sam_decoder_lr_mult, 保留预训练知识).
+        Adapter 已冻结, 不参与训练。
+
+        SPG + SupportEncoder + GeometricPrior + PromptFusion full-rate,
+        SAM MaskDecoder reduced-rate.
+
+        :return: list of param_group dicts for AdamW.
+        """
+        tcfg = cfg["train"]
+        sam_mult = float(tcfg.get("sam_decoder_lr_mult", 0.1))
+
+        groups = [
+            {"params": list(self.model.spg.parameters()), "lr": lr},
+            {"params": list(self.model.support_encoder.parameters()), "lr": lr},
+            {"params": [
+                p for p in self.model.sam_decoder.mask_decoder.parameters()
+                if p.requires_grad
+            ], "lr": lr * sam_mult},
+        ]
+        if self.model.geometric_prior is not None:
+            groups.append({"params": list(self.model.geometric_prior.parameters()), "lr": lr})
+        if self.model.prompt_fusion is not None:
+            groups.append({"params": list(self.model.prompt_fusion.parameters()), "lr": lr})
+
+        print(f"[params] stage2: lr={lr}, sam_lr={lr * sam_mult:.1e}, "
+              f"groups={len(groups)}")
+        return groups
 
     # ── 特征提取 | Embedding ──
 
@@ -222,7 +278,7 @@ class ISAID5iTrainer:
         images, masks = [], []
         for idx in support_indices:
             sample = self.train_ds[idx]
-            fg = self._class_foreground(sample["instances"], class_id)
+            fg = self._class_foreground(idx, class_id)
             if fg is None:
                 continue
             x, _ = preprocess_image(sample["image"])
@@ -244,28 +300,20 @@ class ISAID5iTrainer:
             return None  # support 前景为空 | empty foreground
         return feats, masks_grid
 
-    @staticmethod
-    def _class_foreground(instances: list[dict], class_id: int) -> torch.Tensor | None:
-        """合并指定类别的所有实例 mask 为单张前景图 | Merge all instance masks of a class into one FG map.
+    def _class_foreground(self, index: int, class_id: int) -> torch.Tensor | None:
+        """获取指定 tile 上某类的合并前景 mask | Get merged FG mask for a class on a tile.
 
         :return: [H,W] float tensor 或 None (该类别不存在于该 tile).
         """
-        fg = None
-        for inst in instances:
-            if inst["category_id"] == class_id:
-                if fg is None:
-                    fg = inst["mask"].clone()
-                else:
-                    fg = fg | inst["mask"]
-        return fg.float() if fg is not None else None
+        return self.train_ds.get_class_mask(index, class_id)
 
     # ── 单 Episode 训练 | Single Episode Training ──
 
     def _train_episode(self, episode: dict) -> dict | None:
         """执行一个 episode 的前向+反向 | Run one episode: forward + backward.
 
-        流程: support memory → query embedding → DPG → SAM Decoder → loss → backward.
-        Flow: support memory → query embedding → DPG → SAM Decoder → loss → backward.
+        流程: support memory → query embedding → SPG → SAM Decoder → loss → backward.
+        Flow: support memory → query embedding → SPG → SAM Decoder → loss → backward.
 
         :return: loss 指标字典, 或 None (episode 无效 | invalid episode).
         """
@@ -277,24 +325,36 @@ class ISAID5iTrainer:
             return None
         support_features, support_masks_grid = support_data
 
-        # 提取 query GT mask (仅当前类别) | Extract query GT masks (current class only)
+        # 提取 query GT mask (语义: 同类合并为 binary FG mask)
+        # Extract query GT as binary FG mask (semantic: class-level merge)
         query = self.train_ds[episode["query_index"]]
-        gt_list = [i["mask"] for i in query["instances"] if i["category_id"] == cls]
-        if not gt_list:
-            return None
-        if len(gt_list) > self.num_queries:
-            # 按面积保留 top-n (大实例优先), 小碎片为噪声 | Keep top-n by area, small fragments = noise
-            gt_list = sorted(gt_list, key=lambda m: m.sum(), reverse=True)[:self.num_queries]
-        gt_masks = torch.stack([m.float() for m in gt_list], dim=0).to(self.device)
+        gt_binary = self.train_ds.get_class_mask(episode["query_index"], cls)
+        if gt_binary is None or gt_binary.sum() < 1:
+            return None  # 无前景 | no foreground
+        gt_binary = gt_binary.to(self.device)
 
         # 前向传播 + 损失计算 | Forward + loss
         emb = self._embed(query["image"])
-        dpg_out, low_res, iou_pred = self.model.forward_train(
+        spg_out, low_res, iou_pred = self.model.forward_train(
             emb, support_features, support_masks_grid
         )
-        dpg_params = list(self.model.dpg.parameters()) if tracer.should_log else None
-        losses = self.criterion(low_res[:, 0], iou_pred[:, 0], dpg_out, gt_masks,
-                                dpg_params=dpg_params)
+
+        # low_res is [1, 1, 256, 256] (single mask from single token)
+        fg_logits = low_res[0, 0]   # [256, 256]
+        bg_logits = -fg_logits       # approximate BG
+        pred_2ch = torch.stack([bg_logits, fg_logits], dim=0).unsqueeze(0)  # [1, 2, 256, 256]
+
+        # Gather SPG unified prior masks for deep supervision (L_prior)
+        # prior_aux now stores unified [1, gh, gw] masks (not per-probe [N, gh, gw])
+        prior_masks = []
+        for aux_entry in spg_out.prior_aux:
+            prior_masks.append(aux_entry["prior_mask"])  # [1, gh, gw]
+
+        losses = self.criterion(
+            pred_2ch, gt_binary.unsqueeze(0),
+            prior_masks=prior_masks,
+            prior_mask=spg_out.prior_mask,
+        )
 
         # 反向传播 | Backward
         self.optimizer.zero_grad()
@@ -303,8 +363,8 @@ class ISAID5iTrainer:
 
         # ── Debug: gradient trace ──
         if tracer.should_log and tracer.level >= 3:
-            tracer.grad("spatial_prompt_scale", self.model.dpg.spatial_prompt_scale)
-            tracer.grad_summary(self.model.dpg, prefix="DPG")
+            tracer.grad("spatial_prompt_scale", self.model.spatial_prompt_scale)
+            tracer.grad_summary(self.model.spg, prefix="SPG")
             tracer.section("AdaSAM — Post-backward gradient check")
 
         self.optimizer.step()
@@ -314,24 +374,13 @@ class ISAID5iTrainer:
 
         metrics = {
             "loss": float(losses["loss"].detach()),
-            "focal": float(losses["focal"]),
-            "dice": float(losses["dice"]),
-            "obj": float(losses["obj"]),
-            "iou_head": float(losses["iou_head"]),
-            "aux": float(losses["aux"]),
-            "prompt_focal": float(losses["prompt_focal"]),
-            "prompt_dice": float(losses["prompt_dice"]),
-            "prompt": float(losses["prompt"]),
-            "var": float(losses["var"]),
-            "n_matched": float(losses["n_matched"]),
-            "mean_obj_matched": float(losses["mean_obj_matched"]),
-            "mean_obj_unmatched": float(losses["mean_obj_unmatched"]),
-            "n_inst": gt_masks.shape[0],
+            "L_main": float(losses["L_main"]),
+            "L_prior": float(losses["L_prior"]),
+            "L_reg": float(losses["L_reg"]),
+            "main_ce": float(losses["main_ce"]),
+            "main_focal": float(losses["main_focal"]),
+            "main_dice": float(losses["main_dice"]),
         }
-        # Per-layer aux breakdown
-        for name, fd, obj_val in losses.get("aux_per_layer", []):
-            metrics[f"aux_{name}_fd"] = fd
-            metrics[f"aux_{name}_obj"] = obj_val
         return metrics
 
     # ── Validation ──
@@ -434,22 +483,20 @@ class ISAID5iTrainer:
                     continue
                 sup_feat, sup_mask = sup_data
 
-                # GT mask for this class on this tile
-                gt = np.zeros((256, 256), dtype=bool)
-                for inst in sample["instances"]:
-                    if inst["category_id"] == cls:
-                        gt = gt | inst["mask"].numpy()
+                # GT mask for this class on this tile (semantic: class-level)
+                gt_mask = self.val_ds.get_class_mask(idx, cls)
+                gt = gt_mask.numpy().astype(bool) if gt_mask is not None else np.zeros((256, 256), dtype=bool)
 
                 # Predict
                 n_total_calls += 1
                 try:
                     masks_pred, scores = self.model.predict(
                         emb, sup_feat, sup_mask,
-                        (1024, 1024), (256, 256), score_thr=0.1,  # 降低: 冷启动时 0.3 过严
+                        (1024, 1024), (256, 256), score_thr=0.1,
                     )
-                    # Merge all instance masks into one FG mask
-                    if len(masks_pred) > 0:
-                        pred = masks_pred.cpu().numpy().any(axis=0)
+                    # Single mask output [1, H, W] or empty [1, H, W]
+                    if masks_pred.shape[0] > 0 and masks_pred.sum() > 0:
+                        pred = masks_pred.cpu().numpy().squeeze(0)
                         n_nonempty += 1
                         area_sum += float(pred.sum())
                     else:
@@ -543,12 +590,11 @@ class ISAID5iTrainer:
         epoch: int,
         n_samples: int = 4,
     ) -> None:
-        """保存 Aux/Prompt 输出可视化 | Save aux/prompt output visualizations.
+        """保存 Prior 输出可视化 | Save prior output visualizations.
 
         每 val_every epoch 保存几张对比图:
-        [query image | GT union | prompt_mask (aux) | main prediction]
-        用于诊断 Aux Head 是否学到了有意义的结构。
-        Saves comparison grids to diagnose whether Aux Head learns meaningful structure.
+        [query image | GT union | prior_mask | main prediction]
+        用于诊断 SPG prior 是否学到了有意义的结构。
         """
         import matplotlib
         matplotlib.use("Agg")
@@ -563,7 +609,7 @@ class ISAID5iTrainer:
         # 固定采样 tile (同 epoch 可比) | fixed tile sampling for comparability
         viz_rng = random.Random(self.seed + 3000)
         pool = [i for i in range(len(self.val_ds))
-                if len(self.val_ds[i]["instances"]) > 0]
+                if len(self.val_ds[i]["regions"]) > 0]
         if len(pool) > n_samples:
             pool = viz_rng.sample(pool, n_samples)
 
@@ -577,15 +623,15 @@ class ISAID5iTrainer:
 
             # 选该 tile 上 GT 实例最多的类别 | pick class with most GT instances
             best_cls = max(self.val_classes, key=lambda c:
-                sum(1 for i in sample["instances"] if i["category_id"] == c))
+                sum(1 for i in sample["regions"] if i["category_id"] == c))
             sup_data = support_cache.get(best_cls)
             if sup_data is None:
                 sup_data = next(iter(support_cache.values()))
             sup_feat, sup_mask = sup_data
 
-            # 运行一次前向获取 prompt_mask | run forward once to get prompt_mask
+            # 运行一次前向获取 prior_mask | run forward once to get prior_mask
             try:
-                dpg_out, low_res, iou_pred = self.model.forward_train(
+                spg_out, low_res, iou_pred = self.model.forward_train(
                     emb, sup_feat, sup_mask
                 )
                 masks_pred, scores = self.model.predict(
@@ -601,20 +647,18 @@ class ISAID5iTrainer:
             axes[row, 0].set_title(f"Query (cls={best_cls})", fontsize=9)
             axes[row, 0].axis("off")
 
-            # --- 2) GT union (all instances of this class) ---
-            gt = np.zeros(img.shape[:2], dtype=bool)
-            for inst in sample["instances"]:
-                if inst["category_id"] == best_cls:
-                    gt = gt | inst["mask"].numpy()
+            # --- 2) GT union (semantic: class-level mask) ---
+            gt_m = self.val_ds.get_class_mask(idx, best_cls)
+            gt = gt_m.numpy().astype(bool) if gt_m is not None else np.zeros(img.shape[:2], dtype=bool)
             axes[row, 1].imshow(gt, cmap="gray", vmin=0, vmax=1)
             axes[row, 1].set_title("GT Union", fontsize=9)
             axes[row, 1].axis("off")
 
-            # --- 3) prompt_mask (aux head output) ---
-            if dpg_out.prompt_mask is not None:
-                pm = dpg_out.prompt_mask[0, 0].sigmoid().cpu().numpy()
+            # --- 3) prior_mask (SPG prior projection) ---
+            if spg_out.prior_mask is not None:
+                pm = spg_out.prior_mask[0, 0].sigmoid().cpu().numpy()
                 axes[row, 2].imshow(pm, cmap="viridis", vmin=0, vmax=1)
-                axes[row, 2].set_title(f"prompt_mask\nμ={pm.mean():.3f} σ={pm.std():.3f}", fontsize=9)
+                axes[row, 2].set_title(f"prior_mask\nμ={pm.mean():.3f} σ={pm.std():.3f}", fontsize=9)
             else:
                 axes[row, 2].text(0.5, 0.5, "N/A", ha="center", va="center",
                                   transform=axes[row, 2].transAxes, fontsize=12)
@@ -739,22 +783,25 @@ class ISAID5iTrainer:
         return best_path
 
     def _save(self, path: Path, epoch: int, metrics: dict) -> None:
-        """保存检查点 (模型 + 优化器 + 配置 + 指标) | Save checkpoint (model + optimizer + config + metrics)."""
+        """保存检查点 | Save checkpoint (model + optimizer + config + metrics)."""
         ckpt = {
             "epoch": epoch,
+            "stage": "stage2",
+            "mode": self.mode,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "config": self.cfg,
             "metrics": metrics,
             "fold": self.fold,
             "k_shot": self.k_shot,
-            "mode": self.mode,
+            "visible_classes": self.train_classes,
+            "stage1_ckpt": str(self.stage1_ckpt_path),
         }
         if self.cat_adapter is not None:
             ckpt["cat_adapter"] = self.cat_adapter.state_dict()
         torch.save(ckpt, path)
         (self.out_dir / "last_metrics.json").write_text(
-            json.dumps({"epoch": epoch, **metrics}, indent=2), encoding="utf-8"
+            json.dumps({"epoch": epoch, "stage": "stage2", **metrics}, indent=2), encoding="utf-8"
         )
 
 
@@ -768,11 +815,12 @@ def parse_args() -> argparse.Namespace:
     所有参数都可选 — 未指定时使用配置文件默认值。
     All args are optional — config file defaults are used when not specified.
     """
-    p = argparse.ArgumentParser(description="AdaSAM iSAID-5i Few-shot Training")
+    p = argparse.ArgumentParser(description="AdaSAM Stage 2: Few-shot Semantic Learning")
     p.add_argument("--config", default=str(_REPO_ROOT / "configs" / "isaid_5i.yaml"))
+    p.add_argument("--stage1-ckpt", required=True,
+                   help="path to Stage 1 adapter checkpoint (best_adapter.pt)")
     p.add_argument("--fold", type=int, default=None, help="fold 0/1/2")
     p.add_argument("--k-shot", type=int, default=None)
-    p.add_argument("--mode", default=None, choices=["base", "novel", "all"])
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--episodes", "--steps", type=int, default=None, dest="steps")
     p.add_argument("--lr", type=float, default=None)
@@ -799,11 +847,14 @@ def load_config(args: argparse.Namespace) -> dict:
     """
     with open(args.config, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
+
+    # Stage 2 always uses base classes (mode="base")
+    cfg.setdefault("fewshot", {})["train_mode"] = "base"
+
     # CLI 参数覆盖映射 | CLI → config key path mapping
     overrides = [
         (("data", "fold"), args.fold),
         (("fewshot", "k_shot"), args.k_shot),
-        (("fewshot", "train_mode"), args.mode),
         (("train", "epochs"), args.epochs),
         (("train", "episodes_per_epoch"), args.steps),
         (("train", "lr"), args.lr),
@@ -832,6 +883,13 @@ def main() -> None:
     Parse args → load config → create trainer → start training.
     """
     args = parse_args()
+
+    # --stage1-ckpt is required
+    if not Path(args.stage1_ckpt).exists():
+        print(f"ERROR: Stage 1 checkpoint not found: {args.stage1_ckpt}")
+        print("  Run Stage 1 first: python tools/train_stage1.py --fold 0 --epochs 50")
+        sys.exit(1)
+
     cfg = load_config(args)
     # CLI --debug 覆盖 yaml debug.enabled
     if args.debug is not None:

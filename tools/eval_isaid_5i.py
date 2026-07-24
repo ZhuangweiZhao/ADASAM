@@ -114,7 +114,7 @@ def build_support_cache(
         for sid in chosen_scenes:
             idx = rng.choice(scenes[sid])
             sample = train_ds[idx]
-            fg = _class_mask(sample["instances"], cls)
+            fg = _class_mask(train_ds, idx, cls)
             if fg is None or fg.sum() < 1:
                 continue
             x, _ = preprocess_image(sample["image"])
@@ -140,16 +140,9 @@ def build_support_cache(
     return cache
 
 
-def _class_mask(instances: list[dict], class_id: int) -> torch.Tensor | None:
-    """Merge all instance masks of a given class into one binary mask."""
-    fg = None
-    for inst in instances:
-        if inst["category_id"] == class_id:
-            if fg is None:
-                fg = inst["mask"].clone()
-            else:
-                fg = fg | inst["mask"]
-    return fg.float() if fg is not None else None
+def _class_mask(dataset: ISAID5iDataset, index: int, class_id: int) -> torch.Tensor | None:
+    """Get merged binary mask of a given class from a tile (semantic: class-level merge)."""
+    return dataset.get_class_mask(index, class_id)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -339,14 +332,12 @@ def evaluate_one_fold(
         if cat_adapter is not None:
             query_emb = cat_adapter(query_emb)
 
-        # Build per-class GT masks
+        # Build per-class GT masks (semantic: class-level merge)
         gt_masks: dict[int, torch.Tensor] = {}
-        for inst in sample["instances"]:
-            cls = inst["category_id"]
-            if cls not in visible_classes:
-                continue
-            gt_masks[cls] = (gt_masks.get(cls, torch.zeros(H, W, dtype=torch.bool))
-                             | inst["mask"])
+        for cls in visible_classes:
+            gt_m = val_ds.get_class_mask(idx, cls)
+            if gt_m is not None:
+                gt_masks[cls] = gt_m.to(device)
 
         # Predict each visible class
         pred_masks: dict[int, torch.Tensor] = {}
@@ -369,12 +360,8 @@ def evaluate_one_fold(
                 score_thr=score_thr,
             )
 
-            if masks.shape[0] == 0:
-                pred = torch.zeros(H, W, dtype=torch.bool, device=device)
-            else:
-                # Take highest-scoring mask as class prediction
-                best_idx = scores.argmax().item()
-                pred = masks[best_idx]
+            # SPG unified output: single mask [1, H, W] (no per-query aggregation needed)
+            pred = masks[0] if masks.shape[0] > 0 else torch.zeros(H, W, dtype=torch.bool, device=device)
             pred_masks[cls] = pred
 
             # Accumulate per-class IoU
@@ -1054,12 +1041,12 @@ def _save_visualizations(
         if cat_adapter is not None:
             query_emb = cat_adapter(query_emb)
 
-        # GT
+        # GT (semantic: class-level merge from dataset)
         gt_combined = np.zeros((H, W), dtype=np.uint8)
-        for inst in sample["instances"]:
-            cls = inst["category_id"]
-            if cls in visible_classes:
-                gt_combined[inst["mask"].numpy()] = cls
+        for cls in visible_classes:
+            gt_m = val_ds.get_class_mask(idx, cls)
+            if gt_m is not None and gt_m.sum() > 0:
+                gt_combined[gt_m.numpy().astype(bool)] = cls
 
         # Predict each visible class
         pred_combined = np.zeros((H, W), dtype=np.uint8)
@@ -1077,8 +1064,7 @@ def _save_visualizations(
                 score_thr=score_thr,
             )
             if masks.shape[0] > 0:
-                best_idx = scores.argmax().item()
-                pred_combined[masks[best_idx].cpu().numpy()] = cls
+                pred_combined[masks[0].cpu().numpy()] = cls
 
         # Colorize
         gt_col = _colorize(gt_combined, colors)

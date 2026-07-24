@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-深度诊断: 对比 fix_baseline vs fix_samrsp checkpoint
-=====================================================
+[DEPRECATED] 深度诊断: 对比 fix_baseline vs fix_samrsp checkpoint
+==================================================================
+⚠️ 此工具引用旧 DPG API (dpg_out.fg_queries, dpg_out.fg_logits, model.coarse_prior),
+   与新 SPG 架构不兼容, 运行会崩溃。需更新后才能使用。
+   This tool references the old DPG API and is incompatible with the new SPG architecture.
+   It will crash if run. Needs to be updated for SPG interface.
+
 回答 5 个核心问题:
   1. SAM Decoder 权重有没有真正更新?
   2. RSP map 是否聚焦前景?
@@ -97,7 +102,7 @@ def build_support_memory(
     for idx in chosen:
         sample = dataset[idx]
         img = sample["image"]
-        inst_masks = [m["mask"] for m in sample["instances"] if m["category_id"] == class_id]
+        inst_masks = [m["mask"] for m in sample["regions"] if m["category_id"] == class_id]
         if not inst_masks:
             continue
         cls_mask = inst_masks[0]
@@ -221,7 +226,7 @@ def q2_rsp_analysis(model, backbone, dataset, num_samples: int = 50, device: str
 
             # GT mask at 64x64
             gt_mask = torch.zeros(1, 64, 64, device=device)
-            for inst in sample["instances"]:
+            for inst in sample["regions"]:
                 if inst["category_id"] == cls:
                     m = resize_mask(inst["mask"].unsqueeze(0), (64, 64)).float().to(device)
                     gt_mask = torch.maximum(gt_mask, m)
@@ -311,7 +316,7 @@ def q3_per_class_analysis(
 
             # GT mask
             gt_mask = torch.zeros(256, 256, dtype=torch.bool, device=device)
-            for inst in sample["instances"]:
+            for inst in sample["regions"]:
                 if inst["category_id"] == cls:
                     gt_mask = gt_mask | inst["mask"].to(device)
 
@@ -379,7 +384,7 @@ def q4_query_activation(model, backbone, dataset, num_samples: int = 100, device
                 sup_emb,
                 emb.get("dense_pe", torch.zeros(1, 256, 64, 64, device=device)),
             )
-            obj = dpg_out.objectness_logits.sigmoid().cpu()  # [N]
+            obj = dpg_out.fg_logits.sigmoid().cpu()  # [N]
 
             for qi in range(len(obj)):
                 query_objectness[qi].append(float(obj[qi]))
@@ -458,7 +463,7 @@ def q5_mask_quality(model, backbone, dataset, num_samples: int = 100, device: st
             # GT: union of all instances of this class
             gt_area = 0.0
             gt_mask = torch.zeros(256, 256, dtype=torch.bool)
-            for inst in sample["instances"]:
+            for inst in sample["regions"]:
                 if inst["category_id"] == cls:
                     gt_mask = gt_mask | inst["mask"]
                     gt_area += float(inst["mask"].sum())
@@ -536,8 +541,8 @@ def q6_dense_prompt_ablation(model, backbone, dataset, num_samples: int = 30, de
             dpg_normal = model.dpg(qf, sup_emb, pe)
             dpg_zero = model.dpg(qf, zero_emb, pe)
 
-            obj_n = dpg_normal.objectness_logits.sigmoid().cpu()
-            obj_z = dpg_zero.objectness_logits.sigmoid().cpu()
+            obj_n = dpg_normal.fg_logits.sigmoid().cpu()
+            obj_z = dpg_zero.fg_logits.sigmoid().cpu()
 
             normal_objs.append(float(obj_n.max()))
             zero_objs.append(float(obj_z.max()))
@@ -558,6 +563,12 @@ def q6_dense_prompt_ablation(model, backbone, dataset, num_samples: int = 30, de
 # ═══════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    print("=" * 60)
+    print("[DEPRECATED] deep_diagnose.py 引用旧 DPG API, 与新 SPG 架构不兼容。")
+    print("请使用 tools/eval_isaid_5i.py --diagnostics 替代。")
+    print("=" * 60)
+    import sys; sys.exit(1)
+
     parser = argparse.ArgumentParser(description="深度诊断 fix_baseline vs fix_samrsp")
     parser.add_argument("--ckpt-baseline", default=None)
     parser.add_argument("--ckpt-samrsp", default=None)

@@ -1,8 +1,8 @@
-"""adasam.decoder — 查询驱动的 SAM 掩码解码器 | Query-prompted SAM mask decoder."""
+"""adasam.decoder — SAM 语义掩码解码器 | SAM semantic mask decoder (boundary refinement)."""
 
 from adasam.decoder.sam_mask_decoder import (
-    QueryMaskDecoder,
-    QueryMaskDecoderConfig,
+    SemanticMaskDecoder,
+    SemanticMaskDecoderConfig,
 )
 
-__all__ = ["QueryMaskDecoder", "QueryMaskDecoderConfig"]
+__all__ = ["SemanticMaskDecoder", "SemanticMaskDecoderConfig"]

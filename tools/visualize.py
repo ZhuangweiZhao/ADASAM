@@ -1,6 +1,8 @@
 """
-推理可视化 | Inference Visualization.
-======================================
+[DEPRECATED] 推理可视化 | Inference Visualization.
+===================================================
+⚠️ 此工具引用旧 DPG API (dpg_out.fg_logits, dpg_out.fg_mask_logits, objectness),
+   与新 SPG 架构不兼容, 运行会崩溃。需更新后才能使用。
 
 可视化 Dense Prompt Generation 管线: DPG 64² 内部掩码热图、objectness 分数分布、
 GT 实例、最终 SAM 解码掩码 (按 score 着色)。
@@ -94,6 +96,12 @@ def score_bar_panel(scores: np.ndarray, score_thr: float, size: tuple[int, int])
 
 
 def main() -> None:
+    print("=" * 60)
+    print("[DEPRECATED] visualize.py 引用旧 DPG API, 与新 SPG 架构不兼容。")
+    print("请使用 tools/eval_isaid_5i.py --save-vis 或 tools/viz_neuseg.py 替代。")
+    print("=" * 60)
+    import sys; sys.exit(1)
+
     args = parse_args()
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -232,13 +240,13 @@ def main() -> None:
             dpg_out, low_res, iou_pred = model.forward_train(
                 emb, support_features, support_masks
             )
-            scores_all = (dpg_out.objectness_logits.sigmoid()
+            scores_all = (dpg_out.fg_logits.sigmoid()
                           * iou_pred[:, 0].clamp(0.0, 1.0)).cpu().numpy()
             keep = scores_all >= args.score_thr
             logits = model.sam_decoder.upscale_logits(
                 low_res, meta.input_size, meta.original_size)
             pred_masks = (logits > 0.0).cpu().numpy()             # [N, H, W]
-            dpg_heat = dpg_out.mask_logits.sigmoid().max(dim=0).values.cpu().numpy()  # [64,64]
+            dpg_heat = dpg_out.fg_mask_logits.sigmoid().max(dim=0).values.cpu().numpy()  # [64,64]
 
         n_kept = int(keep.sum())
         print(f"  queries={len(scores_all)}, kept={n_kept}, "

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "adasam"
 version = "0.1.0"
-description = "MobileSAM-based Few-shot Aerial Instance Segmentation with Adaptive Sparse Computation"
+description = "MobileSAM-based Few-shot Aerial Semantic Segmentation with Adaptive Sparse Computation"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
@@ -15,9 +15,7 @@ dependencies = [
     "timm>=0.9",          # TinyViT image encoder (MobileSAM)
     "numpy",
     "opencv-python",
-    "pycocotools",
     "pyyaml",
-    "scipy",              # Hungarian matching (linear_sum_assignment)
     "tqdm",
 ]
 

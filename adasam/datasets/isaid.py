@@ -1,6 +1,9 @@
 """
-iSAID 实例小样本数据集 | iSAID Instance Few-Shot Dataset.
-========================================================
+[DEPRECATED] iSAID 实例小样本数据集 | iSAID Instance Few-Shot Dataset (DEPRECATED).
+===================================================================================
+
+**已废弃**: 项目已统一为语义分割。请使用 ISAID5iDataset (adasam/datasets/isaid_5i.py)。
+**Deprecated**: project unified to semantic segmentation. Use ISAID5iDataset instead.
 
 基于 896×896 tile + COCO JSON 的实例分割数据集, 支持 Base/Novel 分划。
 Instance-segmentation dataset over 896×896 tiles + COCO JSON, with Base/Novel split.

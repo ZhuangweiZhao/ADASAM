@@ -1,88 +1,85 @@
 # AdaSAM base configuration | 基础配置
 # =====================================
-# 单一配置源, 被 tools/train.py 与 tools/evaluate.py 共同读取。
-# Single config source, read by both tools/train.py and tools/evaluate.py.
+# iSAID-5i Stage 2 语义小样本分割的默认配置, 被 isaid_5i.yaml 继承覆盖。
+# Default config for Stage 2 few-shot semantic segmentation; overridden by isaid_5i.yaml.
 
 # ── Backbone (MobileSAM, frozen) ──
 backbone:
-  model_type: vit_t                                   # MobileSAM = TinyViT variant
-  checkpoint: weights/mobile_sam.pt                   # relative to repo root
-  image_size: 1024                                    # SAM native encoder resolution
+  model_type: vit_t
+  checkpoint: weights/mobile_sam.pt
+  image_size: 1024
 
-# ── Data (iSAID Instance Few-Shot Split — referenced, NOT copied) ──
+# ── Data (iSAID-5i Few-shot Semantic Segmentation) ──
 data:
-  # Frozen 896² COCO tiles materialized by the FastSAM project's prep pipeline.
-  data_root: E:/A_postgraduate_stude/AdaTile-FastSAM/data/iSAID_instance_fewshot
-  tile_size: 896                                      # GT/eval resolution (never 1024)
+  data_root: data/iSAID-5i
+  tile_size: 256
   num_classes: 15
-  fold: 0                                             # 0/1/2 → base/novel split
-  eval_manifest: evaluation_manifest_val.json         # under data_root; frozen query set
+  fold: 0
 
 # ── Few-shot episode ──
 fewshot:
   k_shot: 5
-  min_tiles: 30                                       # exclude classes with < 30 tiles
-  train_mode: novel                                   # base | novel | all (training class set)
+  min_tiles: 30
 
-# ── Support Encoder (replaces prototype) ──
+# ── Support Encoder ──
 support_encoder:
-  embed_dim: 256                                      # SAM prompt-token dim
-  n_support_tokens: 16                                # N_s tokens per support image
-  n_memory_tokens: 64                                 # M memory tokens (Stage 2 compression)
-  n_encoder_layers: 2                                 # L_s self-attention layers (Stage 2)
+  embed_dim: 256
+  n_support_tokens: 16
+  n_memory_tokens: 64
+  n_encoder_layers: 2
   n_heads: 8
   ffn_dim: 1024
   dropout: 0.0
 
-# ── Dense Prompt Generator (核心创新 | core innovation) ──
-prompt_generator:
-  num_queries: 64                                     # N instance queries per image
-  num_layers: 3                                       # masked cross-attn decoder layers
+# ── Semantic Prior Generator (核心创新 | core innovation) ──
+# 内部使用 N 个可学习语义探针 (Mask2Former-style masked cross-attention),
+# 聚合后输出统一的 semantic prior + prior_mask。
+# Internally uses N learnable semantic probes (Mask2Former-style), aggregated to
+# unified semantic prior + prior_mask. Dense prompt / sparse token by PromptFusion.
+semantic_prior:
+  num_probes: 64
+  num_layers: 3
   num_heads: 8
   ffn_dim: 1024
   dropout: 0.0
-  use_coarse_prior: true                              # SAM-RSP coarse prior (RSP + pixel prototype)
-  use_feedback: true                                  # inter-layer mask feedback
+  use_feedback: true
 
-# ── SAM decoder wrapper ──
+# ── Geometric Prior (dual-branch: support-query cosine similarity) ──
+geometric_prior:
+  enabled: true
+  embed_dim: 256
+
+# ── Prompt Fusion (merge geometric + semantic priors) ──
+prompt_fusion:
+  enabled: true
+  mode: "concat"
+
+# ── SAM Decoder (boundary refinement) ──
 decoder:
   train_mask_decoder: true
-  decode_chunk_size: 0                                # 0 = all N at once; 32 if OOM
 
-# ── Loss / Hungarian matching ──
+# ── Loss: L = L_main + λ₁·L_prior + λ₂·L_reg ──
 loss:
+  prior_weight: 0.3          # L_prior: SPG prior BCE+Dice deep supervision
+  reg_weight: 0.0            # L_reg: regularization (reserved)
   focal_weight: 1.0
   dice_weight: 1.0
-  objectness_weight: 2.0
-  iou_weight: 1.0
-  aux_weight: 1.0                                     # DPG deep-supervision bucket
-  eos_coef: 0.1                                       # unmatched-query BCE down-weight
-  focal_gamma: 5.0                                    # remote-sensing constants (frozen)
+  focal_gamma: 5.0
   focal_eps: 1.0e-4
-  match_cost_objectness: 2.0
-  match_cost_mask: 5.0
-  match_cost_dice: 5.0
 
 # ── Training ──
 train:
   epochs: 50
   episodes_per_epoch: 200
   lr: 1.0e-4
-  sam_decoder_lr_mult: 0.1                            # pretrained MaskDecoder gets lr*mult
+  sam_decoder_lr_mult: 0.1
   weight_decay: 1.0e-4
   grad_clip: 1.0
   device: cuda
-  # ── CAT-SAM Adapter ──
-  use_cat_adapter: false                              # enable CAT-SAM feature adapter
-  cat_adapter:
-    bottleneck: 64                                    # adapter bottleneck dimension
 
-# ── Evaluation (Protocol V3) ──
+# ── Evaluation ──
 eval:
-  iou_thr: 0.5
-  score_thr: 0.3                                      # filters sigmoid(obj) × iou_pred
-  min_area: 16
-  per_class: 20
+  score_thr: 0.3
 
 # ── Reproducibility ──
 seed: 42

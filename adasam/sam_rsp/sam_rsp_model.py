@@ -34,6 +34,14 @@ import torch.nn.functional as F
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SAM_RSP = _REPO_ROOT / "thirdparty" / "SAM-RSP"
+if not _SAM_RSP.is_dir():
+    raise ImportError(
+        f"SAM-RSP thirdparty directory not found: {_SAM_RSP}\n"
+        "Clone it first:\n"
+        f"  cd {_REPO_ROOT / 'thirdparty'}\n"
+        "  git clone https://github.com/nironbow/SAM-RSP.git\n"
+        "Or download and extract from https://github.com/nironbow/SAM-RSP"
+    )
 if str(_SAM_RSP) not in sys.path:
     sys.path.insert(0, str(_SAM_RSP))
 
