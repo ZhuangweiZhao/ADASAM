@@ -145,6 +145,70 @@ class Stage1Trainer:
         self.focal_gamma = float(loss_cfg.get("focal_gamma", 5.0))
         self.focal_eps = float(loss_cfg.get("focal_eps", 1e-4))
 
+    # ── Validation ──
+
+    def _validate(self, class_to_idx: dict) -> dict:
+        """Compute mIoU + accuracy on validation set.
+
+        :param class_to_idx: {class_id → contiguous_label (0..N-1)}.
+        :return: {"mIoU": float, "acc": float, "per_class_iou": dict}.
+        """
+        self.backbone.eval()
+        self.adapter.eval()
+        self.seg_head.eval()
+
+        idx_to_class = {v: k for k, v in class_to_idx.items()}
+        num_cls = len(class_to_idx)
+        inter = torch.zeros(num_cls, dtype=torch.float64)
+        union = torch.zeros(num_cls, dtype=torch.float64)
+        correct = 0
+        total = 0
+
+        for idx in range(len(self.val_ds)):
+            sample = self.val_ds[idx]
+            x, _ = preprocess_image(sample["image"])
+            x = x.unsqueeze(0).to(self.device)
+
+            # Ground truth
+            gt = torch.zeros(256, 256, dtype=torch.long)
+            for cls_id in self.val_ds.visible_classes():
+                mask = self.val_ds.get_class_mask(idx, cls_id)
+                if mask is not None and mask.sum() > 0:
+                    gt[mask > 0.5] = class_to_idx.get(cls_id, 0)
+
+            with torch.no_grad():
+                emb = self.backbone(x)["image_embedding"]
+                adapted = self.adapter(emb)
+                logits = self.seg_head(adapted, (256, 256))
+                pred = logits[0].argmax(dim=0).cpu()
+
+            # mIoU (per-class)
+            for c in range(num_cls):
+                pred_c = pred == c
+                gt_c = gt == c
+                inter[c] += (pred_c & gt_c).sum().item()
+                union[c] += (pred_c | gt_c).sum().item()
+
+            # BG pixel accuracy (class 0 means background padding, ignore)
+            fg = gt > 0
+            correct += (pred[fg] == gt[fg]).sum().item()
+            total += fg.sum().item()
+
+        per_class_iou = {}
+        for c in range(num_cls):
+            cls_id = idx_to_class[c]
+            iou = (inter[c] / union[c]).item() if union[c] > 0 else float("nan")
+            per_class_iou[str(cls_id)] = round(iou, 4)
+
+        valid_ious = [v for v in per_class_iou.values() if not (v != v)]  # filter nan
+        miou = sum(valid_ious) / len(valid_ious) if valid_ious else 0.0
+        acc = correct / max(total, 1)
+
+        self.adapter.train()
+        self.seg_head.train()
+
+        return {"miou": round(miou, 4), "acc": round(acc, 4), "per_class_iou": per_class_iou}
+
     # ── Training ──
 
     def _build_gt(self, index: int, class_to_idx: dict) -> torch.Tensor:
@@ -168,6 +232,7 @@ class Stage1Trainer:
         rng = random.Random(self.seed)
 
         best_path = self.out_dir / "best_adapter.pt"
+        best_miou = -1.0
         max_steps = getattr(self.args, "steps", None)
 
         for epoch in range(self.epochs):
@@ -227,18 +292,32 @@ class Stage1Trainer:
 
             self.scheduler.step()
             avg_loss = total_loss / max(n_batches, 1)
-            print(f"[Stage1] epoch {epoch:>3d}: loss={avg_loss:.4f} "
-                  f"lr={self.optimizer.param_groups[0]['lr']:.2e}")
+            parts = [f"loss={avg_loss:.4f}", f"lr={self.optimizer.param_groups[0]['lr']:.2e}"]
 
+            # Validate on schedule
             if epoch % self.val_every == 0 or epoch == self.epochs - 1:
-                self._save(self.out_dir / f"adapter_epoch{epoch:03d}.pt", epoch, avg_loss)
-                self._save(best_path, epoch, avg_loss)
+                metrics = self._validate(class_to_idx)
+                parts.append(f"val_mIoU={metrics['miou']:.4f} val_acc={metrics['acc']:.4f}")
+                tag = " ★" if metrics["miou"] > best_miou else ""
+                parts[-1] += tag
 
-        print(f"[Stage1] done. best: {best_path}")
+                self._save(self.out_dir / f"adapter_epoch{epoch:03d}.pt",
+                          epoch, avg_loss, metrics)
+
+                if metrics["miou"] > best_miou:
+                    best_miou = metrics["miou"]
+                    self._save(best_path, epoch, avg_loss, metrics)
+
+            print(f"[Stage1] epoch {epoch:>3d}: " + " | ".join(parts))
+
+            if max_steps and n_batches >= max_steps:
+                break
+
+        print(f"[Stage1] done. best_mIoU={best_miou:.4f} → {best_path}")
         return best_path
 
-    def _save(self, path: Path, epoch: int, loss: float) -> None:
-        torch.save({
+    def _save(self, path: Path, epoch: int, loss: float, metrics: dict | None = None) -> None:
+        data: dict = {
             "epoch": epoch,
             "stage": "stage1",
             "adapter": self.adapter.state_dict(),
@@ -246,7 +325,10 @@ class Stage1Trainer:
             "num_base_classes": self.num_base_classes,
             "loss": loss,
             "config": self.cfg,
-        }, path)
+        }
+        if metrics:
+            data["metrics"] = metrics
+        torch.save(data, path)
 
 
 # ═══════════════════════════════════════════════════════════════════
