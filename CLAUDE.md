@@ -43,6 +43,16 @@ python tools/viz_neuseg.py --mode dataset                          # dataset ove
 python tools/viz_neuseg.py --mode support --k-shot 3               # support/query pairs
 python tools/viz_neuseg.py --mode predict --checkpoint <ckpt>      # prediction comparison
 python tools/viz_neuseg.py --mode all --checkpoint <ckpt>          # all visualizations
+
+# SAM-RSP 3-Stage Reproduction on iSAID-5i
+# Stage 0: data preparation
+python tools/sam_rsp_prepare_isaid.py --data-root data/iSAID-5i
+# Stage 1: PSPNet pretraining
+python tools/sam_rsp_stage1.py --fold 0 --epochs 100
+# Stage 2: BAM meta-learner training (requires Stage 1 ckpt)
+python tools/sam_rsp_stage2.py --fold 0 --shot 1 --epochs 50 \\
+    --stage1-ckpt runs/sam_rsp_stage1/fold0/best_model.pth
+# Stage 3: SAM-RSP full model (TBD)
 ```
 
 ## Architecture
