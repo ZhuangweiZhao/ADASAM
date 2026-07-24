@@ -58,6 +58,7 @@ class SegHead(nn.Module):
         super().__init__()
         self.head = nn.Conv2d(in_dim, num_classes, kernel_size=1)
         nn.init.xavier_uniform_(self.head.weight)
+        nn.init.zeros_(self.head.bias)  # zero-init to avoid random class bias
 
     def forward(self, x: torch.Tensor, target_size: tuple[int, int]) -> torch.Tensor:
         """x [B, C, gh, gw] → [B, num_classes, H, W]."""
@@ -102,6 +103,16 @@ class Stage1Trainer:
         self.num_base_classes = len(self.train_ds.visible_classes())
         print(f"[Stage1] fold={self.fold} base_classes={self.train_ds.visible_classes()} "
               f"train={len(self.train_ds)} val={len(self.val_ds)}")
+
+        # ── Class weights for CE loss (inverse-frequency to handle extreme imbalance) ──
+        class_ids = sorted(self.train_ds.visible_classes())
+        stats = self.train_ds.class_stats()  # {class_id: tile_count}
+        tile_counts = torch.tensor([stats.get(c, 0) for c in class_ids], dtype=torch.float32)
+        # Inverse sqrt frequency (gentler than inverse frequency, common in FSS)
+        self._ce_weights = (1.0 / (tile_counts + 1).sqrt()).to(self.device)
+        self._ce_weights = self._ce_weights / self._ce_weights.sum() * len(class_ids)
+        print(f"[Stage1] class_weights (norm): "
+              + " ".join(f"c{c}={self._ce_weights[i]:.2f}" for i, c in enumerate(class_ids)))
 
         # ── Model ──
         ckpt_path = _REPO_ROOT / cfg["backbone"]["checkpoint"]
@@ -267,8 +278,8 @@ class Stage1Trainer:
                 adapted = self.adapter(emb)
                 logits = self.seg_head(adapted, (256, 256))
 
-                # Loss: CE + Focal + Dice
-                ce = F.cross_entropy(logits, gt_batch, ignore_index=255)
+                # Loss: CE (class-weighted) + Focal + Dice
+                ce = F.cross_entropy(logits, gt_batch, weight=self._ce_weights, ignore_index=255)
                 prob = logits.softmax(dim=1)
                 fg_mask = gt_batch != 255  # all foreground classes (including index 0)
                 focal = focal_loss(
