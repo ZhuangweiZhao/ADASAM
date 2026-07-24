@@ -270,7 +270,7 @@ class Stage1Trainer:
                 # Loss: CE + Focal + Dice
                 ce = F.cross_entropy(logits, gt_batch, ignore_index=255)
                 prob = logits.softmax(dim=1)
-                fg_mask = gt_batch > 0
+                fg_mask = gt_batch != 255  # all foreground classes (including index 0)
                 focal = focal_loss(
                     prob.max(dim=1)[0], fg_mask.float(),
                     gamma=self.focal_gamma, eps=self.focal_eps,
