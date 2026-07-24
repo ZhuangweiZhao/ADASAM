@@ -835,6 +835,8 @@ def parse_args() -> argparse.Namespace:
                    help="validate every N epochs (default: 10)")
     p.add_argument("--val-samples", type=int, default=None,
                    help="validation tile samples (default: 30)")
+    p.add_argument("--prior-weight", type=float, default=None,
+                   help="L_prior loss weight (default: 0.3, set 0 to disable)")
     return p.parse_args()
 
 
@@ -864,6 +866,7 @@ def load_config(args: argparse.Namespace) -> dict:
         (("seed",), args.seed),
         (("output_dir",), args.output_dir),
         (("data", "data_root"), args.data_root),
+        (("loss", "prior_weight"), args.prior_weight),
     ]
     for keys, val in overrides:
         if val is not None:

@@ -196,7 +196,8 @@ class SemanticPriorGenerator(nn.Module):
             nn.Conv2d(c, 1, 1),
         )
         nn.init.xavier_uniform_(self.prior_mask_head[-1].weight, gain=1.0)
-        nn.init.zeros_(self.prior_mask_head[-1].bias)
+        # Bias toward BG: sigmoid(-2.0) ≈ 0.12 FG, matches typical iSAID FG ratio (10-30%)
+        nn.init.constant_(self.prior_mask_head[-1].bias, -2.0)
 
     # ── Internal per-probe prediction ──
 
