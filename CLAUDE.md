@@ -52,7 +52,12 @@ python tools/sam_rsp_stage1.py --fold 0 --epochs 100
 # Stage 2: BAM meta-learner training (requires Stage 1 ckpt)
 python tools/sam_rsp_stage2.py --fold 0 --shot 1 --epochs 50 \\
     --stage1-ckpt runs/sam_rsp_stage1/fold0/best_model.pth
-# Stage 3: SAM-RSP full model (TBD)
+# Download SAM ViT-H weights (once, ~2.4GB)
+python tools/download_sam_weight.py
+# Stage 3: SAM-RSP full model training (requires Stage 2 ckpt + SAM weights)
+python tools/sam_rsp_stage3.py --fold 0 --shot 1 --epochs 50 \\
+    --stage2-ckpt runs/sam_rsp_stage2/fold0_shot1/best_model.pth \\
+    --sam-ckpt weights/sam_vit_h_4b8939.pth
 ```
 
 ## Architecture
