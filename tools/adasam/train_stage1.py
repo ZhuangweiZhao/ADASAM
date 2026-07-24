@@ -299,6 +299,10 @@ class Stage1Trainer:
             is_best = metrics["miou"] > best_miou
             tag = " ★" if is_best else ""
             parts.append(f"val_mIoU={metrics['miou']:.4f} val_acc={metrics['acc']:.4f}{tag}")
+            # Per-class IoU for diagnosis
+            pcio = metrics.get("per_class_iou", {})
+            pcio_str = " ".join(f"c{k}={v:.3f}" for k, v in sorted(pcio.items(), key=lambda x: int(x[0])))
+            parts.append(f"per_cls=[{pcio_str}]")
 
             if is_best:
                 best_miou = metrics["miou"]
