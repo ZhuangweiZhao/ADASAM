@@ -81,6 +81,37 @@ class SAMRSPModel(nn.Module):
     Trainable: init_merge + ViT decoder blocks + cls heads
     """
 
+    # SAM ViT variants: {embed_dim: (depth, num_heads, global_attn_indexes)}
+    _VIT_VARIANTS = {
+        768:  (12, 12, [2, 5, 8, 11]),              # ViT-B
+        1024: (24, 16, [5, 11, 17, 23]),             # ViT-L
+        1280: (32, 16, [7, 15, 23, 31]),             # ViT-H
+    }
+
+    @staticmethod
+    def _detect_sam_variant(checkpoint_path: str) -> dict:
+        """Auto-detect SAM ViT variant from checkpoint weights."""
+        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+        # Detect embed_dim from patch_embed weight shape [D, 3, 16, 16]
+        for key in ckpt:
+            if 'image_encoder.patch_embed.proj.weight' in key:
+                embed_dim = ckpt[key].shape[0]
+                break
+        else:
+            raise KeyError("Cannot detect SAM variant: no patch_embed.proj.weight in checkpoint")
+
+        if embed_dim not in SAMRSPModel._VIT_VARIANTS:
+            raise ValueError(
+                f"Unsupported SAM embed_dim={embed_dim}. "
+                f"Supported: {list(SAMRSPModel._VIT_VARIANTS.keys())}"
+            )
+        depth, num_heads, global_idx = SAMRSPModel._VIT_VARIANTS[embed_dim]
+        variant_name = {768: 'ViT-B', 1024: 'ViT-L', 1280: 'ViT-H'}[embed_dim]
+        print(f"[SAM-RSP] Detected SAM {variant_name} (embed_dim={embed_dim}, "
+              f"depth={depth}, heads={num_heads})")
+        return {'embed_dim': embed_dim, 'depth': depth,
+                'num_heads': num_heads, 'global_attn_indexes': global_idx}
+
     def __init__(
         self,
         bam_model: nn.Module,           # Pre-built BAM from Stage 2
@@ -99,17 +130,23 @@ class SAMRSPModel(nn.Module):
         for param in self.bam.parameters():
             param.requires_grad = False
 
-        # ── SAM ViT-H Encoder — frozen ──
+        # ── SAM Encoder — auto-detect variant from checkpoint, then freeze ──
+        if sam_checkpoint is not None and Path(sam_checkpoint).exists():
+            vit_cfg = self._detect_sam_variant(sam_checkpoint)
+        else:
+            vit_cfg = {'embed_dim': 1024, 'depth': 24, 'num_heads': 16,
+                       'global_attn_indexes': [5, 11, 17, 23]}  # ViT-L default
+
         self.sam_encoder = ImageEncoderViT(
             img_size=1024,
             patch_size=16,
-            depth=24,
-            num_heads=16,
-            embed_dim=1024,
+            depth=vit_cfg['depth'],
+            num_heads=vit_cfg['num_heads'],
+            embed_dim=vit_cfg['embed_dim'],
             use_abs_pos=True,
             use_rel_pos=True,
             rel_pos_zero_init=True,
-            global_attn_indexes=[5, 11, 17, 23],
+            global_attn_indexes=vit_cfg['global_attn_indexes'],
             window_size=14,
         )
         if sam_checkpoint is not None and Path(sam_checkpoint).exists():
