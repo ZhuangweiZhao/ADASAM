@@ -231,7 +231,7 @@ def train(args: argparse.Namespace) -> Path:
         layers=50, zoom_factor=8, low_fea='layer2', kshot_trans_dim=2,
     ).to(device)
     if args.stage2_ckpt:
-        bam_ckpt = torch.load(args.stage2_ckpt, map_location='cpu')
+        bam_ckpt = torch.load(args.stage2_ckpt, map_location='cpu', weights_only=False)
         bam_state = bam_ckpt.get('model', bam_ckpt)
         bam.load_state_dict(bam_state, strict=False)
         print(f"[Stage3] BAM weights loaded from {args.stage2_ckpt}")
