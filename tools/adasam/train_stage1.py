@@ -169,12 +169,12 @@ class Stage1Trainer:
             x, _ = preprocess_image(sample["image"])
             x = x.unsqueeze(0).to(self.device)
 
-            # Ground truth
-            gt = torch.zeros(256, 256, dtype=torch.long)
+            # Ground truth (255 = ignore/background, consistent with CE ignore_index)
+            gt = torch.full((256, 256), 255, dtype=torch.long)
             for cls_id in self.val_ds.visible_classes():
                 mask = self.val_ds.get_class_mask(idx, cls_id)
                 if mask is not None and mask.sum() > 0:
-                    gt[mask > 0.5] = class_to_idx.get(cls_id, 0)
+                    gt[mask > 0.5] = class_to_idx[cls_id]
 
             with torch.no_grad():
                 emb = self.backbone(x)["image_embedding"]
@@ -189,8 +189,8 @@ class Stage1Trainer:
                 inter[c] += (pred_c & gt_c).sum().item()
                 union[c] += (pred_c | gt_c).sum().item()
 
-            # BG pixel accuracy (class 0 means background padding, ignore)
-            fg = gt > 0
+            # FG pixel accuracy (255 = ignore)
+            fg = gt != 255
             correct += (pred[fg] == gt[fg]).sum().item()
             total += fg.sum().item()
 
@@ -216,13 +216,13 @@ class Stage1Trainer:
 
         :param index: dataset index.
         :param class_to_idx: {class_id → contiguous_label}.
-        :return: [256, 256] long tensor.
+        :return: [256, 256] long tensor, 255 = ignore/background.
         """
-        gt = torch.zeros(256, 256, dtype=torch.long)
+        gt = torch.full((256, 256), 255, dtype=torch.long)
         for cls_id in self.train_ds.visible_classes():
             mask = self.train_ds.get_class_mask(index, cls_id)
             if mask is not None and mask.sum() > 0:
-                gt[mask > 0.5] = class_to_idx.get(cls_id, 0)
+                gt[mask > 0.5] = class_to_idx[cls_id]
         return gt
 
     def train(self) -> Path:
@@ -294,19 +294,15 @@ class Stage1Trainer:
             avg_loss = total_loss / max(n_batches, 1)
             parts = [f"loss={avg_loss:.4f}", f"lr={self.optimizer.param_groups[0]['lr']:.2e}"]
 
-            # Validate on schedule
-            if epoch % self.val_every == 0 or epoch == self.epochs - 1:
-                metrics = self._validate(class_to_idx)
-                parts.append(f"val_mIoU={metrics['miou']:.4f} val_acc={metrics['acc']:.4f}")
-                tag = " ★" if metrics["miou"] > best_miou else ""
-                parts[-1] += tag
+            # Validate every epoch
+            metrics = self._validate(class_to_idx)
+            is_best = metrics["miou"] > best_miou
+            tag = " ★" if is_best else ""
+            parts.append(f"val_mIoU={metrics['miou']:.4f} val_acc={metrics['acc']:.4f}{tag}")
 
-                self._save(self.out_dir / f"adapter_epoch{epoch:03d}.pt",
-                          epoch, avg_loss, metrics)
-
-                if metrics["miou"] > best_miou:
-                    best_miou = metrics["miou"]
-                    self._save(best_path, epoch, avg_loss, metrics)
+            if is_best:
+                best_miou = metrics["miou"]
+                self._save(best_path, epoch, avg_loss, metrics)
 
             print(f"[Stage1] epoch {epoch:>3d}: " + " | ".join(parts))
 
