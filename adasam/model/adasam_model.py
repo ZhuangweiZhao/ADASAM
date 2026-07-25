@@ -46,6 +46,7 @@ class AdaSAMModelConfig:
     use_prompt_fusion: bool = True
     fusion_mode: str = "concat"
     raw_cosine_ablation: bool = False  # bypass GeometricPrior+SPG, use raw cosine as prompt
+    category_injection: bool = True   # inject support prototype into SAM mask_tokens
 
     @classmethod
     def from_dict(cls, cfg: dict) -> "AdaSAMModelConfig":
@@ -64,6 +65,7 @@ class AdaSAMModelConfig:
             use_prompt_fusion=bool(pf_cfg.get("enabled", True)),
             fusion_mode=str(pf_cfg.get("mode", "concat")),
             raw_cosine_ablation=bool(abl_cfg.get("raw_cosine", False)),
+            category_injection=bool(abl_cfg.get("category_injection", True)),
         )
 
 
@@ -82,6 +84,7 @@ class AdaSAMModel(nn.Module):
         self.support_encoder = SupportEncoder(cfg.support_encoder)
         self.spg = SemanticPriorGenerator(cfg.spg)
         self.sam_decoder = SemanticMaskDecoder(sam.prompt_encoder, sam.mask_decoder, cfg.decoder)
+        self.sam_decoder._category_enabled = cfg.category_injection
 
         # ── Geometric Prior (双支路: geometry branch) ──
         if cfg.use_geometric_prior:
@@ -126,6 +129,23 @@ class AdaSAMModel(nn.Module):
         return self.cfg.spg.num_probes
 
     # ── Dense prompt generation (extracted from SPG) ──
+
+    def _compute_support_prototype(
+        self,
+        support_features: torch.Tensor,
+        support_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute masked-mean prototype from support features.
+
+        :param support_features: [K, C, gh, gw].
+        :param support_masks: [K, gh, gw] binary FG masks.
+        :return: prototype [C].
+        """
+        K, C = support_features.shape[:2]
+        masked = support_features * support_masks.unsqueeze(1)  # [K, C, gh, gw]
+        fg_sum = masked.sum(dim=(0, 2, 3))                     # [C]
+        fg_count = support_masks.sum() + 1e-8                  # scalar
+        return fg_sum / fg_count                                # [C]
 
     def _build_dense_prompt(
         self,
@@ -219,9 +239,15 @@ class AdaSAMModel(nn.Module):
                 prior_aux=[],
             )
 
+            # Compute support prototype for category injection
+            support_proto = self._compute_support_prototype(
+                support_features, support_masks
+            ) if self.cfg.category_injection else None
+
             # Skip directly to SAM Decoder
             low_res, iou_pred = self.sam_decoder(
-                query_features, sparse_token, dense_prompt
+                query_features, sparse_token, dense_prompt,
+                support_prototype=support_proto,
             )
             return spg_out, low_res, iou_pred
 
@@ -267,9 +293,15 @@ class AdaSAMModel(nn.Module):
                 else dense_prompt
             ).mean(dim=(2, 3))  # [1, C]
 
+        # Compute support prototype for category injection
+        support_proto = self._compute_support_prototype(
+            support_features, support_masks
+        ) if self.cfg.category_injection else None
+
         # 5. SAM Decoder: refine prior → fine mask
         low_res, iou_pred = self.sam_decoder(
-            query_features, sparse_token, dense_prompt
+            query_features, sparse_token, dense_prompt,
+            support_prototype=support_proto,
         )
         tracer.section("AdaSAM.forward_train — SAM Decoder Output")
         tracer.tensor("low_res_masks [1,1,256,256]", low_res)

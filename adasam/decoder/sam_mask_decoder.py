@@ -72,6 +72,14 @@ class SemanticMaskDecoder(nn.Module):
         gh, gw = prompt_encoder.image_embedding_size
         self.grid_size = (int(gh), int(gw))
 
+        # ── Category injection: support prototype → mask token bias ──
+        # Project support prototype [C] into mask token space.
+        # Zero-initialized so existing checkpoints still work identically.
+        self.category_proj = nn.Linear(cfg.embed_dim, cfg.embed_dim)
+        nn.init.zeros_(self.category_proj.weight)
+        nn.init.zeros_(self.category_proj.bias)
+        self._category_enabled = True  # toggle for ablation
+
         self._set_trainable(self.prompt_encoder, False)
         self._set_trainable(self.mask_decoder, cfg.train_mask_decoder)
 
@@ -87,6 +95,7 @@ class SemanticMaskDecoder(nn.Module):
         image_embedding: torch.Tensor,
         sparse_token: torch.Tensor,
         dense_prompt: torch.Tensor | None = None,
+        support_prototype: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """单 token → 低分辨率掩码 | Single token → low-res mask.
 
@@ -94,6 +103,8 @@ class SemanticMaskDecoder(nn.Module):
         :param sparse_token: [1, C] single conditioning token.
         :param dense_prompt: [1, C, gh, gw] or None.
             support-conditioned dense prompt; None → fallback to no_mask_embed.
+        :param support_prototype: [C] optional support FG prototype for
+            category injection into mask_tokens.
         :return: (low_res_logits [1, 1, 256, 256], iou_pred [1, 1]).
         """
         if image_embedding.ndim != 4 or image_embedding.shape[0] != 1:
@@ -104,13 +115,14 @@ class SemanticMaskDecoder(nn.Module):
         # sparse = single token [1, 1, C]
         sparse = sparse_token.unsqueeze(0)  # [1, 1, C]
 
-        return self._decode(image_embedding, sparse, dense_prompt)
+        return self._decode(image_embedding, sparse, dense_prompt, support_prototype)
 
     def _decode(
         self,
         image_embedding: torch.Tensor,
         sparse: torch.Tensor,
         dense_prompt: torch.Tensor | None = None,
+        support_prototype: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Decode one prompt set."""
         n = sparse.shape[0]
@@ -124,13 +136,31 @@ class SemanticMaskDecoder(nn.Module):
                 1, -1, 1, 1
             ).expand(n, -1, gh, gw)
 
-        low_res, iou_pred = self.mask_decoder(
-            image_embeddings=image_embedding,
-            image_pe=self.prompt_encoder.get_dense_pe(),
-            sparse_prompt_embeddings=sparse,
-            dense_prompt_embeddings=dense,
-            multimask_output=False,
-        )  # [1, 1, 256, 256], [1, 1]
+        # ── Category Injection: support prototype → mask token bias ──
+        # SAM's mask_tokens are class-agnostic by design (click→FG/BG).
+        # Injecting support category info directly into mask_tokens ensures
+        # the hypernetwork receives class-conditioned inputs.
+        saved_mask_tokens: torch.Tensor | None = None
+        if self._category_enabled and support_prototype is not None:
+            category_bias = self.category_proj(support_prototype)  # [C]
+            # Add same category bias to all 4 mask tokens
+            saved_mask_tokens = self.mask_decoder.mask_tokens.weight.data.clone()
+            self.mask_decoder.mask_tokens.weight.data = (
+                saved_mask_tokens + category_bias.unsqueeze(0)
+            )
+
+        try:
+            low_res, iou_pred = self.mask_decoder(
+                image_embeddings=image_embedding,
+                image_pe=self.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse,
+                dense_prompt_embeddings=dense,
+                multimask_output=False,
+            )  # [1, 1, 256, 256], [1, 1]
+        finally:
+            if saved_mask_tokens is not None:
+                self.mask_decoder.mask_tokens.weight.data = saved_mask_tokens
+
         return low_res, iou_pred
 
     # ── Upscale ──

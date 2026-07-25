@@ -289,6 +289,11 @@ def main():
     sparse_tokens_all: dict[int, list] = {c: [] for c in val_classes}
     sparse_after_trans_all: dict[int, list] = {c: [] for c in val_classes}
     dense_after_trans_all: dict[int, list] = {c: [] for c in val_classes}
+    mask_tokens_all: dict[int, list] = {c: [] for c in val_classes}  # Hook 4: mask_tokens_out
+    # A0: magnitude comparison
+    img_norm_all: dict[int, list] = {c: [] for c in val_classes}
+    prompt_norm_all: dict[int, list] = {c: [] for c in val_classes}
+    ratio_all: dict[int, list] = {c: [] for c in val_classes}
 
     for cls_id in tqdm(val_classes, desc="per-class"):
         sup = support_cache.get(cls_id)
@@ -344,6 +349,13 @@ def main():
             # Hook 1: dense prompt rank
             dense_rank_all[cls_id].append(analyze_dense_prompt(dense_prompt))
 
+            # A0: magnitude comparison (image_embedding vs dense_prompt)
+            img_std = q_emb.std(dim=(1, 2, 3)).item()           # scalar
+            prompt_std = dense_prompt.std(dim=(1, 2, 3)).item()  # scalar
+            img_norm_all[cls_id].append(img_std)
+            prompt_norm_all[cls_id].append(prompt_std)
+            ratio_all[cls_id].append(prompt_std / (img_std + 1e-8))
+
             # Hook 3: sparse token
             sparse_tokens_all[cls_id].append(sparse_token.cpu())
 
@@ -353,7 +365,8 @@ def main():
                 # tokens = [iou(1), mask(4), sparse(1)] = 6 tokens total
                 # sparse is the last token (index 5 for multimask=False → 1+4+1=6)
                 hs = _hook_data["transformer_hs_out"]  # [1, N, C]
-                sparse_after_trans_all[cls_id].append(hs[0, -1, :])  # last token
+                sparse_after_trans_all[cls_id].append(hs[0, -1, :])  # last token = sparse
+                mask_tokens_all[cls_id].append(hs[0, 1:5, :])        # indices 1-4 = mask tokens
 
             if "transformer_src_out" in _hook_data:
                 dense_after_trans_all[cls_id].append(
@@ -390,6 +403,31 @@ def main():
     # ═══════════════════════════════════════════════════════════════
     # Reports
     # ═══════════════════════════════════════════════════════════════
+
+    print("\n" + "=" * 72)
+    print("HOOK 0 (A0): Prompt Injection Strength")
+    print("=" * 72)
+    print(f"  {'class':>6}  {'img_std':>10}  {'prompt_std':>12}  {'ratio(P/I)':>12}  {'verdict'}")
+    print(f"  {'-'*6}  {'-'*10}  {'-'*12}  {'-'*12}  {'-'*20}")
+    all_ratios = []
+    for cls_id in sorted(img_norm_all.keys()):
+        i_std = float(np.mean(img_norm_all[cls_id]))
+        p_std = float(np.mean(prompt_norm_all[cls_id]))
+        r = float(np.mean(ratio_all[cls_id]))
+        all_ratios.append(r)
+        verdict = "prompt DROWNED" if r < 0.1 else ("prompt WEAK" if r < 0.5 else "OK")
+        print(f"  {cls_id:>6}  {i_std:>10.4f}  {p_std:>12.4f}  {r:>12.4f}  {verdict}")
+    mean_ratio = float(np.mean(all_ratios))
+    print(f"\n  → Mean ratio prompt_std / image_std = {mean_ratio:.4f}")
+    if mean_ratio < 0.1:
+        print("  ⚠ PROMPT IS DROWNED: dense_prompt is an order of magnitude weaker than image_embedding!")
+        print("    → Transformer sees: image + 0.0N×prompt. Prompt has zero influence.")
+        print("    → Fix: scale dense_prompt by α=5~10 before entering MaskDecoder.")
+    elif mean_ratio < 0.3:
+        print("  ⚠ PROMPT IS WEAK: image_embedding dominates, prompt barely contributes.")
+        print("    → Fix: scale dense_prompt by α=2~5.")
+    else:
+        print("  ✓ Prompt signal strength is adequate.")
 
     print("\n" + "=" * 72)
     print("HOOK 1: Dense Prompt Effective Rank (before MaskDecoder)")
@@ -493,6 +531,57 @@ def main():
             print(f"  mean_offdiag = {r3['mean_offdiag']:.4f}")
 
     # ═══════════════════════════════════════════════════════════════
+    # Hook 4: Does mask_tokens_out depend on support class?
+    # ═══════════════════════════════════════════════════════════════
+    print("\n" + "=" * 72)
+    print("HOOK 4: Mask Token sensitivity to Support class")
+    print("=" * 72)
+    print("  (Does changing support class change what mask_tokens see?)")
+    print()
+
+    # For each class, mean-pool mask_tokens over query samples → [4, C]
+    mask_token_avg: dict[int, torch.Tensor] = {}
+    for cls_id in sorted(mask_tokens_all.keys()):
+        items = mask_tokens_all[cls_id]
+        if items:
+            # items is list of [4, C] tensors → stack → mean → [4, C]
+            mask_token_avg[cls_id] = torch.stack([t.float() for t in items]).mean(dim=0)
+
+    if len(mask_token_avg) >= 2:
+        classes_sorted = sorted(mask_token_avg.keys())
+        n = len(classes_sorted)
+        # For each mask token (0-3), compute cross-class cosine matrix
+        for tok_idx in range(4):
+            tok_sims = {}
+            for ci in classes_sorted:
+                tok_sims[ci] = mask_token_avg[ci][tok_idx]  # [C]
+            r_mt = cosine_sim_matrix(tok_sims)
+            print(f"  mask_token[{tok_idx}]: offdiag={r_mt['mean_offdiag']:.4f}  "
+                  f"separation={r_mt['separation_ratio']:.4f}  "
+                  f"range=[{r_mt['min_offdiag']:.4f},{r_mt['max_offdiag']:.4f}]")
+
+        # Overall similarity: all 4 tokens concatenated
+        full_tokens = {}
+        for ci in classes_sorted:
+            full_tokens[ci] = mask_token_avg[ci].reshape(-1)  # [4*C]
+        r_full = cosine_sim_matrix(full_tokens)
+        print(f"\n  All mask_tokens concatenated: offdiag={r_full['mean_offdiag']:.4f}  "
+              f"separation={r_full['separation_ratio']:.4f}")
+        if r_full["mean_offdiag"] > 0.95:
+            print("  ⚠ MASK TOKENS DO NOT RESPOND TO SUPPORT CLASS!")
+            print("    → Same query, different support → mask_tokens nearly identical.")
+            print("    → Sparse token's influence through transformer self-attention is NEGLIGIBLE.")
+            print("    → Mask head sees essentially the same thing regardless of support.")
+            print("    → FIX: Must inject category info directly into mask_tokens or hypernetwork,")
+            print("      not rely on support token's indirect influence via cross-attention.")
+        elif r_full["mean_offdiag"] > 0.7:
+            print("  ~ Mask tokens have weak class sensitivity — some signal gets through.")
+        else:
+            print("  ✓ Mask tokens carry class-specific information. Sparse token IS consumed.")
+    else:
+        print("  [skip] Need Stage 2 checkpoint to access mask tokens")
+
+    # ═══════════════════════════════════════════════════════════════
     # Summary
     # ═══════════════════════════════════════════════════════════════
     print("\n" + "=" * 72)
@@ -502,15 +591,19 @@ def main():
     rank_ok = np.mean(all_top1) < 0.99 or np.mean(all_ch_std) > 1e-3
     sparse_ok = len(sparse_avg) >= 2 and not cosine_sim_matrix(sparse_avg)["all_close_0.98"]
 
+    h2b_str = "N/A"
+    if sparse_trans_avg:
+        r2 = cosine_sim_matrix(sparse_trans_avg)
+        h2b_str = f"offdiag={r2['mean_offdiag']:.4f}"
+
+    h4_str = "NOT checked" if not mask_token_avg else "checked"
+
     print(f"""
+  Hook 0 (A0) — Prompt injection strength:    {'✓ OK' if len(all_ratios) > 0 and np.mean(all_ratios) > 0.3 else '⚠ TOO WEAK'}
   Hook 1 — Dense Prompt effective rank:   {'✓ OK' if rank_ok else '✗ RANK≈1 — channels identical'}
   Hook 3 — Sparse Token discriminability: {'✓ OK' if sparse_ok else '✗ COLLAPSED — all classes identical'}
-
-  Interpretation:
-  {'→ Both are broken: category info never reaches MaskDecoder.' if not rank_ok and not sparse_ok else ''}
-  {'→ Dense prompt is degenerate but sparse might carry signal.' if not rank_ok and sparse_ok else ''}
-  {'→ Dense prompt has channel diversity — need to check Hook 2 for where info is lost.' if rank_ok and not sparse_ok else ''}
-  {'→ Prompt structure looks healthy — bottleneck might be in loss/supervision.' if rank_ok and sparse_ok else ''}
+  Hook 2b — Sparse after Transformer:     {h2b_str}
+  Hook 4 — Mask token sensitivity:        {h4_str}
 """)
 
     # Cleanup
