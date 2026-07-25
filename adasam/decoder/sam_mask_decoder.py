@@ -73,12 +73,12 @@ class SemanticMaskDecoder(nn.Module):
         self.grid_size = (int(gh), int(gw))
 
         # ── Category injection: support prototype → mask token bias ──
-        # Project support prototype [C] into mask token space.
-        # Zero-initialized so existing checkpoints still work identically.
-        self.category_proj = nn.Linear(cfg.embed_dim, cfg.embed_dim)
-        nn.init.zeros_(self.category_proj.weight)
-        nn.init.zeros_(self.category_proj.bias)
-        self._category_enabled = True  # toggle for ablation
+        # Directly adds (alpha * support_prototype) to SAM's mask_tokens.
+        # Fixed scaling (non-learned) for diagnostic; support prototype has
+        # 7.07x class separation, so directly injecting it should help if
+        # mask_tokens are truly the bottleneck.
+        self.category_alpha: float = 0.5  # scale factor; 0 = disabled
+        self._category_enabled = True     # toggle for ablation
 
         self._set_trainable(self.prompt_encoder, False)
         self._set_trainable(self.mask_decoder, cfg.train_mask_decoder)
@@ -138,16 +138,15 @@ class SemanticMaskDecoder(nn.Module):
 
         # ── Category Injection: support prototype → mask token bias ──
         # SAM's mask_tokens are class-agnostic by design (click→FG/BG).
-        # Injecting support category info directly into mask_tokens ensures
-        # the hypernetwork receives class-conditioned inputs.
+        # Directly add (alpha * prototype) to mask_tokens.
+        # Fixed scaling avoids gradient-flow issues; prototype has 7.07x
+        # class separation, so even a simple additive injection should help.
         saved_mask_tokens: torch.Tensor | None = None
-        if self._category_enabled and support_prototype is not None:
-            category_bias = self.category_proj(support_prototype)  # [C]
-            # Add same category bias to all 4 mask tokens
+        if self._category_enabled and support_prototype is not None \
+                and self.category_alpha > 0:
+            bias = support_prototype.detach() * self.category_alpha  # [C]
             saved_mask_tokens = self.mask_decoder.mask_tokens.weight.data.clone()
-            self.mask_decoder.mask_tokens.weight.data = (
-                saved_mask_tokens + category_bias.unsqueeze(0)
-            )
+            self.mask_decoder.mask_tokens.weight.data += bias.unsqueeze(0)
 
         try:
             low_res, iou_pred = self.mask_decoder(

@@ -47,6 +47,7 @@ class AdaSAMModelConfig:
     fusion_mode: str = "concat"
     raw_cosine_ablation: bool = False  # bypass GeometricPrior+SPG, use raw cosine as prompt
     category_injection: bool = True   # inject support prototype into SAM mask_tokens
+    category_alpha: float = 0.5       # scale factor for injection strength
 
     @classmethod
     def from_dict(cls, cfg: dict) -> "AdaSAMModelConfig":
@@ -66,6 +67,7 @@ class AdaSAMModelConfig:
             fusion_mode=str(pf_cfg.get("mode", "concat")),
             raw_cosine_ablation=bool(abl_cfg.get("raw_cosine", False)),
             category_injection=bool(abl_cfg.get("category_injection", True)),
+            category_alpha=float(abl_cfg.get("category_alpha", 0.5)),
         )
 
 
@@ -85,6 +87,7 @@ class AdaSAMModel(nn.Module):
         self.spg = SemanticPriorGenerator(cfg.spg)
         self.sam_decoder = SemanticMaskDecoder(sam.prompt_encoder, sam.mask_decoder, cfg.decoder)
         self.sam_decoder._category_enabled = cfg.category_injection
+        self.sam_decoder.category_alpha = cfg.category_alpha
 
         # ── Geometric Prior (双支路: geometry branch) ──
         if cfg.use_geometric_prior:
