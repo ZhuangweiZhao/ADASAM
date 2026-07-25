@@ -78,6 +78,10 @@ train:
 eval:
   score_thr: 0.3
 
+# ── Ablation ──
+ablation:
+  raw_cosine: true              # bypass GeometricPrior+SPG+PromptFusion, pure cosine as prompt
+
 # ── Reproducibility ──
 seed: 42
 output_dir: runs
