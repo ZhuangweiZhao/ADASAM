@@ -48,6 +48,7 @@ class AdaSAMModelConfig:
     raw_cosine_ablation: bool = False  # bypass GeometricPrior+SPG, use raw cosine as prompt
     category_injection: bool = True   # inject support prototype into SAM mask_tokens
     category_alpha: float = 0.5       # scale factor for injection strength
+    bypass_decoder: bool = False      # bypass SAM MaskDecoder entirely (→ simple Conv head)
 
     @classmethod
     def from_dict(cls, cfg: dict) -> "AdaSAMModelConfig":
@@ -68,7 +69,38 @@ class AdaSAMModelConfig:
             raw_cosine_ablation=bool(abl_cfg.get("raw_cosine", False)),
             category_injection=bool(abl_cfg.get("category_injection", True)),
             category_alpha=float(abl_cfg.get("category_alpha", 0.5)),
+            bypass_decoder=bool(abl_cfg.get("bypass_decoder", False)),
         )
+
+
+class BypassMaskHead(nn.Module):
+    """极简 Conv 头 — 绕过 SAM MaskDecoder 直接预测 mask。
+
+    Diagnostic module: replaces TwoWayTransformer + mask_tokens + hypernetwork
+    with a simple Conv head. If this achieves mIoU >> 0.10, SAM's MaskDecoder
+    is definitively the bottleneck.
+
+    Architecture: Conv3x3→GN→ReLU→Conv3x3→GN→ReLU→Conv1x1 → upsample.
+    Operates at 64×64 feature grid, upsamples to 256×256 for loss compatibility.
+    """
+
+    def __init__(self, in_dim: int = 256, hidden_dim: int = 128):
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, 3, padding=1),
+            nn.GroupNorm(8, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.GroupNorm(8, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, 1, 1),
+        )
+
+    def forward(self, dense_prompt: torch.Tensor) -> torch.Tensor:
+        """dense_prompt [1, C, 64, 64] → mask logits [1, 1, 256, 256]"""
+        x = self.head(dense_prompt)  # [1, 1, 64, 64]
+        x = F.interpolate(x, size=(256, 256), mode="bilinear", align_corners=False)
+        return x  # [1, 1, 256, 256]
 
 
 class AdaSAMModel(nn.Module):
@@ -125,6 +157,12 @@ class AdaSAMModel(nn.Module):
         )
         nn.init.xavier_uniform_(self.dense_prompt_gen[-1].weight, gain=1.0)
         nn.init.zeros_(self.dense_prompt_gen[-1].bias)
+
+        # ── Bypass head: replace SAM MaskDecoder with simple Conv ──
+        self.bypass_head: BypassMaskHead | None = None
+        if cfg.bypass_decoder:
+            self.bypass_head = BypassMaskHead(in_dim=embed_dim)
+            print("[model] BypassMaskHead enabled — SAM MaskDecoder replaced with Conv head")
 
     @property
     def num_probes(self) -> int:
@@ -213,11 +251,11 @@ class AdaSAMModel(nn.Module):
         support_memory = self.support_encoder(support_features, support_masks)
         tracer.tensor("support_memory", support_memory, detail=True)
 
-        # ── Raw Cosine Ablation: bypass GeometricPrior + SPG + PromptFusion ──
-        # Uses raw cosine similarity between query pixels and support prototype
-        # as the ONLY prompt signal. This isolates the downstream modules
-        # (SAM decoder) from the upstream trainable modules (SPG, GeometricPrior).
+        # ── Build dense_prompt + sparse_token ──
+        # Two paths converge here: raw_cosine (ablation) or full SPG+GeoPrior+PromptFusion.
+        # Both produce (dense_prompt, sparse_token, spg_out) for a single decode step.
         if self.cfg.raw_cosine_ablation:
+            # ── Raw Cosine Ablation ──
             B, C, H, W = query_features.shape
             proto = support_memory.mean(dim=0)              # [C]
 
@@ -226,89 +264,78 @@ class AdaSAMModel(nn.Module):
             p_norm = F.normalize(proto, dim=0)              # [C]
 
             sim = torch.einsum("bcn,c->bn", q_norm, p_norm) # [1, N]
-            # Min-max normalize
             s_min, s_max = sim.min(dim=1, keepdim=True)[0], sim.max(dim=1, keepdim=True)[0]
             sim = (sim - s_min) / (s_max - s_min + 1e-8)
             rsp_map = sim.reshape(B, 1, H, W)               # [1, 1, H, W]
 
-            # Expand to C channels as dense prompt
             dense_prompt = rsp_map.expand(-1, C, -1, -1)    # [1, C, H, W]
             sparse_token = dense_prompt.mean(dim=(2, 3))     # [1, C]
-
-            # Dummy SPG output (no SPG ran, so no prior_mask)
             spg_out = SPGOutput(
                 semantic_prior=dense_prompt,
                 prior_mask=None,
                 prior_aux=[],
             )
+        else:
+            # ── Full path: GeometricPrior + SPG + PromptFusion ──
+            # 2. Geometric Prior: support-query similarity → geometric_prior [1,C,H,W]
+            if self.geometric_prior is not None:
+                geometric_prior = self.geometric_prior(query_features, support_memory)
+                tracer.section("AdaSAM.forward_train — GeometricPrior")
+                tracer.tensor("geometric_prior", geometric_prior, spatial=True)
+            else:
+                geometric_prior = None
 
-            # Compute support prototype for category injection
+            # 3. SPG: query_features + support_memory → semantic_prior + prior_mask
+            dense_pe = self.sam_decoder.prompt_encoder.get_dense_pe()
+            spg_out = self.spg(query_features, support_memory, dense_pe)
+
+            tracer.section("AdaSAM.forward_train — SPG Output")
+            tracer.tensor("semantic_prior", spg_out.semantic_prior, spatial=True)
+            tracer.tensor("prior_mask", spg_out.prior_mask)
+            if spg_out.prior_aux:
+                aux0 = spg_out.prior_aux[0]
+                tracer.tensor("prior_aux[0].prior_mask", aux0["prior_mask"].unsqueeze(0))
+
+            # 4. PromptFusion → dense_prompt + sparse_token
+            if self.prompt_fusion is not None and geometric_prior is not None:
+                dense_prompt, sparse_token = self.prompt_fusion(
+                    geometric_prior, spg_out.semantic_prior
+                )
+                tracer.section("AdaSAM.forward_train — PromptFusion")
+                tracer.tensor("fused_dense_prompt", dense_prompt, spatial=True)
+                tracer.tensor("fused_sparse_token", sparse_token.unsqueeze(0))
+            else:
+                dense_prompt = self._build_dense_prompt(
+                    support_memory, support_features, support_masks
+                )
+                if dense_prompt is None:
+                    dense_prompt = spg_out.semantic_prior
+                sparse_token = (
+                    spg_out.semantic_prior if dense_prompt is None
+                    else dense_prompt
+                ).mean(dim=(2, 3))  # [1, C]
+
+        # ── Decode: SAM MaskDecoder or Bypass Conv Head ──
+        # Single decode point — bypass replaces TwoWayTransformer entirely.
+        if self.bypass_head is not None:
+            # dense_prompt [1, C, 64, 64] → Conv → [1, 1, 256, 256]
+            low_res = self.bypass_head(dense_prompt)
+            iou_pred = torch.ones(1, 1, device=low_res.device)  # dummy (always pass threshold)
+            tracer.section("AdaSAM.forward_train — Bypass Head Output")
+            tracer.tensor("low_res_masks [1,1,256,256]", low_res)
+            tracer.tensor("iou_pred [1,1] (dummy)", iou_pred)
+        else:
             support_proto = self._compute_support_prototype(
                 support_features, support_masks
             ) if self.cfg.category_injection else None
 
-            # Skip directly to SAM Decoder
             low_res, iou_pred = self.sam_decoder(
                 query_features, sparse_token, dense_prompt,
                 support_prototype=support_proto,
             )
-            return spg_out, low_res, iou_pred
-
-        # 2. Geometric Prior: support-query similarity → geometric_prior [1,C,H,W]
-        if self.geometric_prior is not None:
-            geometric_prior = self.geometric_prior(query_features, support_memory)
-            tracer.section("AdaSAM.forward_train — GeometricPrior")
-            tracer.tensor("geometric_prior", geometric_prior, spatial=True)
-        else:
-            geometric_prior = None
-
-        # 3. SPG: query_features + support_memory → semantic_prior + prior_mask
-        dense_pe = self.sam_decoder.prompt_encoder.get_dense_pe()
-        spg_out = self.spg(query_features, support_memory, dense_pe)
-
-        tracer.section("AdaSAM.forward_train — SPG Output")
-        tracer.tensor("semantic_prior", spg_out.semantic_prior, spatial=True)
-        tracer.tensor("prior_mask", spg_out.prior_mask)
-        if spg_out.prior_aux:
-            aux0 = spg_out.prior_aux[0]
-            tracer.tensor("prior_aux[0].prior_mask", aux0["prior_mask"].unsqueeze(0))
-
-        # 4. PromptFusion → dense_prompt + sparse_token (唯一来源)
-        if self.prompt_fusion is not None and geometric_prior is not None:
-            dense_prompt, sparse_token = self.prompt_fusion(
-                geometric_prior, spg_out.semantic_prior
-            )
-            tracer.section("AdaSAM.forward_train — PromptFusion")
-            tracer.tensor("fused_dense_prompt", dense_prompt, spatial=True)
-            tracer.tensor("fused_sparse_token", sparse_token.unsqueeze(0))
-        else:
-            # Fallback: SPG's semantic_prior serves as dense_prompt,
-            # spatial mean pool gives sparse_token
-            dense_prompt = self._build_dense_prompt(
-                support_memory, support_features, support_masks
-            )
-            if dense_prompt is None:
-                # Ultimate fallback: use semantic_prior directly
-                dense_prompt = spg_out.semantic_prior
-
-            sparse_token = (
-                spg_out.semantic_prior if dense_prompt is None
-                else dense_prompt
-            ).mean(dim=(2, 3))  # [1, C]
-
-        # Compute support prototype for category injection
-        support_proto = self._compute_support_prototype(
-            support_features, support_masks
-        ) if self.cfg.category_injection else None
-
-        # 5. SAM Decoder: refine prior → fine mask
-        low_res, iou_pred = self.sam_decoder(
-            query_features, sparse_token, dense_prompt,
-            support_prototype=support_proto,
-        )
-        tracer.section("AdaSAM.forward_train — SAM Decoder Output")
-        tracer.tensor("low_res_masks [1,1,256,256]", low_res)
-        tracer.tensor("iou_pred [1,1]", iou_pred)
+            tracer.section("AdaSAM.forward_train — SAM Decoder Output")
+            tracer.tensor("low_res_masks [1,1,256,256]", low_res)
+            tracer.tensor("iou_pred [1,1]", iou_pred)
 
         return spg_out, low_res, iou_pred
 

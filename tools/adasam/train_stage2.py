@@ -269,6 +269,8 @@ class ISAID5iTrainer:
             groups.append({"params": list(self.model.geometric_prior.parameters()), "lr": lr})
         if self.model.prompt_fusion is not None:
             groups.append({"params": list(self.model.prompt_fusion.parameters()), "lr": lr})
+        if self.model.bypass_head is not None:
+            groups.append({"params": list(self.model.bypass_head.parameters()), "lr": lr})
 
         print(f"[params] stage2: lr={lr}, sam_lr={lr * sam_mult:.1e}, "
               f"groups={len(groups)}")
