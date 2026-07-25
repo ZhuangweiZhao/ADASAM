@@ -260,11 +260,13 @@ class ISAID5iTrainer:
         groups = [
             {"params": list(self.model.spg.parameters()), "lr": lr},
             {"params": list(self.model.support_encoder.parameters()), "lr": lr},
-            {"params": [
+        ]
+        # When bypass_decoder is active, mask_decoder is never used — skip to save optimizer memory
+        if self.model.bypass_head is None:
+            groups.append({"params": [
                 p for p in self.model.sam_decoder.mask_decoder.parameters()
                 if p.requires_grad
-            ], "lr": lr * sam_mult},
-        ]
+            ], "lr": lr * sam_mult})
         if self.model.geometric_prior is not None:
             groups.append({"params": list(self.model.geometric_prior.parameters()), "lr": lr})
         if self.model.prompt_fusion is not None:

@@ -95,6 +95,9 @@ class BypassMaskHead(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, 1, 1),
         )
+        # Zero init final layer → initial output ≈ 0 (safe logit start, ≈0.5 after sigmoid)
+        nn.init.zeros_(self.head[-1].bias)
+        nn.init.xavier_uniform_(self.head[-1].weight, gain=0.01)  # near-zero weights → stable start
 
     def forward(self, dense_prompt: torch.Tensor) -> torch.Tensor:
         """dense_prompt [1, C, 64, 64] → mask logits [1, 1, 256, 256]"""

@@ -81,7 +81,7 @@ eval:
 # ── Ablation ──
 ablation:
   raw_cosine: false              # bypass GeometricPrior+SPG+PromptFusion, pure cosine as prompt
-  category_injection: true       # inject support prototype into SAM mask_tokens
+  category_injection: true       # inject support prototype into SAM mask_tokens (ignored when bypass_decoder=true)
   category_alpha: 0.5            # injection strength (0=off, 0.5=moderate, 2.0=strong)
   bypass_decoder: true           # replace SAM MaskDecoder with simple Conv head (B1 diagnostic)
 
