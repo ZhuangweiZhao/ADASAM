@@ -628,8 +628,8 @@ class ISAID5iTrainer:
         out_dir = self.out_dir / "aux_viz"
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        # 固定采样 tile (同 epoch 可比) | fixed tile sampling for comparability
-        viz_rng = random.Random(self.seed + 3000)
+        # 随机采样 tile (每 epoch 不同) | random tile sampling per epoch
+        viz_rng = random.Random(self.seed * 10000 + epoch * 137)
         pool = [i for i in range(len(self.val_ds))
                 if len(self.val_ds[i]["regions"]) > 0]
         if len(pool) > n_samples:

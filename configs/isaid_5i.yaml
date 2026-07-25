@@ -80,7 +80,7 @@ eval:
 
 # ── Ablation ──
 ablation:
-  raw_cosine: true              # bypass GeometricPrior+SPG+PromptFusion, pure cosine as prompt
+  raw_cosine: false              # bypass GeometricPrior+SPG+PromptFusion, pure cosine as prompt
 
 # ── Reproducibility ──
 seed: 42
