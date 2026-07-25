@@ -44,6 +44,7 @@ class AdaSAMModelConfig:
     use_geometric_prior: bool = True
     use_prompt_fusion: bool = True
     fusion_mode: str = "concat"
+    raw_cosine_ablation: bool = False  # bypass GeometricPrior+SPG, use raw cosine as prompt
 
     @classmethod
     def from_dict(cls, cfg: dict) -> "AdaSAMModelConfig":
@@ -51,6 +52,7 @@ class AdaSAMModelConfig:
         sp_cfg = cfg.get("semantic_prior", {})
         gp_cfg = cfg.get("geometric_prior", {})
         pf_cfg = cfg.get("prompt_fusion", {})
+        abl_cfg = cfg.get("ablation", {})
         return cls(
             spg=SemanticPriorGeneratorConfig.from_dict(sp_cfg),
             decoder=SemanticMaskDecoderConfig.from_dict(cfg.get("decoder", {})),
@@ -60,6 +62,7 @@ class AdaSAMModelConfig:
             use_geometric_prior=bool(gp_cfg.get("enabled", True)),
             use_prompt_fusion=bool(pf_cfg.get("enabled", True)),
             fusion_mode=str(pf_cfg.get("mode", "concat")),
+            raw_cosine_ablation=bool(abl_cfg.get("raw_cosine", False)),
         )
 
 
@@ -186,6 +189,41 @@ class AdaSAMModel(nn.Module):
         support_memory = self.support_encoder(support_features, support_masks)
         tracer.tensor("support_memory", support_memory, detail=True)
 
+        # ── Raw Cosine Ablation: bypass GeometricPrior + SPG + PromptFusion ──
+        # Uses raw cosine similarity between query pixels and support prototype
+        # as the ONLY prompt signal. This isolates the downstream modules
+        # (SAM decoder) from the upstream trainable modules (SPG, GeometricPrior).
+        if self.cfg.raw_cosine_ablation:
+            B, C, H, W = query_features.shape
+            proto = support_memory.mean(dim=0)              # [C]
+
+            q_flat = query_features.reshape(B, C, -1)       # [1, C, N]
+            q_norm = F.normalize(q_flat, dim=1)             # [1, C, N]
+            p_norm = F.normalize(proto, dim=0)              # [C]
+
+            sim = torch.einsum("bcn,c->bn", q_norm, p_norm) # [1, N]
+            # Min-max normalize
+            s_min, s_max = sim.min(dim=1, keepdim=True)[0], sim.max(dim=1, keepdim=True)[0]
+            sim = (sim - s_min) / (s_max - s_min + 1e-8)
+            rsp_map = sim.reshape(B, 1, H, W)               # [1, 1, H, W]
+
+            # Expand to C channels as dense prompt
+            dense_prompt = rsp_map.expand(-1, C, -1, -1)    # [1, C, H, W]
+            sparse_token = dense_prompt.mean(dim=(2, 3))     # [1, C]
+
+            # Dummy SPG output (no SPG ran, so no prior_mask)
+            spg_out = SPGOutput(
+                semantic_prior=dense_prompt,
+                prior_mask=None,
+                prior_aux=[],
+            )
+
+            # Skip directly to SAM Decoder
+            low_res, iou_pred = self.sam_decoder(
+                query_features, sparse_token, dense_prompt
+            )
+            return spg_out, low_res, iou_pred
+
         # 2. Geometric Prior: support-query similarity → geometric_prior [1,C,H,W]
         if self.geometric_prior is not None:
             geometric_prior = self.geometric_prior(query_features, support_memory)
@@ -195,8 +233,6 @@ class AdaSAMModel(nn.Module):
             geometric_prior = None
 
         # 3. SPG: query_features + support_memory → semantic_prior + prior_mask
-        #    SPG 不再接收 support_features/support_masks_grid,
-        #    也不再生产 dense_prompt/sparse_token。
         dense_pe = self.sam_decoder.prompt_encoder.get_dense_pe()
         spg_out = self.spg(query_features, support_memory, dense_pe)
 

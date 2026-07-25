@@ -1,14 +1,28 @@
 """
-AdaSAM Stage 1 — 领域适配训练 | Domain Adaptation Training.
-=============================================================
+AdaSAM Stage 1 — 监督语义分割微调进行领域适配.
+================================================
 
-Stage 1: MobileSAM (frozen) + CATAdapter + SegHead → 标准语义分割.
-目标: Domain-aware Initialization — 让 MobileSAM 学会 iSAID 遥感特征,
-为 Stage 2 的 Few-shot Semantic Learning 提供领域适应后的特征初始化。
+Supervised Semantic Segmentation Fine-tuning for Domain Adaptation.
 
-MobileSAM (frozen) + CATAdapter + SegHead (1x1 Conv) → standard
-semantic segmentation on base classes. Goal: domain-aware feature
-initialization for Stage 2 few-shot learning.
+Stage 1 solves the **Domain Gap** problem: SAM was pretrained on natural images,
+but aerial remote sensing images have fundamentally different visual statistics
+(scale, viewpoint, texture). Stage 1 bridges this gap via supervised semantic
+segmentation on base classes.
+
+    MobileSAM Encoder (frozen) + CATAdapter (trainable) + Linear SegHead (auxiliary)
+        → standard supervised semantic segmentation on base classes
+        → domain-aware feature initialization for Stage 2
+
+设计要点 | Design Notes:
+    - 全监督, 不需要 support/query/episode — 纯粹的语义分割训练.
+    - Linear SegHead 只是辅助训练头 (auxiliary training head), Stage 1 结束后丢弃,
+      不参与 Stage 2 推理. 真正的目标是学习遥感领域特征表示 (Representation Learning),
+      而不是训练一个语义分割模型.
+    - CATAdapter 是唯一输出 — 冻结后传给 Stage 2 做 Few-Shot Learning.
+
+    Unlike conventional FSS methods that directly optimize episodic matching,
+    we explicitly decouple domain adaptation (Stage 1) and few-shot adaptation
+    (Stage 2) into two sequential stages.
 
 用法 | Usage::
 

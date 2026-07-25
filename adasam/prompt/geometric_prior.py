@@ -45,13 +45,28 @@ class GeometricPriorModule(nn.Module):
         self.query_rsp_proj = nn.Conv2d(C, C, kernel_size=1, bias=False)
         self.support_rsp_proj = nn.Linear(C, C, bias=False)
 
-        # ── Merge [query_features, rsp_map] → geometric prior ──
-        self.merge = nn.Sequential(
-            nn.Conv2d(C + 1, C, kernel_size=1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(C, C, kernel_size=3, padding=1, bias=False),
-            nn.ReLU(inplace=True),
-        )
+        # Identity init: at initialization, cosine similarity is computed
+        # in the raw feature space (which we verified has strong FG/BG signal).
+        # Projection layers then learn to refine which dimensions matter during training.
+        with torch.no_grad():
+            w_q = self.query_rsp_proj.weight
+            w_s = self.support_rsp_proj.weight
+            w_q.zero_()
+            w_s.zero_()
+            for i in range(min(C, C)):
+                w_q[i, i, 0, 0] = 1.0
+                w_s[i, i] = 1.0
+
+        # ── Merge: rsp_map → geometric prior ──
+        # Simple 1×1 Conv to expand rsp_map [1, H, W] → [1, C, H, W].
+        # Identity-initialized so it passes the cosine signal through unchanged at init;
+        # training can learn channel-wise re-weighting.
+        self.rsp_expand = nn.Conv2d(1, C, kernel_size=1, bias=False)
+        with torch.no_grad():
+            w_e = self.rsp_expand.weight
+            w_e.zero_()
+            for i in range(min(C, C)):
+                w_e[i, 0, 0, 0] = 1.0
 
     def forward(
         self,
@@ -75,11 +90,15 @@ class GeometricPriorModule(nn.Module):
             q_rsp = self.query_rsp_proj(query_features)          # [B, C, H, W]
             s_rsp = self.support_rsp_proj(support_memory)        # [M, C]
 
-            q_norm = F.normalize(q_rsp.reshape(B, C, N), dim=1)  # [B, C, N]
-            s_norm = F.normalize(s_rsp, dim=1)                    # [M, C]
+            # Mean-pool support memory → class prototype [C]
+            # Reduces pixel-level noise; single prototype matching is much cleaner
+            # than max-pool over 80 noisy pixel-level tokens.
+            s_proto = s_rsp.mean(dim=0)                           # [C]
 
-            sim = torch.einsum("bcn,mc->bmn", q_norm, s_norm)    # [B, M, N]
-            sim = sim.max(dim=1)[0]                                # [B, N]
+            q_norm = F.normalize(q_rsp.reshape(B, C, N), dim=1)  # [B, C, N]
+            s_norm = F.normalize(s_proto, dim=0)                  # [C]
+
+            sim = torch.einsum("bcn,c->bn", q_norm, s_norm)      # [B, N]
             rsp_map = sim.reshape(B, 1, H, W)                     # [B, 1, H, W]
 
             rsp_min = rsp_map.amin(dim=(2, 3), keepdim=True)
@@ -89,14 +108,8 @@ class GeometricPriorModule(nn.Module):
             rsp_map = torch.zeros(B, 1, H, W, device=query_features.device)
 
         # ═════════════════════════════════════════════════════
-        # Merge: query features × rsp map → geometric prior
+        # Merge: rsp_map → geometric prior [1, C, H, W]
         # ═════════════════════════════════════════════════════
-        # 与旧 CoarsePrior 的区别: 不再输出复杂的 pixel_prototype,
-        # 而是将 RSP map 和 query features 融合为统一的 geometric prior。
-        # Difference from old CoarsePrior: no pixel_prototype output;
-        # RSP map + query features fused into unified geometric prior.
-        geometric_prior = self.merge(
-            torch.cat([query_features, rsp_map], dim=1)
-        )  # [1, C, H, W]
+        geometric_prior = self.rsp_expand(rsp_map)  # [1, C, H, W]
 
         return geometric_prior

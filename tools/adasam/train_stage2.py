@@ -1,18 +1,35 @@
 """
-AdaSAM Stage 2 — Few-shot Semantic Learning.
-=============================================
+AdaSAM Stage 2 — 少样本语义学习 | Few-Shot Semantic Learning.
+==============================================================
 
-Stage 2: 加载 Stage 1 Domain Adapter (冻结) → Episode 训练 SPG + GeometricPrior +
-PromptFusion + SAM Decoder。Novel 类直接推理, 不再训练。
+Stage 2 solves the **Few-Shot Gap** problem: given the domain-adapted features from
+Stage 1, how does the model leverage limited support examples to segment a query image?
 
-Loads Stage 1 adapter (frozen) → Episode training of SPG + GeometricPrior +
-PromptFusion + SAM Decoder. Novel classes inferred directly (no finetune).
+    Load Stage 1 Domain Adapter (frozen)
+        → Episode training of SupportEncoder + SPG + GeometricPrior +
+          PromptFusion + SAM Decoder
+        → Novel classes inferred directly (no finetune)
+
+设计要点 | Design Notes:
+    - Stage 1 的 Adapter 冻结不动, 只作为领域特征提取器.
+    - Episode Sampling: 每次采样 K 张 support + 1 张 query (scene-disjoint).
+    - 训练只使用 base classes; 推理时直接泛化到 novel classes (FSS 标准协议).
+    - L = L_main + λ₁·L_prior + λ₂·L_reg.
+      L_prior 是可选的: `--prior-weight 0` 完全关闭, `--prior-weight 0.3` 默认.
+
+    The two-stage decomposition is the core design insight:
+    Stage 1 (Domain Adaptation) + Stage 2 (Few-Shot Learning)
+    = decoupled solution to two orthogonal problems.
 
 用法 | Usage::
 
     # 完整训练 (需先完成 Stage 1)
     python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 50 \\
         --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt
+
+    # 关闭 L_prior (调试用)
+    python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 50 \\
+        --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt --prior-weight 0
 
     # 烟测试
     python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \\
@@ -79,7 +96,7 @@ class ISAID5iTrainer:
         """
         self.cfg = cfg
         self.args = args
-        self.stage1_ckpt_path: Path = Path(args.stage1_ckpt)
+        self.stage1_ckpt_path: Path | None = Path(args.stage1_ckpt) if args.stage1_ckpt else None
         self.seed = int(cfg.get("seed", 42))
         set_seed(self.seed)
         self.device = torch.device(
@@ -112,7 +129,7 @@ class ISAID5iTrainer:
 
         # ── 验证集 | Validation ──
         tcfg = cfg["train"]
-        self.val_every = int(tcfg.get("val_every", 10))
+        self.val_every = int(tcfg.get("val_every", 1))
         self.val_samples = int(tcfg.get("val_samples", 30))
         self.val_ds = ISAID5iDataset(root=data_root, fold=self.fold, split="val", mode=self.mode)
         self.val_classes = self.val_ds.visible_classes()
@@ -129,9 +146,14 @@ class ISAID5iTrainer:
         self.num_probes = self.model.num_probes
 
         # ── Stage 1 Adapter: 加载并冻结 | Load and freeze ──
-        if not self.stage1_ckpt_path.exists():
-            raise FileNotFoundError(f"Stage 1 checkpoint not found: {self.stage1_ckpt_path}")
-        self.cat_adapter = self._load_stage1_adapter(self.stage1_ckpt_path)
+        if self.stage1_ckpt_path is not None:
+            if not self.stage1_ckpt_path.exists():
+                raise FileNotFoundError(f"Stage 1 checkpoint not found: {self.stage1_ckpt_path}")
+            self.cat_adapter = self._load_stage1_adapter(self.stage1_ckpt_path)
+            print(f"[load_stage1] adapter loaded from: {self.stage1_ckpt_path}")
+        else:
+            self.cat_adapter = None
+            print("[load_stage1] NO adapter — using raw SAM features (no domain adaptation)")
 
         # ── 优化器 & 学习率调度 | Optimizer & LR Scheduler ──
         self.grad_clip = float(tcfg.get("grad_clip", 1.0))
@@ -174,7 +196,7 @@ class ISAID5iTrainer:
             f"stage2 fold={self.fold} k={self.k_shot} "
             f"device={self.device} trainable={n_train:.2f}M probes={self.num_probes} "
             f"classes={self.eligible} out={self.out_dir} "
-            f"stage1_ckpt={self.stage1_ckpt_path}"
+            f"stage1_ckpt={self.stage1_ckpt_path or 'none (raw SAM)'}"
         )
         self.logger.log_info("init", init_info)
 
@@ -795,7 +817,7 @@ class ISAID5iTrainer:
             "fold": self.fold,
             "k_shot": self.k_shot,
             "visible_classes": self.train_classes,
-            "stage1_ckpt": str(self.stage1_ckpt_path),
+            "stage1_ckpt": str(self.stage1_ckpt_path) if self.stage1_ckpt_path else "none",
         }
         if self.cat_adapter is not None:
             ckpt["cat_adapter"] = self.cat_adapter.state_dict()
@@ -817,8 +839,9 @@ def parse_args() -> argparse.Namespace:
     """
     p = argparse.ArgumentParser(description="AdaSAM Stage 2: Few-shot Semantic Learning")
     p.add_argument("--config", default=str(_REPO_ROOT / "configs" / "isaid_5i.yaml"))
-    p.add_argument("--stage1-ckpt", required=True,
-                   help="path to Stage 1 adapter checkpoint (best_adapter.pt)")
+    p.add_argument("--stage1-ckpt", default=None,
+                   help="path to Stage 1 adapter checkpoint (best_adapter.pt). "
+                        "Omit to run without domain adaptation (raw SAM features).")
     p.add_argument("--fold", type=int, default=None, help="fold 0/1/2")
     p.add_argument("--k-shot", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
@@ -887,10 +910,11 @@ def main() -> None:
     """
     args = parse_args()
 
-    # --stage1-ckpt is required
-    if not Path(args.stage1_ckpt).exists():
+    # --stage1-ckpt is optional; if omitted, raw SAM features are used (no domain adaptation)
+    if args.stage1_ckpt and not Path(args.stage1_ckpt).exists():
         print(f"ERROR: Stage 1 checkpoint not found: {args.stage1_ckpt}")
         print("  Run Stage 1 first: python tools/adasam/train_stage1.py --fold 0 --epochs 50")
+        print("  Or omit --stage1-ckpt to run without domain adaptation.")
         sys.exit(1)
 
     cfg = load_config(args)

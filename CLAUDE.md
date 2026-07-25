@@ -62,10 +62,51 @@ python tools/deprecated/evaluate.py --checkpoint runs/.../best_model.pt --k-shot
 
 ## Architecture
 
-AdaSAM is a **dual-branch semantic prior** few-shot aerial semantic segmentation framework:
-- **Stage 1 (Domain Adaptation)**: MobileSAM (frozen) + CATAdapter + SegHead → standard semantic segmentation on base classes → domain-aware feature initialization.
-- **Stage 2 (Few-shot Semantic Learning)**: SupportEncoder → GeometricPrior + SPG → PromptFusion → SAM Decoder. Episodic training on base classes. Novel classes inferred directly (no finetune).
-- Core metrics: **mIoU** and **FB-IoU** under the **FSS Benchmark protocol**.
+AdaSAM is a **dual-branch semantic prior** few-shot aerial semantic segmentation framework.
+Core metrics: **mIoU** and **FB-IoU** under the **FSS Benchmark protocol**.
+
+### Design Rationale: Decoupled Two-Stage Paradigm
+
+SAM faces two orthogonal challenges when applied to aerial FSS:
+
+| Problem | Nature | Solution |
+|---------|--------|----------|
+| **Domain Gap**: natural images → remote sensing | Feature distribution mismatch | **Stage 1** — Supervised Semantic Segmentation Fine-tuning for Domain Adaptation |
+| **Few-Shot Gap**: how to use limited support | Matching / prompting strategy | **Stage 2** — Episodic Few-Shot Semantic Learning |
+
+**Key insight**: Unlike conventional FSS methods (PFENet, HSNet) that directly optimize
+episodic matching from the start, AdaSAM **explicitly decouples domain adaptation and
+few-shot adaptation into two sequential stages**. This decomposition simplifies each
+sub-problem and makes both easier to solve.
+
+- **Stage 1 (Domain Adaptation)**: MobileSAM (frozen) + CATAdapter + Linear SegHead
+  → standard supervised semantic segmentation on base classes.
+  The segmentation head is only an **auxiliary training head** used for feature
+  adaptation — it is discarded after Stage 1 and never involved in Stage 2 inference.
+  Goal: learn remote sensing feature representations, not a semantic segmentation model.
+
+- **Stage 2 (Few-Shot Semantic Learning)**: SupportEncoder → GeometricPrior + SPG →
+  PromptFusion → SAM Decoder. Episodic training on base classes. Relies on the
+  domain-adapted features from Stage 1. Novel classes inferred directly (no finetune).
+
+```
+  Stage 1: Feature Adaptation               Stage 2: Few-Shot Adaptation
+  ┌──────────────────────────┐              ┌──────────────────────────┐
+  │ Image + GT Semantic Mask │              │ Support ──┐              │
+  │        ↓                 │              │           ↓              │
+  │ MobileSAM Encoder (frozen)│              │     SupportEncoder      │
+  │        ↓                 │              │           ↓              │
+  │ CATAdapter (trainable)   │──────────────│→  Frozen Adapter         │
+  │        ↓                 │  transferred │           ↓              │
+  │ Linear SegHead (auxiliary)│  adapter     │   SPG + GeometricPrior  │
+  │        ↓                 │              │           ↓              │
+  │   Semantic Loss          │              │     PromptFusion         │
+  │                          │              │           ↓              │
+  │  → Domain-aware features │              │     SAM Decoder          │
+  └──────────────────────────┘              │           ↓              │
+                                            │   Few-Shot Mask          │
+                                            └──────────────────────────┘
+```
 
 ### Data flow (v5 — Protocol-Aligned SPG)
 

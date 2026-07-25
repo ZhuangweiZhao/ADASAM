@@ -186,6 +186,7 @@ class SupportEncoder(nn.Module):
 
         # ---- support index embedding (区分不同 support image) ----
         self.support_idx_embed = nn.Embedding(cfg.max_support_images, C)
+        nn.init.zeros_(self.support_idx_embed.weight)  # zero-init to avoid class-independent bias
 
         # ---- Stage 2: Support Self-Attention (TransformerEncoder) ----
         if cfg.is_stage2:
