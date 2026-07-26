@@ -923,6 +923,10 @@ def parse_args() -> argparse.Namespace:
                    help="Probe entropy loss weight (default: 0.0)")
     p.add_argument("--no-geometric-prior", action="store_true",
                    help="disable GeometricPrior (ablation: test GeoPrior contribution)")
+    p.add_argument("--prompt-mode", default=None,
+                   choices=["pf", "spg", "geo", "sum"],
+                   help="prompt construction mode: pf (PromptFusion), spg (SPG-only), "
+                        "geo (Geo-only), sum (Geo+SPG). Default: pf (from config)")
     p.add_argument("--channel-gate", action="store_true",
                    help="enable learnable Channel Gate after PromptFusion with L1 sparsity")
     p.add_argument("--gate-sparsity-weight", type=float, default=None,
@@ -978,6 +982,9 @@ def load_config(args: argparse.Namespace) -> dict:
     if args.gate_sparsity_weight is not None:
         cfg.setdefault("channel_gate", {})["sparsity_weight"] = args.gate_sparsity_weight
         print(f"[config] ChannelGate sparsity_weight = {args.gate_sparsity_weight}")
+    if args.prompt_mode is not None:
+        cfg.setdefault("ablation", {})["prompt_mode"] = args.prompt_mode
+        print(f"[config] PromptMode = {args.prompt_mode}")
     return cfg
 
 

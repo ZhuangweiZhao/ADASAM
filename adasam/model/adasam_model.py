@@ -50,6 +50,7 @@ class AdaSAMModelConfig:
     category_injection: bool = True   # inject support prototype into SAM mask_tokens
     category_alpha: float = 0.5       # scale factor for injection strength
     bypass_decoder: bool = False      # bypass SAM MaskDecoder entirely (→ simple Conv head)
+    prompt_mode: str = "pf"           # prompt construction: "pf"|"spg"|"geo"|"sum"
     use_channel_gate: bool = False    # learnable per-channel gate after PromptFusion
     gate_init: float = 2.0            # initial gate logit value (2.0 → sigmoid≈0.88)
     gate_sparsity_weight: float = 0.01  # λ for L1 sparsity on gate values
@@ -76,6 +77,7 @@ class AdaSAMModelConfig:
             category_injection=bool(abl_cfg.get("category_injection", True)),
             category_alpha=float(abl_cfg.get("category_alpha", 0.5)),
             bypass_decoder=bool(abl_cfg.get("bypass_decoder", False)),
+            prompt_mode=str(abl_cfg.get("prompt_mode", "pf")),
             use_channel_gate=bool(cg_cfg.get("enabled", False)),
             gate_init=float(cg_cfg.get("init", 2.0)),
             gate_sparsity_weight=float(cg_cfg.get("sparsity_weight", 0.01)),
@@ -327,15 +329,26 @@ class AdaSAMModel(nn.Module):
                 aux0 = spg_out.prior_aux[0]
                 tracer.tensor("prior_aux[0].prior_mask", aux0["prior_mask"].unsqueeze(0))
 
-            # 4. PromptFusion → dense_prompt + sparse_token
-            if self.prompt_fusion is not None and geometric_prior is not None:
+            # 4. Build dense_prompt + sparse_token (mode-controlled)
+            pm = self.cfg.prompt_mode
+            if pm == "pf" and self.prompt_fusion is not None and geometric_prior is not None:
                 dense_prompt, sparse_token = self.prompt_fusion(
                     geometric_prior, spg_out.semantic_prior
                 )
                 tracer.section("AdaSAM.forward_train — PromptFusion")
                 tracer.tensor("fused_dense_prompt", dense_prompt, spatial=True)
                 tracer.tensor("fused_sparse_token", sparse_token.unsqueeze(0))
+            elif pm == "spg":
+                dense_prompt = spg_out.semantic_prior
+                sparse_token = dense_prompt.mean(dim=(2, 3))
+            elif pm == "geo" and geometric_prior is not None:
+                dense_prompt = geometric_prior
+                sparse_token = dense_prompt.mean(dim=(2, 3))
+            elif pm == "sum" and geometric_prior is not None:
+                dense_prompt = geometric_prior + spg_out.semantic_prior
+                sparse_token = dense_prompt.mean(dim=(2, 3))
             else:
+                # Fallback: original behavior (legacy dense prompt or SPG)
                 dense_prompt = self._build_dense_prompt(
                     support_memory, support_features, support_masks
                 )
