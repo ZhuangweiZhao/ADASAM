@@ -69,13 +69,17 @@ class PromptOptimizer:
     def __init__(self, model, query_emb, sup_feat, sup_mask,
                  gt_main, H_orig, W_orig, device):
         self.model = model
-        self.query_emb = query_emb
-        self.sup_feat = sup_feat
-        self.sup_mask = sup_mask
-        self.gt_main = gt_main  # [H, W] bool numpy
         self.H = H_orig
         self.W = W_orig
         self.device = device
+
+        # ── Detach all input tensors — they carry grad_fn from backbone/adapter
+        #     and would cause "backward through the graph a second time" when
+        #     used repeatedly in the 200-step optimization loop.
+        self.query_emb = query_emb.detach()
+        self.sup_feat = sup_feat.detach()
+        self.sup_mask = sup_mask.detach()
+        self.gt_main = gt_main  # [H, W] bool numpy (not a tensor)
 
         # Pre-compute GT at 256×256 for loss
         gt_t = torch.from_numpy(gt_main.astype(np.float32)).to(device)
@@ -84,15 +88,17 @@ class PromptOptimizer:
         )[0, 0]  # [256, 256]
 
         # Build support memory and geometric prior once (frozen)
-        self.support_memory = model.support_encoder(sup_feat, sup_mask)
+        self.support_memory = model.support_encoder(self.sup_feat, self.sup_mask)
         self.geometric_prior = None
         if model.geometric_prior is not None:
-            self.geometric_prior = model.geometric_prior(query_emb, self.support_memory)
+            self.geometric_prior = model.geometric_prior(self.query_emb, self.support_memory)
 
-        # Pre-compute support prototype once (frozen tensor)
-        self.support_proto = self.model._compute_support_prototype(
-            self.sup_feat, self.sup_mask
-        ) if self.model.bypass_head is None else None
+        # Pre-compute support prototype once
+        self.support_proto = None
+        if self.model.bypass_head is None:
+            self.support_proto = self.model._compute_support_prototype(
+                self.sup_feat, self.sup_mask
+            )
 
         # Disable category injection during optimization — its weight.data mutation
         # breaks the autograd graph across backward() calls.
