@@ -336,7 +336,8 @@ def _effective_rank(x: torch.Tensor) -> float:
 
 def _spatial_frequency(x: torch.Tensor) -> float:
     """Mean spatial frequency (Laplacian variance) across channels."""
-    laplacian = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32)
+    laplacian = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]],
+                             dtype=torch.float32, device=x.device)
     lap = laplacian.unsqueeze(0).unsqueeze(0)  # [1, 1, 3, 3]
     total_var = 0.0
     for c in range(min(x.shape[0], 32)):  # sample 32 channels for speed
