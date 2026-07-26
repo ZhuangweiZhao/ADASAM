@@ -67,6 +67,7 @@ def build_support_for_class(*, data_root, fold, mode, class_id, k_shot,
     return feats, mg
 
 
+@torch.no_grad()
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
