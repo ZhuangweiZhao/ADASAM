@@ -137,9 +137,13 @@ class SemanticSegLoss(nn.Module):
         """Probe diversity loss: encourages spatial specialization among probes.
 
         Three components:
-          L_div  = mean pairwise cosine of flattened mask vectors (lower → diverse)
+          L_div  = mean pairwise cosine on FOREGROUND pixels (lower → diverse FG分工)
           L_cov  = BCE(union_of_probes, GT) — prevents collapsing to background
-          L_ent  = -H(per-probe activation distribution) — prevents probe death
+          L_ent  = -H(per-probe FG activation distribution) — prevents probe death
+
+        Key design: L_div only operates on pixels where GT > 0.5 (foreground).
+        This forces probes to DIVIDE the foreground region, rather than finding
+        random background pixels to satisfy the diversity constraint.
 
         :param probe_masks: [N, gh, gw] per-probe mask logits (final SPG layer).
         :param probe_logits: [N] per-probe confidence logits (informational).
@@ -147,35 +151,37 @@ class SemanticSegLoss(nn.Module):
         :return: dict with "L_div", "L_cov", "L_ent".
         """
         N, gh, gw = probe_masks.shape
+        device = probe_masks.device
         masks_prob = probe_masks.sigmoid()  # [N, gh, gw] in [0,1]
 
-        # ── L_div: mean pairwise cosine similarity ──
-        masks_flat = masks_prob.reshape(N, gh * gw)          # [N, gh*gw]
-        masks_norm = F.normalize(masks_flat, dim=1, eps=1e-8)
-        cos_sim = masks_norm @ masks_norm.T                   # [N, N]
+        # ── GT resizing (shared) ──
+        gt_resized = F.interpolate(
+            gt.unsqueeze(1).float(), (gh, gw), mode="area",
+        ).squeeze(1)[0]                                         # [gh, gw]
+        fg_mask = gt_resized > 0.5                               # [gh, gw] bool
+        n_fg = fg_mask.sum().clamp(min=1)                        # scalar
+
+        # ── L_div: mean pairwise cosine on FOREGROUND pixels only ──
+        # extract foreground activations per probe, then normalize across probes
+        masks_fg = masks_prob[:, fg_mask]                        # [N, F]
+        masks_fg_n = F.normalize(masks_fg, dim=1, eps=1e-8)     # [N, F]
+        cos_sim = masks_fg_n @ masks_fg_n.T                      # [N, N]
         triu_idx = torch.triu_indices(N, N, offset=1)
-        cos_pairs = cos_sim[triu_idx[0], triu_idx[1]]         # [N*(N-1)/2]
+        cos_pairs = cos_sim[triu_idx[0], triu_idx[1]]            # [N*(N-1)/2]
         L_div = cos_pairs.mean()
 
-        # ── L_cov: BCE(union, GT) ──
-        union = masks_prob.max(dim=0)[0]                       # [gh, gw] max over probes
-        gt_resized = F.interpolate(
-            gt.unsqueeze(1).float(), (gh, gw), mode="area",     # [B, 1, H, W] → [B, 1, gh, gw]
-        ).squeeze(1)[0]                                         # [gh, gw]
+        # ── L_cov: BCE(union, GT) on ALL pixels ──
+        union = masks_prob.max(dim=0)[0]                         # [gh, gw] max over probes
         L_cov = F.binary_cross_entropy(
             union.clamp(1e-7, 1 - 1e-7), gt_resized.clamp(0, 1),
         )
 
-        # ── L_ent: negative entropy of per-probe activation distribution ──
-        if probe_logits is not None:
-            softmax_w = torch.softmax(probe_logits, dim=0)     # [N]
-            H = -(softmax_w * torch.log(softmax_w + 1e-8)).sum()
-            L_ent = -H
-        else:
-            mean_act = masks_prob.mean(dim=(1, 2))             # [N]
-            weights = mean_act / mean_act.sum().clamp(min=1e-8)
-            H = -(weights * torch.log(weights + 1e-8)).sum()
-            L_ent = -H
+        # ── L_ent: negative entropy of per-probe FG activation ──
+        # Use mean per-probe activation ON FOREGROUND as the usage distribution
+        mean_act_fg = masks_fg.mean(dim=1)                       # [N]
+        weights = mean_act_fg / mean_act_fg.sum().clamp(min=1e-8)
+        H = -(weights * torch.log(weights + 1e-8)).sum()
+        L_ent = -H
 
         return {
             "L_div": L_div,
