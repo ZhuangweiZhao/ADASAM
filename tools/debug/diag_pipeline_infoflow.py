@@ -164,10 +164,17 @@ def cca_analysis(x: torch.Tensor, y: torch.Tensor, n_components: int = 10) -> di
         can_corrs = [0.0] * n_components
 
     # Also compute simpler metrics
-    # Cosine similarity between channel-mean vectors
-    cos_global = float(F.cosine_similarity(
-        x[0].reshape(1, -1).float(), y[0].reshape(1, -1).float()
-    ))
+    # Cosine similarity (only if same number of elements)
+    x_flat = x[0].reshape(1, -1).float()
+    y_flat = y[0].reshape(1, -1).float()
+    if x_flat.shape[1] == y_flat.shape[1]:
+        cos_global = float(F.cosine_similarity(x_flat, y_flat))
+    else:
+        # Use channel-mean vectors (both are spatial patches of same size)
+        cos_global = float(F.cosine_similarity(
+            x[0].mean(dim=(1, 2)).unsqueeze(0).float()[:, :min(C1, C2)],
+            y[0].mean(dim=(1, 2)).unsqueeze(0).float()[:, :min(C1, C2)],
+        ))
 
     # Subspace alignment: principal angles via SVD of X^T Y
     nx = F.normalize(x_c, dim=0)
