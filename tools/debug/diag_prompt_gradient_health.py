@@ -203,7 +203,7 @@ def main():
         description="Prompt Gradient Health — per-channel gradient statistics"
     )
     add_common_args(parser)
-    parser.add_argument("--num-tiles", type=int, default=30)
+    parser.set_defaults(num_tiles=30)  # override base default of 20
     parser.add_argument("--dead-threshold", type=float, default=1e-6,
                        help="Gradient norm below which a channel is considered 'dead'")
     args = parser.parse_args()

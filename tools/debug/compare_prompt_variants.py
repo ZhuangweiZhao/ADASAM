@@ -51,7 +51,7 @@ def main():
         description="Compare PromptFusion vs SPG-only vs Geo-only prompt IoU"
     )
     add_common_args(parser)
-    parser.add_argument("--num-tiles", type=int, default=50)
+    parser.set_defaults(num_tiles=50)  # override base default of 20
     args = parser.parse_args()
 
     ctx = build_diag_context(args, require_adapter=True, split="val")
