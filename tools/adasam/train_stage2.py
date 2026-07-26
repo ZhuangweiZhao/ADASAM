@@ -906,6 +906,8 @@ def parse_args() -> argparse.Namespace:
                    help="Probe coverage loss weight (default: 0.0)")
     p.add_argument("--ent-weight", type=float, default=None,
                    help="Probe entropy loss weight (default: 0.0)")
+    p.add_argument("--no-geometric-prior", action="store_true",
+                   help="disable GeometricPrior (ablation: test GeoPrior contribution)")
     return p.parse_args()
 
 
@@ -948,6 +950,9 @@ def load_config(args: argparse.Namespace) -> dict:
             d[keys[-1]] = val
     if args.weights is not None:
         cfg.setdefault("backbone", {})["checkpoint"] = args.weights
+    if args.no_geometric_prior:
+        cfg.setdefault("geometric_prior", {})["enabled"] = False
+        print("[config] GeometricPrior DISABLED (--no-geometric-prior)")
     return cfg
 
 
