@@ -45,6 +45,14 @@ python tools/neuseg/viz.py --mode support --k-shot 3               # support/que
 python tools/neuseg/viz.py --mode predict --checkpoint <ckpt>      # prediction comparison
 python tools/neuseg/viz.py --mode all --checkpoint <ckpt>          # all visualizations
 
+# Diagnostic tools (SPG / PromptFusion / Channel analysis)
+python tools/analysis/diag_appearance_vs_semantic.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
+python tools/analysis/diag_dense_prompt_classifiability.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
+python tools/analysis/diag_channel_attribution.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
+python tools/analysis/diag_promptfusion_layers.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
+python tools/analysis/diag_promptfusion_bottleneck.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
+python tools/analysis/diag_spg_probes.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
+
 # SAM-RSP 3-Stage Reproduction on iSAID-5i
 python tools/sam_rsp/prepare.py --data-root data/iSAID-5i
 python tools/sam_rsp/stage1_train.py --fold 0 --epochs 100
