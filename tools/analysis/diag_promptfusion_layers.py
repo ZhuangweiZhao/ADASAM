@@ -461,12 +461,13 @@ def main():
     rank_results = {}
     for sname, sdim in zip(stage_names, stage_dims):
         ranks = []
-        # Use spatial features from decoder_samples
         for ds in decoder_samples:
+            if sname not in ds:
+                continue
             feat = ds[sname]  # [1, C, 64, 64] on CPU
             r = effective_rank(feat[0], energy_frac=0.90)
             ranks.append(r)
-        rank_results[sname] = (np.mean(ranks), np.std(ranks))
+        rank_results[sname] = (np.mean(ranks), np.std(ranks)) if ranks else (0.0, 0.0)
 
     # ═══════════════════════════════════════════════════════════════
     # Report
