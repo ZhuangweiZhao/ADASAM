@@ -50,21 +50,23 @@ from adasam.utils.transforms import preprocess_image, resize_mask
 def linear_cka(X: torch.Tensor, Y: torch.Tensor) -> float:
     """Linear CKA between two representations.
 
-    X: [N, d1] or [d1, N] — will be treated as features × samples
-    Y: [N, d2] or [d2, N]
+    X: [d1, N] — features × samples
+    Y: [d2, N] — features × samples
     Returns scalar in [0, 1].
     """
     # Ensure shape is [features, samples]
-    if X.shape[0] < X.shape[1]:
-        X = X.T  # [d1, N]
-    if Y.shape[0] < Y.shape[1]:
-        Y = Y.T  # [d2, N]
+    d1, N1 = X.shape
+    d2, N2 = Y.shape
+    if d1 > N1:
+        X = X.T
+    if d2 > N2:
+        Y = Y.T
 
     # Center
     X = X - X.mean(dim=1, keepdim=True)
     Y = Y - Y.mean(dim=1, keepdim=True)
 
-    # Gram matrices
+    # Gram matrices: [N, N] each
     K = X.T @ X  # [N, N]
     L = Y.T @ Y  # [N, N]
 
