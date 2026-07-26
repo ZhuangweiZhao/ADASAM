@@ -170,9 +170,11 @@ class ISAID5iTrainer:
 
         # ── 损失函数 | Criterion ──
         loss_cfg = cfg.get("loss", {})
+        cg_cfg = cfg.get("channel_gate", {})
         self.criterion = SemanticSegLoss(
             prior_weight=float(loss_cfg.get("prior_weight", 0.3)),
             reg_weight=float(loss_cfg.get("reg_weight", 0.0)),
+            gate_weight=float(loss_cfg.get("gate_weight", 0.0)) or float(cg_cfg.get("sparsity_weight", 0.0)),
             focal_weight=float(loss_cfg.get("focal_weight", 1.0)),
             dice_weight=float(loss_cfg.get("dice_weight", 1.0)),
             focal_gamma=float(loss_cfg.get("focal_gamma", 5.0)),
@@ -385,12 +387,16 @@ class ISAID5iTrainer:
         for aux_entry in spg_out.prior_aux:
             prior_masks.append(aux_entry["prior_mask"])  # [1, gh, gw]
 
+        # Channel gate values (for L1 sparsity loss)
+        gate_vals = self.model._last_gate if self.model.channel_gate is not None else None
+
         losses = self.criterion(
             pred_2ch, gt_binary.unsqueeze(0),
             prior_masks=prior_masks,
             prior_mask=spg_out.prior_mask,
             probe_masks=spg_out.probe_masks if need_probe_masks else None,
             probe_logits=spg_out.probe_logits if need_probe_masks else None,
+            gate_values=gate_vals,
         )
 
         # 反向传播 | Backward
@@ -423,6 +429,15 @@ class ISAID5iTrainer:
             metrics["L_div"] = float(losses["L_div"])
             metrics["L_cov"] = float(losses["L_cov"])
             metrics["L_ent"] = float(losses["L_ent"])
+
+        # Channel Gate monitoring
+        if "L_gate" in losses and losses["L_gate"] > 0:
+            metrics["L_gate"] = float(losses["L_gate"])
+        if self.model.channel_gate is not None:
+            gs = self.model.channel_gate.gate_stats()
+            metrics["gate_mean"] = gs["gate_mean"]
+            metrics["gate_sparsity"] = gs["gate_sparsity"]
+            metrics["gate_n_active"] = gs["gate_n_active"]
 
         # Per-episode probe monitoring (diagnostic, no grad)
         if spg_out.probe_masks is not None:
@@ -908,6 +923,10 @@ def parse_args() -> argparse.Namespace:
                    help="Probe entropy loss weight (default: 0.0)")
     p.add_argument("--no-geometric-prior", action="store_true",
                    help="disable GeometricPrior (ablation: test GeoPrior contribution)")
+    p.add_argument("--channel-gate", action="store_true",
+                   help="enable learnable Channel Gate after PromptFusion with L1 sparsity")
+    p.add_argument("--gate-sparsity-weight", type=float, default=None,
+                   help="L1 sparsity weight for Channel Gate (default: 0.01)")
     return p.parse_args()
 
 
@@ -953,6 +972,12 @@ def load_config(args: argparse.Namespace) -> dict:
     if args.no_geometric_prior:
         cfg.setdefault("geometric_prior", {})["enabled"] = False
         print("[config] GeometricPrior DISABLED (--no-geometric-prior)")
+    if args.channel_gate:
+        cfg.setdefault("channel_gate", {})["enabled"] = True
+        print("[config] ChannelGate ENABLED (--channel-gate)")
+    if args.gate_sparsity_weight is not None:
+        cfg.setdefault("channel_gate", {})["sparsity_weight"] = args.gate_sparsity_weight
+        print(f"[config] ChannelGate sparsity_weight = {args.gate_sparsity_weight}")
     return cfg
 
 

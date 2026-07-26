@@ -54,6 +54,13 @@ prompt_fusion:
   enabled: true
   mode: "concat"
 
+# ── Channel Gate (per-channel learnable gating + L1 sparsity) ──
+channel_gate:
+  enabled: false           # enable with --channel-gate
+  init: 2.0                # gate_logits initial value (2.0 → sigmoid≈0.88)
+  sparsity_weight: 0.01    # λ for L1 penalty on gate values
+  hard_threshold: null     # hard threshold at inference (null=soft gate)
+
 # ── SAM Decoder (boundary refinement) ──
 decoder:
   train_mask_decoder: true
@@ -62,6 +69,7 @@ decoder:
 loss:
   prior_weight: 0.3          # L_prior: SPG prior BCE+Dice deep supervision
   reg_weight: 0.0            # L_reg: regularization (reserved)
+  gate_weight: 0.0           # L_gate: Channel Gate L1 sparsity (overridden by channel_gate.sparsity_weight)
   div_weight: 0.0            # L_div: probe spatial diversity (pairwise cosine penalty)
   cov_weight: 0.0            # L_cov: coverage safeguard (union mask vs GT BCE)
   ent_weight: 0.0            # L_ent: entropy safeguard (prevent probe death)

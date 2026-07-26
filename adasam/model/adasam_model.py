@@ -25,6 +25,7 @@ import torch.nn.functional as F
 
 from adasam.decoder import SemanticMaskDecoder, SemanticMaskDecoderConfig
 from adasam.prompt import (
+    ChannelGate,
     GeometricPriorModule,
     PromptFusion,
     SemanticPriorGenerator,
@@ -49,6 +50,10 @@ class AdaSAMModelConfig:
     category_injection: bool = True   # inject support prototype into SAM mask_tokens
     category_alpha: float = 0.5       # scale factor for injection strength
     bypass_decoder: bool = False      # bypass SAM MaskDecoder entirely (→ simple Conv head)
+    use_channel_gate: bool = False    # learnable per-channel gate after PromptFusion
+    gate_init: float = 2.0            # initial gate logit value (2.0 → sigmoid≈0.88)
+    gate_sparsity_weight: float = 0.01  # λ for L1 sparsity on gate values
+    gate_hard_threshold: float | None = None  # hard threshold at inference (None=soft)
 
     @classmethod
     def from_dict(cls, cfg: dict) -> "AdaSAMModelConfig":
@@ -56,6 +61,7 @@ class AdaSAMModelConfig:
         sp_cfg = cfg.get("semantic_prior", {})
         gp_cfg = cfg.get("geometric_prior", {})
         pf_cfg = cfg.get("prompt_fusion", {})
+        cg_cfg = cfg.get("channel_gate", {})
         abl_cfg = cfg.get("ablation", {})
         return cls(
             spg=SemanticPriorGeneratorConfig.from_dict(sp_cfg),
@@ -70,6 +76,10 @@ class AdaSAMModelConfig:
             category_injection=bool(abl_cfg.get("category_injection", True)),
             category_alpha=float(abl_cfg.get("category_alpha", 0.5)),
             bypass_decoder=bool(abl_cfg.get("bypass_decoder", False)),
+            use_channel_gate=bool(cg_cfg.get("enabled", False)),
+            gate_init=float(cg_cfg.get("init", 2.0)),
+            gate_sparsity_weight=float(cg_cfg.get("sparsity_weight", 0.01)),
+            gate_hard_threshold=cg_cfg.get("hard_threshold", None),
         )
 
 
@@ -166,6 +176,20 @@ class AdaSAMModel(nn.Module):
         if cfg.bypass_decoder:
             self.bypass_head = BypassMaskHead(in_dim=embed_dim)
             print("[model] BypassMaskHead enabled — SAM MaskDecoder replaced with Conv head")
+
+        # ── Channel Gate: per-channel learnable gating after PromptFusion ──
+        self.channel_gate: ChannelGate | None = None
+        if cfg.use_channel_gate:
+            self.channel_gate = ChannelGate(
+                num_channels=embed_dim,
+                init_gate=cfg.gate_init,
+                hard_threshold=cfg.gate_hard_threshold,
+            )
+            print(f"[model] ChannelGate enabled — init={cfg.gate_init}, "
+                  f"sparsity_weight={cfg.gate_sparsity_weight}")
+
+        # Storage for last gate values (accessed by loss)
+        self._last_gate: torch.Tensor | None = None
 
     @property
     def num_probes(self) -> int:
@@ -321,6 +345,14 @@ class AdaSAMModel(nn.Module):
                     spg_out.semantic_prior if dense_prompt is None
                     else dense_prompt
                 ).mean(dim=(2, 3))  # [1, C]
+
+        # ── Channel Gate: per-channel learnable gating ──
+        self._last_gate = None
+        if self.channel_gate is not None and dense_prompt is not None:
+            dense_prompt, gate_vals = self.channel_gate(dense_prompt)
+            self._last_gate = gate_vals  # stored for loss access
+            tracer.section("AdaSAM.forward_train — ChannelGate")
+            tracer.tensor("gated_dense_prompt", dense_prompt, spatial=True)
 
         # ── Decode: SAM MaskDecoder or Bypass Conv Head ──
         # Single decode point — bypass replaces TwoWayTransformer entirely.

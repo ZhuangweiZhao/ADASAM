@@ -40,6 +40,7 @@ class SemanticSegLoss(nn.Module):
         self,
         prior_weight: float = 0.3,
         reg_weight: float = 0.0,
+        gate_weight: float = 0.0,
         focal_weight: float = 1.0,
         dice_weight: float = 1.0,
         focal_gamma: float = 5.0,
@@ -52,6 +53,7 @@ class SemanticSegLoss(nn.Module):
         super().__init__()
         self.prior_weight = prior_weight
         self.reg_weight = reg_weight
+        self.gate_weight = gate_weight
         self.focal_weight = focal_weight
         self.dice_weight = dice_weight
         self.focal_gamma = focal_gamma
@@ -204,6 +206,7 @@ class SemanticSegLoss(nn.Module):
         prior_weight: float | None = None,
         probe_masks: torch.Tensor | None = None,
         probe_logits: torch.Tensor | None = None,
+        gate_values: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """前向计算 | Forward.
 
@@ -214,9 +217,11 @@ class SemanticSegLoss(nn.Module):
         :param prior_weight: L_prior 权重覆盖 (默认 self.prior_weight).
         :param probe_masks: [N, gh, gw] or None. Per-probe mask logits for diversity loss.
         :param probe_logits: [N] or None. Per-probe confidence logits.
+        :param gate_values: [C] or None. Channel gate probabilities for L1 sparsity.
         :return: {
-            "loss": L_main + λ₁·L_prior + λ₂·L_reg + λ_div·L_div + λ_cov·L_cov + λ_ent·L_ent,
-            "L_main": ..., "L_prior": ..., "L_reg": ..., "L_div": ..., "L_cov": ..., "L_ent": ...,
+            "loss": L_main + λ₁·L_prior + λ₂·L_reg + λ_gate·L_gate + λ_div·L_div + ...,
+            "L_main": ..., "L_prior": ..., "L_reg": ..., "L_gate": ...,
+            "L_div": ..., "L_cov": ..., "L_ent": ...,
         }
         """
         # L_main
@@ -258,11 +263,20 @@ class SemanticSegLoss(nn.Module):
         # L_reg (预留)
         reg_total = torch.tensor(0.0, device=pred.device)
 
+        # L_gate: L1 sparsity on channel gate values
+        l_gate = torch.tensor(0.0, device=pred.device)
+        if gate_values is not None and self.gate_weight > 0:
+            # L1 on gate probabilities — pushes unused channels toward 0
+            # Useful channels are defended by the main loss gradient
+            l_gate = gate_values.mean()  # mean sigmoid(gate_logits)
+            loss = loss + self.gate_weight * l_gate
+
         return {
             "loss": loss,
             "L_main": main["loss"].detach(),
             "L_prior": prior_total.detach() if isinstance(prior_total, torch.Tensor) else prior_total,
             "L_reg": reg_total,
+            "L_gate": l_gate.detach(),
             "L_div": L_div.detach(),
             "L_cov": L_cov.detach(),
             "L_ent": L_ent.detach(),
