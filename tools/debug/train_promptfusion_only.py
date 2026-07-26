@@ -279,14 +279,13 @@ def main():
             dense_prompt = semantic_prior
             sparse_token = dense_prompt.mean(dim=(2, 3))
 
-        # Decoder (frozen — no grad)
-        with torch.no_grad():
-            support_proto = model._compute_support_prototype(sup_feat, sup_mask)
-            saved_cat = model.sam_decoder._category_enabled
-            model.sam_decoder._category_enabled = False
-            low_res, _ = model.sam_decoder(qe, sparse_token, dense_prompt,
-                                           support_prototype=support_proto)
-            model.sam_decoder._category_enabled = saved_cat
+        # Decoder (frozen params, but gradient flows through to PromptFusion)
+        support_proto = model._compute_support_prototype(sup_feat, sup_mask)
+        saved_cat = model.sam_decoder._category_enabled
+        model.sam_decoder._category_enabled = False
+        low_res, _ = model.sam_decoder(qe.detach(), sparse_token, dense_prompt,
+                                       support_prototype=support_proto)
+        model.sam_decoder._category_enabled = saved_cat
 
         # Loss
         gt_t = torch.from_numpy(gt.astype(np.float32)).to(device)
