@@ -63,6 +63,11 @@ python tools/analysis/diag_spg_probes.py --stage2-ckpt <ckpt> --data-root data/i
 python tools/debug/visualize_support_switch.py --checkpoint <ckpt> --mode novel --k-shot 5
 python tools/debug/visualize_support_switch.py --checkpoint <ckpt> --mode novel --k-shot 5 --num-tiles 8  # more tiles
 
+# Localization Fidelity — 空间定位精度诊断 (E1-E4)
+# 测量 prompt-GT 对齐、边界 vs 内部 IoU、实例召回、峰值偏移
+python tools/debug/localization_fidelity.py --checkpoint <ckpt> --mode novel --k-shot 5
+python tools/debug/localization_fidelity.py --checkpoint <ckpt> --mode novel --k-shot 5 --num-tiles 100 --save-vis
+
 # SAM-RSP 3-Stage Reproduction on iSAID-5i
 python tools/sam_rsp/prepare.py --data-root data/iSAID-5i
 python tools/sam_rsp/stage1_train.py --fold 0 --epochs 100
