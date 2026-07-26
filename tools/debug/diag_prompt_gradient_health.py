@@ -171,6 +171,9 @@ def compute_gradient_health(
         from scipy import stats as scipy_stats
         spearman_grad_energy, _ = scipy_stats.spearmanr(np.abs(ch_grad_norm), ch_energy)
 
+    # Save loss before cleanup
+    loss_val = float(loss)
+
     del loss, low_res, grad, prompt
 
     return {
@@ -189,7 +192,7 @@ def compute_gradient_health(
         "top10_by_grad": top10,
         "bottom10_by_grad": bottom10,
         "spearman_grad_vs_energy": float(spearman_grad_energy),
-        "loss": float(loss),
+        "loss": loss_val,
     }
 
 
