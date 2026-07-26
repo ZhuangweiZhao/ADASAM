@@ -403,7 +403,7 @@ def main():
         for j in range(N_PROBES):
             v = pairwise_iou[i, j].item()
             if i == j:
-                print(f"{'*':>5.2f} ", end="")
+                print(f"  *   ", end="")
             else:
                 print(f"{v:>5.2f} ", end="")
         print()
