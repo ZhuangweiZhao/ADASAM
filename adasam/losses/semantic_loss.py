@@ -177,16 +177,20 @@ class SemanticSegLoss(nn.Module):
         )
 
         # ── L_ent: negative entropy of per-probe FG activation ──
-        # Use mean per-probe activation ON FOREGROUND as the usage distribution
+        # Use mean per-probe activation ON FOREGROUND as the usage distribution.
+        # Guard against zero activation (all probes dead on FG) — common in early epochs.
         mean_act_fg = masks_fg.mean(dim=1)                       # [N]
-        weights = mean_act_fg / mean_act_fg.sum().clamp(min=1e-8)
-        H = -(weights * torch.log(weights + 1e-8)).sum()
-        L_ent = -H
+        if mean_act_fg.sum() < 1e-8:
+            L_ent = torch.tensor(0.0, device=device)
+        else:
+            weights = mean_act_fg / mean_act_fg.sum()
+            H = -(weights * torch.log(weights + 1e-8)).sum()
+            L_ent = -H
 
         return {
-            "L_div": L_div,
-            "L_cov": L_cov,
-            "L_ent": L_ent,
+            "L_div": torch.nan_to_num(L_div, nan=0.0, posinf=0.0, neginf=0.0),
+            "L_cov": torch.nan_to_num(L_cov, nan=0.0, posinf=0.0, neginf=0.0),
+            "L_ent": torch.nan_to_num(L_ent, nan=0.0, posinf=0.0, neginf=0.0),
         }
 
     # ── Forward ──
