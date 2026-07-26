@@ -160,9 +160,8 @@ class SemanticSegLoss(nn.Module):
         # ── L_cov: BCE(union, GT) ──
         union = masks_prob.max(dim=0)[0]                       # [gh, gw] max over probes
         gt_resized = F.interpolate(
-            gt.unsqueeze(0).unsqueeze(0).float(),
-            size=(gh, gw), mode="area",
-        ).squeeze(0).squeeze(0)                                 # [gh, gw]
+            gt.unsqueeze(1).float(), (gh, gw), mode="area",     # [B, 1, H, W] → [B, 1, gh, gw]
+        ).squeeze(1)[0]                                         # [gh, gw]
         L_cov = F.binary_cross_entropy(
             union.clamp(1e-7, 1 - 1e-7), gt_resized.clamp(0, 1),
         )
