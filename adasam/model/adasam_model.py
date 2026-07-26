@@ -236,12 +236,15 @@ class AdaSAMModel(nn.Module):
         query_features: torch.Tensor,
         support_features: torch.Tensor,
         support_masks: torch.Tensor,
+        return_per_probe_masks: bool = False,
     ) -> tuple[SPGOutput, torch.Tensor, torch.Tensor]:
         """训练前向 | Training forward.
 
         :param query_features: [1, C, gh, gw] CAT-adapted query features.
         :param support_features: [K, C, gh, gw] K support features (CAT-adapted).
         :param support_masks: [K, gh, gw] K FG masks (resized to feature grid).
+        :param return_per_probe_masks: If True, SPG will include per-probe masks
+            in spg_out.probe_masks / .probe_logits for diversity loss.
         :return: (spg_out, low_res_logits [1,1,256,256], iou_pred [1,1]).
         """
         # 0. Trace inputs
@@ -290,7 +293,8 @@ class AdaSAMModel(nn.Module):
 
             # 3. SPG: query_features + support_memory → semantic_prior + prior_mask
             dense_pe = self.sam_decoder.prompt_encoder.get_dense_pe()
-            spg_out = self.spg(query_features, support_memory, dense_pe)
+            spg_out = self.spg(query_features, support_memory, dense_pe,
+                               return_per_probe_masks=return_per_probe_masks)
 
             tracer.section("AdaSAM.forward_train — SPG Output")
             tracer.tensor("semantic_prior", spg_out.semantic_prior, spatial=True)

@@ -177,6 +177,9 @@ class ISAID5iTrainer:
             dice_weight=float(loss_cfg.get("dice_weight", 1.0)),
             focal_gamma=float(loss_cfg.get("focal_gamma", 5.0)),
             focal_eps=float(loss_cfg.get("focal_eps", 1e-4)),
+            div_weight=float(loss_cfg.get("div_weight", 0.0)),
+            cov_weight=float(loss_cfg.get("cov_weight", 0.0)),
+            ent_weight=float(loss_cfg.get("ent_weight", 0.0)),
         )
 
         # ── 输出目录 & 日志 | Output & Logging ──
@@ -361,8 +364,14 @@ class ISAID5iTrainer:
 
         # 前向传播 + 损失计算 | Forward + loss
         emb = self._embed(query["image"])
+        need_probe_masks = (
+            self.criterion.div_weight > 0 or
+            self.criterion.cov_weight > 0 or
+            self.criterion.ent_weight > 0
+        )
         spg_out, low_res, iou_pred = self.model.forward_train(
-            emb, support_features, support_masks_grid
+            emb, support_features, support_masks_grid,
+            return_per_probe_masks=need_probe_masks,
         )
 
         # low_res is [1, 1, 256, 256] (single mask from single token)
@@ -380,6 +389,8 @@ class ISAID5iTrainer:
             pred_2ch, gt_binary.unsqueeze(0),
             prior_masks=prior_masks,
             prior_mask=spg_out.prior_mask,
+            probe_masks=spg_out.probe_masks if need_probe_masks else None,
+            probe_logits=spg_out.probe_logits if need_probe_masks else None,
         )
 
         # 反向传播 | Backward
@@ -407,6 +418,31 @@ class ISAID5iTrainer:
             "main_focal": float(losses["main_focal"]),
             "main_dice": float(losses["main_dice"]),
         }
+        # Include diversity loss metrics when computed
+        if "L_div" in losses:
+            metrics["L_div"] = float(losses["L_div"])
+            metrics["L_cov"] = float(losses["L_cov"])
+            metrics["L_ent"] = float(losses["L_ent"])
+
+        # Per-episode probe monitoring (diagnostic, no grad)
+        if spg_out.probe_masks is not None:
+            with torch.no_grad():
+                mp = spg_out.probe_masks.sigmoid()  # [N, gh, gw]
+                N = mp.shape[0]
+
+                # Pairwise IoU (mean of upper triangle)
+                flat = mp.reshape(N, -1)
+                inter = flat @ flat.T
+                union = flat.sum(-1).unsqueeze(0) + flat.sum(-1).unsqueeze(1) - inter
+                iou = inter / (union + 1e-8)
+                triu_idx = torch.triu_indices(N, N, offset=1)
+                metrics["probe_pairwise_iou"] = float(iou[triu_idx[0], triu_idx[1]].mean())
+
+                # Activation entropy
+                mean_act = mp.mean(dim=(1, 2))
+                p_dist = torch.softmax(mean_act, dim=0)
+                H = -(p_dist * torch.log(p_dist + 1e-8)).sum()
+                metrics["probe_entropy"] = float(H)
         return metrics
 
     # ── Validation ──
@@ -864,6 +900,12 @@ def parse_args() -> argparse.Namespace:
                    help="validation tile samples (default: 30)")
     p.add_argument("--prior-weight", type=float, default=None,
                    help="L_prior loss weight (default: 0.3, set 0 to disable)")
+    p.add_argument("--div-weight", type=float, default=None,
+                   help="Probe diversity loss weight (default: 0.0)")
+    p.add_argument("--cov-weight", type=float, default=None,
+                   help="Probe coverage loss weight (default: 0.0)")
+    p.add_argument("--ent-weight", type=float, default=None,
+                   help="Probe entropy loss weight (default: 0.0)")
     return p.parse_args()
 
 
@@ -894,6 +936,9 @@ def load_config(args: argparse.Namespace) -> dict:
         (("output_dir",), args.output_dir),
         (("data", "data_root"), args.data_root),
         (("loss", "prior_weight"), args.prior_weight),
+        (("loss", "div_weight"), args.div_weight),
+        (("loss", "cov_weight"), args.cov_weight),
+        (("loss", "ent_weight"), args.ent_weight),
     ]
     for keys, val in overrides:
         if val is not None:

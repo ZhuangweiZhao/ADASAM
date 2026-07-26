@@ -27,7 +27,7 @@ support memory, replacing the old DPG's N-query multi-proposal interface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 
 import torch
 import torch.nn as nn
@@ -79,6 +79,8 @@ class SPGOutput:
     semantic_prior: torch.Tensor
     prior_mask: torch.Tensor | None
     prior_aux: list[dict[str, torch.Tensor]]
+    probe_masks: torch.Tensor | None = field(default=None)
+    probe_logits: torch.Tensor | None = field(default=None)
 
 
 class _MLP(nn.Module):
@@ -270,12 +272,15 @@ class SemanticPriorGenerator(nn.Module):
         query_features: torch.Tensor,
         support_memory: torch.Tensor,
         dense_pe: torch.Tensor,
+        return_per_probe_masks: bool = False,
     ) -> SPGOutput:
         """前向传播: query_features + support_memory → semantic_prior + prior_mask.
 
         :param query_features: [1, C, gh, gw] CAT-adapted query features.
         :param support_memory: [M, C] support memory tokens (from SupportEncoder).
         :param dense_pe: [1, C, gh, gw] SAM positional encoding.
+        :param return_per_probe_masks: If True, include final-layer per-probe masks
+            and logits in SPGOutput.probe_masks / .probe_logits for diversity loss.
         :return: :class:`SPGOutput` with semantic_prior, prior_mask, prior_aux.
         """
         assert query_features.shape[0] == 1, \
@@ -353,8 +358,16 @@ class SemanticPriorGenerator(nn.Module):
         # prior_head directly projects to unified semantic prior.
         semantic_prior, prior_mask = self._project_semantic_prior(mask_features)
 
+        # Capture final-layer per-probe masks for diversity loss (if requested).
+        # After the loop exits, `masks` and `probe_logits` hold the result of
+        # the last _predict() call.
+        final_probe_masks = masks if return_per_probe_masks else None
+        final_probe_logits = probe_logits if return_per_probe_masks else None
+
         return SPGOutput(
             semantic_prior=semantic_prior,
             prior_mask=prior_mask,
             prior_aux=prior_aux,
+            probe_masks=final_probe_masks,
+            probe_logits=final_probe_logits,
         )

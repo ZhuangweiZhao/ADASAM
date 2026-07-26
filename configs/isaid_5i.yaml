@@ -53,10 +53,13 @@ prompt_fusion:
 decoder:
   train_mask_decoder: true
 
-# ── Loss: L = L_main + λ₁·L_prior + λ₂·L_reg ──
+# ── Loss: L = L_main + λ₁·L_prior + λ₂·L_reg + λ_div·L_div + λ_cov·L_cov + λ_ent·L_ent ──
 loss:
   prior_weight: 0.3          # λ₁ for L_prior (SPG prior deep supervision)
   reg_weight: 0.0            # λ₂ for L_reg (reserved)
+  div_weight: 0.0            # λ_div: probe spatial diversity (pairwise cosine penalty)
+  cov_weight: 0.0            # λ_cov: coverage safeguard (union mask vs GT BCE)
+  ent_weight: 0.0            # λ_ent: entropy safeguard (prevent probe death)
   focal_weight: 1.0
   dice_weight: 1.0
   focal_gamma: 5.0

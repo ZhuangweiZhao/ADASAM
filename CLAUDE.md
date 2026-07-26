@@ -30,6 +30,11 @@ python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 50 \
 python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 1 --steps 5 \
     --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt    # smoke
 
+# Stage 2 with probe diversity loss
+python tools/adasam/train_stage2.py --fold 0 --k-shot 5 --epochs 50 \
+    --stage1-ckpt runs/stage1_fold0_seed42/best_adapter.pt \
+    --div-weight 0.01 --cov-weight 0.005 --ent-weight 0.001
+
 # Evaluation (iSAID-5i, FSS Benchmark protocol)
 python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5               # single fold
 python tools/adasam/eval.py --checkpoint <ckpt> --k-shot 5 --all-folds   # 3-fold CV
