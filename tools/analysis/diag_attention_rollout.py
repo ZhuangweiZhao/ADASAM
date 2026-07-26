@@ -154,47 +154,44 @@ class AttentionRolloutCapture:
 
         Call BEFORE running the decoder forward.
         """
+        capture_self = self  # for closure access inside patched_forward
+
         md = self.model.sam_decoder.mask_decoder
         tr = md.transformer
 
         self._original_forwards = {}
         self._attn_weights = {}
 
-        def _patched_forward_factory(orig_forward, name):
-            def patched_forward(q, k, v):
-                # Run the original forward but capture attn internally
-                # Copy the Attention.forward logic
-                orig_q_proj = orig_forward.__self__.q_proj
-                orig_k_proj = orig_forward.__self__.k_proj
-                orig_v_proj = orig_forward.__self__.v_proj
-                orig_out = orig_forward.__self__.out_proj
-                num_heads = orig_forward.__self__.num_heads
-                internal_dim = orig_forward.__self__.internal_dim
+        def _make_patched_forward(attn_module, name):
+            # Capture module attributes once (faster than attribute lookup each call)
+            q_proj = attn_module.q_proj
+            k_proj = attn_module.k_proj
+            v_proj = attn_module.v_proj
+            out_proj = attn_module.out_proj
+            num_heads = attn_module.num_heads
+            internal_dim = attn_module.internal_dim
 
-                # Project
-                qp = orig_q_proj(q)
-                kp = orig_k_proj(k)
-                vp = orig_v_proj(v)
+            def patched_forward(self_, q, k, v):
+                qp = q_proj(q)
+                kp = k_proj(k)
+                vp = v_proj(v)
 
-                # Separate heads
                 B, Nq, _ = qp.shape
                 _, Nk, _ = kp.shape
                 qp = qp.reshape(B, Nq, num_heads, internal_dim // num_heads).transpose(1, 2)
                 kp = kp.reshape(B, Nk, num_heads, internal_dim // num_heads).transpose(1, 2)
                 vp = vp.reshape(B, Nk, num_heads, internal_dim // num_heads).transpose(1, 2)
 
-                # Attention
                 import math
                 attn = qp @ kp.transpose(-2, -1) / math.sqrt(internal_dim // num_heads)
                 attn_w = torch.softmax(attn, dim=-1)
 
-                # Save
-                self._attn_weights[name] = attn_w.detach().cpu()
+                # Save attention weights
+                capture_self._attn_weights[name] = attn_w.detach().cpu()
 
-                # Output
                 out = attn_w @ vp
                 out = out.transpose(1, 2).reshape(B, Nq, internal_dim)
-                out = orig_out(out)
+                out = out_proj(out)
                 return out
             return patched_forward
 
@@ -211,7 +208,8 @@ class AttentionRolloutCapture:
 
         for module, name in attn_modules:
             self._original_forwards[name] = module.forward
-            module.forward = _patched_forward_factory(module.forward, name).__get__(module)
+            patched = _make_patched_forward(module, name)
+            module.forward = patched.__get__(module, type(module))
 
     def restore(self):
         """Restore original forward methods."""
