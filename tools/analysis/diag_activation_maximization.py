@@ -76,9 +76,10 @@ class ActivationMaximizer:
     def __init__(self, ctx: DiagContext, query_emb, sup_feat, sup_mask, device):
         self.ctx = ctx
         self.model = ctx.model
-        self.query_emb = query_emb
-        self.sup_feat = sup_feat
-        self.sup_mask = sup_mask
+        # Detach to prevent backward-graph-reuse errors across optim steps
+        self.query_emb = query_emb.detach()
+        self.sup_feat = sup_feat.detach()
+        self.sup_mask = sup_mask.detach()
         self.device = device
 
         # Pre-compute support proto

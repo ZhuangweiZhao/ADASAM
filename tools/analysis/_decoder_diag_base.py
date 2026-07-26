@@ -123,6 +123,26 @@ def build_diag_context(
     backbone = MobileSAMBackbone(sam.image_encoder, sam.image_encoder.img_size).to(device)
 
     # ── Model ──
+    # Decoder selection: prefer SAM Decoder for interpretability experiments.
+    # If the checkpoint was trained with bypass_decoder=True, BypassMaskHead
+    # may be untrained (random init). Force SAM Decoder unless the checkpoint
+    # actually has trained bypass_head weights.
+    cfg_has_bypass = bool(cfg.get("ablation", {}).get("bypass_decoder", False))
+    has_bypass_weights = any("bypass_head" in k for k in ckpt.get("model", {}))
+    if cfg_has_bypass and not has_bypass_weights:
+        print("=" * 70)
+        print("  NOTE: Config has bypass_decoder=True but checkpoint has NO")
+        print("  bypass_head weights. Forcing SAM Decoder instead.")
+        print("=" * 70)
+        cfg.setdefault("ablation", {})["bypass_decoder"] = False
+    elif cfg_has_bypass:
+        print("=" * 70)
+        print("  NOTE: Config has bypass_decoder=True. Diagnostic tools work")
+        print("  best with the original SAM Decoder (TwoWayTransformer).")
+        print("  → Forcing SAM Decoder for this run.")
+        print("=" * 70)
+        cfg.setdefault("ablation", {})["bypass_decoder"] = False
+
     model_cfg = AdaSAMModelConfig.from_dict(cfg)
     model = AdaSAMModel(sam, model_cfg).to(device)
     model.load_state_dict(ckpt["model"], strict=False)
@@ -383,7 +403,7 @@ def save_results(
 
     p_path = out_dir / "per_tile.json"
     with open(p_path, "w") as f:
-        json.dump(per_tile, p_path, indent=2, ensure_ascii=False)
+        json.dump(per_tile, f, indent=2, ensure_ascii=False, default=str)
 
     return s_path, p_path
 

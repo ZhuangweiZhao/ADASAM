@@ -88,6 +88,10 @@ def compute_integrated_gradients(
     """
     model = ctx.model
     device = ctx.device
+    # Detach to prevent backward-graph-reuse errors across IG steps
+    query_emb = query_emb.detach()
+    sup_feat = sup_feat.detach()
+    sup_mask = sup_mask.detach()
     C = dense_prompt.shape[1]
     baseline = torch.zeros_like(dense_prompt)
 
