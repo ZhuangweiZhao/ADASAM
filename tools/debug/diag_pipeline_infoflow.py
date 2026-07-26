@@ -93,8 +93,7 @@ def node_analysis(x: torch.Tensor, name: str) -> dict:
     # Channel correlation (mean |off-diagonal|)
     # Sample 64 random channels for speed
     if C > 64:
-        rng = torch.Generator(device=x.device).manual_seed(42)
-        idx_sample = torch.randperm(C, generator=rng)[:64]
+        idx_sample = torch.randperm(C)[:64]
         flat_sample = flat[idx_sample]
     else:
         flat_sample = flat
