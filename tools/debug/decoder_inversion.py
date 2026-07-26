@@ -89,20 +89,31 @@ class PromptOptimizer:
         if model.geometric_prior is not None:
             self.geometric_prior = model.geometric_prior(query_emb, self.support_memory)
 
+        # Pre-compute support prototype once (frozen tensor)
+        self.support_proto = self.model._compute_support_prototype(
+            self.sup_feat, self.sup_mask
+        ) if self.model.bypass_head is None else None
+
+        # Disable category injection during optimization — its weight.data mutation
+        # breaks the autograd graph across backward() calls.
+        self._saved_cat_enabled = self.model.sam_decoder._category_enabled
+        self.model.sam_decoder._category_enabled = False
+
     def decode(self, prompt: torch.Tensor) -> torch.Tensor:
         """Decode prompt → logits at 256×256."""
         if self.model.bypass_head is not None:
             low_res = self.model.bypass_head(prompt)
         else:
             sparse_token = prompt.mean(dim=(2, 3))
-            support_proto = self.model._compute_support_prototype(
-                self.sup_feat, self.sup_mask
-            )
             low_res, _ = self.model.sam_decoder(
                 self.query_emb, sparse_token, prompt,
-                support_prototype=support_proto,
+                support_prototype=self.support_proto,
             )
         return low_res  # [1, 1, 256, 256]
+
+    def restore(self):
+        """Restore model state after optimization."""
+        self.model.sam_decoder._category_enabled = self._saved_cat_enabled
 
     def loss_fn(self, logits: torch.Tensor) -> tuple[torch.Tensor, dict]:
         """BCE + Dice loss."""
@@ -137,47 +148,50 @@ class PromptOptimizer:
         C = 256
         H, W = 64, 64
 
-        # ── Build actual dense_prompt for comparison ──
-        dense_pe = self.model.sam_decoder.prompt_encoder.get_dense_pe()
-        spg_out = self.model.spg(self.query_emb, self.support_memory, dense_pe)
-        semantic_prior = spg_out.semantic_prior
+        # ── Build actual dense_prompt for comparison (no grad tracking) ──
+        with torch.no_grad():
+            dense_pe = self.model.sam_decoder.prompt_encoder.get_dense_pe()
+            spg_out = self.model.spg(self.query_emb, self.support_memory, dense_pe)
+            semantic_prior = spg_out.semantic_prior
 
-        if self.model.prompt_fusion is not None and self.geometric_prior is not None:
-            actual_prompt, _ = self.model.prompt_fusion(
-                self.geometric_prior, semantic_prior
-            )
-        else:
-            actual_prompt = semantic_prior
+            if self.model.prompt_fusion is not None and self.geometric_prior is not None:
+                actual_prompt, _ = self.model.prompt_fusion(
+                    self.geometric_prior, semantic_prior
+                )
+            else:
+                actual_prompt = semantic_prior
 
-        actual_prompt = actual_prompt.detach().clone()
+            actual_prompt = actual_prompt.detach().clone()
 
-        # ── Initialize learnable prompt ──
+        # ── Initialize learnable prompt (fresh leaf tensor) ──
         if init_mode == "warm":
-            prompt = actual_prompt.clone().detach()
+            prompt = actual_prompt.clone()
         elif init_mode == "zero":
             prompt = torch.zeros(1, C, H, W, device=self.device)
         elif init_mode == "random":
             prompt = torch.randn(1, C, H, W, device=self.device) * 0.1
         elif init_mode == "noise":
-            # Actual prompt + Gaussian noise
-            prompt = actual_prompt.clone().detach()
+            prompt = actual_prompt.clone()
             prompt += torch.randn_like(prompt) * prompt.std() * 0.5
         else:
             raise ValueError(f"Unknown init_mode: {init_mode}")
 
-        prompt = prompt.detach().clone().requires_grad_(True)
+        prompt = prompt.detach().requires_grad_(True)
         optimizer = torch.optim.Adam([prompt], lr=lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, steps)
 
         trace = []
         for step in range(steps):
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             logits = self.decode(prompt)
             loss, metrics = self.loss_fn(logits)
             loss.backward()
             torch.nn.utils.clip_grad_norm_([prompt], 1.0)
             optimizer.step()
             scheduler.step()
+
+            # Clean up graph references to avoid accumulation issues
+            del logits
 
             if step % 20 == 0 or step == steps - 1:
                 trace.append({
@@ -360,6 +374,8 @@ def main():
                        help="init modes: warm, noise, random, zero")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--save-vis", action="store_true")
+    parser.add_argument("--force-bypass", action="store_true",
+                       help="Force use BypassMaskHead even if untrained (diagnostic only)")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -377,6 +393,32 @@ def main():
     sam = build_mobile_sam(str(bb_path), bb_cfg.get("model_type", "vit_t"), device)
     backbone = MobileSAMBackbone(sam.image_encoder, sam.image_encoder.img_size).to(device)
     embed_dim = int(cfg.get("support_encoder", {}).get("embed_dim", 256))
+
+    # ── Decoder selection logic ──
+    # Check if checkpoint was trained with BypassMaskHead
+    has_bypass_weights = any("bypass_head" in k for k in ckpt.get("model", {}))
+    cfg_has_bypass = bool(cfg.get("ablation", {}).get("bypass_decoder", False))
+
+    if has_bypass_weights and args.force_bypass:
+        print("[model] Using BypassMaskHead (--force-bypass, trained weights found)")
+    elif cfg_has_bypass and not has_bypass_weights:
+        # Config says bypass but checkpoint has no bypass weights → untrained!
+        print("=" * 70)
+        print("  WARNING: Config has bypass_decoder=True but checkpoint has NO")
+        print("  bypass_head weights. BypassMaskHead is UNTRAINED (random init).")
+        print("  Decoder inversion requires a TRAINED decoder to be meaningful.")
+        print("  → Forcing SAM Decoder instead (use --force-bypass to override).")
+        print("=" * 70)
+        cfg.setdefault("ablation", {})["bypass_decoder"] = False
+    elif cfg_has_bypass:
+        # Config says bypass but no --force-bypass → warn
+        print("=" * 70)
+        print("  NOTE: Config has bypass_decoder=True. Decoder inversion works")
+        print("  best with the original SAM Decoder (TwoWayTransformer).")
+        print("  → Using SAM Decoder (use --force-bypass for BypassMaskHead).")
+        print("=" * 70)
+        cfg.setdefault("ablation", {})["bypass_decoder"] = False
+
     model = AdaSAMModel(sam, AdaSAMModelConfig.from_dict(cfg)).to(device)
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval()

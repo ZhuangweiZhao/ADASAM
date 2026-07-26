@@ -68,6 +68,40 @@ python tools/debug/visualize_support_switch.py --checkpoint <ckpt> --mode novel 
 python tools/debug/localization_fidelity.py --checkpoint <ckpt> --mode novel --k-shot 5
 python tools/debug/localization_fidelity.py --checkpoint <ckpt> --mode novel --k-shot 5 --num-tiles 100 --save-vis
 
+# Decoder Inversion — 反向优化 Prompt, 发现 Decoder 真正偏好的表示
+# 修正: 确保使用 SAM Decoder (不 bypass)
+python tools/debug/decoder_inversion.py --checkpoint <ckpt> --mode novel --k-shot 5 --num-tiles 20 --optim-steps 200
+# 如果 checkpoint 的 YAML 有 bypass_decoder=true, 脚本会自动强制切回 SAM Decoder
+# 使用 --force-bypass 强制用 BypassMaskHead (需要 BypassMaskHead 已经训练好)
+
+# ═══ Decoder 可解释性实验套件 (v2 — 最后一轮诊断) ═══
+# 所有工具共享基础设施: tools/analysis/_decoder_diag_base.py
+
+# Integrated Gradients — 因果归因: 哪些 prompt channel 对 decoder 预测贡献最大?
+python tools/analysis/diag_integrated_gradients.py \
+    --stage2-ckpt runs/stage2_fold1_k5_seed42/best_model.pt \
+    --data-root data/iSAID-5i --fold 1 --mode novel --k-shot 5 \
+    --num-tiles 20 --ig-steps 50
+
+# Prompt PCA — Prompt 有效维度: 256 个 channel 中多少维真正被利用?
+python tools/analysis/diag_prompt_pca.py \
+    --stage2-ckpt runs/stage2_fold1_k5_seed42/best_model.pt \
+    --data-root data/iSAID-5i --fold 1 --mode novel --k-shot 5 \
+    --num-tiles 50 --pca-tiles 50
+
+# Activation Maximization — Decoder "喜欢"什么样的 prompt? (不匹配 GT)
+python tools/analysis/diag_activation_maximization.py \
+    --stage2-ckpt runs/stage2_fold1_k5_seed42/best_model.pt \
+    --data-root data/iSAID-5i --fold 1 --mode novel --k-shot 5 \
+    --num-tiles 20 --optim-steps 200
+
+# Attention Rollout — TwoWayTransformer 在关注哪些空间区域?
+# 仅支持 SAM Decoder (不支持 BypassMaskHead)
+python tools/analysis/diag_attention_rollout.py \
+    --stage2-ckpt runs/stage2_fold1_k5_seed42/best_model.pt \
+    --data-root data/iSAID-5i --fold 1 --mode novel --k-shot 5 \
+    --num-tiles 20
+
 # SAM-RSP 3-Stage Reproduction on iSAID-5i
 python tools/sam_rsp/prepare.py --data-root data/iSAID-5i
 python tools/sam_rsp/stage1_train.py --fold 0 --epochs 100
