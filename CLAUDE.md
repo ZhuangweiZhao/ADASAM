@@ -58,6 +58,11 @@ python tools/analysis/diag_promptfusion_layers.py --stage2-ckpt <ckpt> --data-ro
 python tools/analysis/diag_promptfusion_bottleneck.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
 python tools/analysis/diag_spg_probes.py --stage2-ckpt <ckpt> --data-root data/iSAID-5i
 
+# Support Sensitivity Test — 同一 Query 不同 Support 的预测对比
+# 判断模型是做 Class-Conditioned Segmentation 还是 Objectness Detection
+python tools/debug/visualize_support_switch.py --checkpoint <ckpt> --mode novel --k-shot 5
+python tools/debug/visualize_support_switch.py --checkpoint <ckpt> --mode novel --k-shot 5 --num-tiles 8  # more tiles
+
 # SAM-RSP 3-Stage Reproduction on iSAID-5i
 python tools/sam_rsp/prepare.py --data-root data/iSAID-5i
 python tools/sam_rsp/stage1_train.py --fold 0 --epochs 100
