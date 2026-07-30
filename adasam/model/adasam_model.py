@@ -56,6 +56,12 @@ class AdaSAMModelConfig:
     gate_sparsity_weight: float = 0.01  # λ for L1 sparsity on gate values
     gate_hard_threshold: float | None = None  # hard threshold at inference (None=soft)
 
+    # Prototype conditioning (Mask2Former-style test) — when enabled, prototypes
+    # will be used to generate FiLM parameters to modulate the query features
+    # instead of producing a dense latent prompt via SPG/PromptFusion.
+    proto_conditioning: bool = False
+    proto_film_hidden: int = 128
+
     @classmethod
     def from_dict(cls, cfg: dict) -> "AdaSAMModelConfig":
         """从完整 yaml 配置字典构建 | Build from the full yaml config dict."""
@@ -82,6 +88,8 @@ class AdaSAMModelConfig:
             gate_init=float(cg_cfg.get("init", 2.0)),
             gate_sparsity_weight=float(cg_cfg.get("sparsity_weight", 0.01)),
             gate_hard_threshold=cg_cfg.get("hard_threshold", None),
+            proto_conditioning=bool(abl_cfg.get("proto_conditioning", False)),
+            proto_film_hidden=int(abl_cfg.get("proto_film_hidden", 128)),
         )
 
 
@@ -116,6 +124,43 @@ class BypassMaskHead(nn.Module):
         x = self.head(dense_prompt)  # [1, 1, 64, 64]
         x = F.interpolate(x, size=(256, 256), mode="bilinear", align_corners=False)
         return x  # [1, 1, 256, 256]
+
+
+class PrototypeFiLM(nn.Module):
+    """Prototype → FiLM modulation.
+
+    Given a prototype vector (C,), produce per-channel scale and shift
+    parameters that modulate query features via FiLM: q' = q * (1 + scale) + shift.
+    This is a lightweight way to condition query features on support prototypes
+    in a Mask2Former-style prototype-conditioning experiment.
+    """
+
+    def __init__(self, embed_dim: int, hidden_dim: int = 128):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, embed_dim * 2),
+        )
+        # initialize last layer small to start near identity
+        nn.init.xavier_uniform_(self.mlp[-1].weight, gain=0.01)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, query_features: torch.Tensor, prototype: torch.Tensor) -> torch.Tensor:
+        """Modulate query_features with prototype.
+
+        :param query_features: [1, C, H, W]
+        :param prototype: [C] or [1, C]
+        :return: modulated_query_features [1, C, H, W]
+        """
+        B, C, H, W = query_features.shape
+        p = prototype.view(-1).to(query_features.dtype)
+        params = self.mlp(p)  # [2*C]
+        scale = params[:C].view(1, C, 1, 1)
+        shift = params[C:].view(1, C, 1, 1)
+        # apply FiLM: q * (1 + scale) + shift
+        return query_features * (1.0 + scale) + shift
 
 
 class AdaSAMModel(nn.Module):
@@ -178,6 +223,12 @@ class AdaSAMModel(nn.Module):
         if cfg.bypass_decoder:
             self.bypass_head = BypassMaskHead(in_dim=embed_dim)
             print("[model] BypassMaskHead enabled — SAM MaskDecoder replaced with Conv head")
+
+        # ── Prototype FiLM conditioning (optional) ──
+        self.prototype_film: PrototypeFiLM | None = None
+        if cfg.proto_conditioning:
+            self.prototype_film = PrototypeFiLM(embed_dim, hidden_dim=cfg.proto_film_hidden)
+            print("[model] PrototypeFiLM enabled — prototypes will modulate query features")
 
         # ── Channel Gate: per-channel learnable gating after PromptFusion ──
         self.channel_gate: ChannelGate | None = None
@@ -285,8 +336,29 @@ class AdaSAMModel(nn.Module):
 
         # ── Build dense_prompt + sparse_token ──
         # Two paths converge here: raw_cosine (ablation) or full SPG+GeoPrior+PromptFusion.
-        # Both produce (dense_prompt, sparse_token, spg_out) for a single decode step.
-        if self.cfg.raw_cosine_ablation:
+        # Additionally, a Prototype FiLM conditioning branch may be enabled which
+        # directly modulates query features using the support prototype.
+        if self.prototype_film is not None:
+            # Prototype FiLM branch: prototype modulates query features, and the
+            # prototype is used as a sparse token. SPG / PromptFusion are bypassed.
+            proto = (
+                self._compute_support_prototype(support_features, support_masks)
+                if support_features is not None and support_masks is not None
+                else support_memory.mean(dim=0)
+            )  # [C]
+            mod_query = self.prototype_film(query_features, proto)
+            tracer.section("AdaSAM.forward_train — PrototypeFiLM")
+            tracer.tensor("modulated_query_features", mod_query, spatial=True)
+
+            # Use prototype as sparse token; no dense prompt generated in this branch.
+            dense_prompt = None
+            sparse_token = proto.view(1, -1)
+            spg_out = SPGOutput(semantic_prior=None, prior_mask=None, prior_aux=[])
+
+            # swap in the modulated query features for downstream decoder
+            query_features = mod_query
+
+        elif self.cfg.raw_cosine_ablation:
             # ── Raw Cosine Ablation ──
             B, C, H, W = query_features.shape
             proto = support_memory.mean(dim=0)              # [C]

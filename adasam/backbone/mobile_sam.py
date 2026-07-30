@@ -234,12 +234,24 @@ class MultiScaleMobileSAMBackbone(nn.Module):
             p.requires_grad_(False)
         self.image_encoder.eval()
 
+    def unfreeze_last_stage(self) -> list[nn.Parameter]:
+        modules = [self.image_encoder.layers[-1], self.image_encoder.neck]
+        parameters = []
+        for module in modules:
+            module.train()
+            for parameter in module.parameters():
+                parameter.requires_grad_(True)
+                parameters.append(parameter)
+        return parameters
+
     def train(self, mode: bool = True) -> "MultiScaleMobileSAMBackbone":
-        super().train(False)
+        super().train(mode)
         self.image_encoder.eval()
+        if mode and any(p.requires_grad for p in self.image_encoder.layers[-1].parameters()):
+            self.image_encoder.layers[-1].train()
+            self.image_encoder.neck.train()
         return self
 
-    @torch.no_grad()
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
         """图像 → 多尺度特征 | Image → multi-scale features (any square input size)."""
         if image.ndim != 4 or image.shape[1] != 3:

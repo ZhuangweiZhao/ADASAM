@@ -1,0 +1,11 @@
+name: Local MCP
+version: 0.0.1
+schema: v1
+
+mcpServers:
+  - name: filesystem
+    command: npx.cmd
+    args:
+      - -y
+      - "@modelcontextprotocol/server-filesystem"
+      - "E:\\A_postgraduate_stude"

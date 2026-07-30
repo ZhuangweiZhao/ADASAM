@@ -1,0 +1,25 @@
+ID,Type,Description,Priority,Status,DefinitionOfDone
+L01,Literature,Prototype-based FSS 代表工作整理,P0,Partial,第一轮已形成 preliminary landscape；仍需补齐统一字段和来源，Prototype family 至少5篇
+L02,Literature,Multi-Prototype 等价性分析,P0,Partial,已完成 ASGNet/RPGM/TPSN/ProtoFormer 初步分析；仍需核对优化目标、训练信号和至少5篇完整来源
+L03,Literature,Memory-augmented FSS 等价性分析,P0,Partial,已完成 Memory 写入/读取/目标初步分析；需重点核对 MM-Net quality weighting 与未来 SIE 的功能边界
+L04,Literature,Support Representation Objective Analysis,P0,In Progress,统一比较 Prototype/ASGNet/MM-Net/Memory 的优化目标、训练信号和 Failure Addressed/Unaddressed
+L04,Literature,Set Transformer/Set representation 整理,P0,Todo,每篇完成统一字段；Set family 至少5篇
+L05,Literature,Retrieval/Matching-based FSS 整理,P1,Todo,每篇完成统一字段；Matching family 至少5篇
+B01,Baseline,Prototype representation 统一接口,P0,Todo,统一输入输出；参数统计；单元测试；同一配置可运行
+B02,Baseline,Multiple Prototype representation 统一接口,P0,Todo,统一输入输出；参数统计；单元测试；同一配置可运行
+B03,Baseline,Learnable Memory representation 统一接口,P0,Todo,统一输入输出；参数统计；单元测试；同一配置可运行
+B04,Baseline,Set Transformer representation 统一接口,P0,Todo,统一输入输出；参数统计；单元测试；同一配置可运行
+B05,Baseline,当前 AdaSAM SupportEncoder 接入,P1,Todo,统一输入输出；参数统计；单元测试；同一配置可运行
+P01,Protocol,Pattern Coverage Protocol,P0,Todo,模板完成；数据生成；可重复运行；至少一个可视化
+P02,Protocol,Duplicate Support Protocol,P0,Todo,模板完成；数据生成；可重复运行；至少一个可视化
+P03,Protocol,Support Noise Protocol,P0,Todo,模板完成；数据生成；可重复运行；至少一个可视化
+P04,Protocol,Query Shift Protocol,P0,Todo,模板完成；数据生成；可重复运行；至少一个可视化
+E01,Evidence,验证 Support information bottleneck 假设,P1,Todo,一次重复实验；分析一种替代解释；更新 Evidence Chain
+E02,Evidence,Pattern failure counterexamples,P1,Todo,一次重复实验；分析一种替代解释；更新 Evidence Chain
+E03,Evidence,Duplicate/Noise failure counterexamples,P1,Todo,一次重复实验；分析一种替代解释；更新 Evidence Chain
+G01,Gate,Literature Ready,P2,Todo,4-5 families；至少25篇结构化论文；Landscape 可绘制
+G02,Gate,Baseline Ready,P2,Todo,Prototype/Multi-Prototype/Memory/Set Transformer/AdaSAM 全部可训练可评测
+G03,Gate,Protocol Ready,P2,Todo,四个 Protocol 均有文档、生成脚本、重复运行和统一输出
+G04,Gate,Evidence Ready,P2,Todo,每个核心 Claim 均有 Literature、Counterexample、Controlled Experiment
+K01,Kill Gate,No common failure across representation families,P2,Todo,若 controlled protocols 未观察到跨多个 family 的共同缺陷，则终止 SIE 设计并重定位论文
+K02,Kill Gate,Novelty Collapse,P0,Open,若 proposed mechanism 与既有 prototype allocation/selection 或 quality-weighted prototype 在功能上等价，则终止 SIE 并重定位贡献

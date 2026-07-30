@@ -1,0 +1,38 @@
+# NEU_Seg Stage 1: limited-data domain adaptation.
+
+backbone:
+  model_type: vit_t
+  checkpoint: weights/mobile_sam.pt
+
+data:
+  data_root: data/NEU_Seg
+  num_classes: 4
+
+fewshot:
+  k_shot: 5
+
+adapter:
+  bottleneck: 64
+
+train:
+  epochs: 100
+  batch_size: 2
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  val_every: 1             # evaluate every epoch for best-checkpoint selection
+  val_samples: 120
+  device: cuda
+
+loss:
+  ce_weight: 1.0
+  dice_weight: 1.0
+
+domain_selection:
+  retrieval_weight: 0.4
+  correlation_margin_weight: 0.3
+  localization_recall_weight: 0.3
+  localization_topk: 20
+
+seed: 42
+output_dir: runs

@@ -1,0 +1,63 @@
+# NEU-SEG Binary CAT-SAM Configuration | 二值化 CAT-SAM 配置
+# ============================================================
+# MobileSAM (frozen) + CATAdapter + BinaryPromptGenerator + SAM Decoder
+# 二值缺陷分割 (BG vs Defect), 测试 CAT-SAM 管道上限.
+# Binary defect segmentation to measure CAT-SAM pipeline upper bound.
+
+# ── Backbone (MobileSAM, frozen) ──
+backbone:
+  model_type: vit_t              # TinyViT-5M
+  checkpoint: weights/mobile_sam.pt
+  image_size: 1024               # SAM 原生分辨率 | native resolution
+
+# ── Data ──
+data:
+  data_root: data/NEU_Seg
+  image_size: [200, 200]         # 原始图像尺寸 | original image size
+  train_split: train             # images/training/ + annotations/training/
+  val_split: test                # images/test/ + annotations/test/
+
+# ── Adapter ──
+adapter:
+  bottleneck: 64                 # CATAdapter bottleneck dim
+
+# ── Prompt Generator ──
+prompt:
+  bottleneck: 64                 # sparse_token MLP bottleneck
+
+# ── Decoder ──
+decoder:
+  train_mask_decoder: false      # 默认冻结 decoder | freeze decoder by default
+  category_injection: false      # 二值不需要 category injection | not needed for binary
+
+# ── Training ──
+train:
+  epochs: 200
+  batch_size: 4                  # encoder 批处理, decoder 逐样本 | batched encoder, per-sample decoder
+  steps_per_epoch: 200           # 每 epoch 随机采样步数 | random steps per epoch
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  val_every: 5                   # 每 N epoch 验证 | validate every N epochs
+  device: cuda
+
+# ── Loss ──
+loss:
+  bce_weight: 0.3                # BCE 权重 (数值稳定性 + 像素级精度)
+  focal_weight: 0.3              # Focal 权重 (类别不平衡)
+  dice_weight: 0.4               # Dice 权重 (全局形状匹配)
+  focal_gamma: 3.0               # Focal gamma (二值比多类低, FG/BG 1:20~1:100)
+  focal_eps: 1.0e-4
+
+# ── Augmentation ──
+augmentation:
+  enabled: true
+  p_flip: 0.5
+  p_rotate: 0.5
+  brightness: 0.2
+  contrast: 0.2
+  noise_std: 0.02
+
+# ── Reproducibility ──
+seed: 42
+output_dir: runs

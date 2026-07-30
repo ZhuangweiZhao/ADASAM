@@ -1,0 +1,20 @@
+# Full-supervision U-Net reference using the official NEU_Seg train/test split.
+model:
+  bilinear: true
+
+loss:
+  dice_weight: 1.0
+
+train:
+  data_root: data/NEU_Seg
+  output_dir: runs/neuseg_full_unet_seed42
+  epochs: 100
+  val_fraction: 0.1
+  early_stopping_patience: 20
+  batch_size: 16
+  lr: 1.0e-3
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  num_workers: 0
+  device: cuda
+  seed: 42
