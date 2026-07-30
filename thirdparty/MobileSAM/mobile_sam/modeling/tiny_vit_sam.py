@@ -8,14 +8,18 @@
 # --------------------------------------------------------
 
 import itertools
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath as TimmDropPath,\
-    to_2tuple, trunc_normal_
-from timm.models.registry import register_model
+from timm.layers import DropPath as TimmDropPath, to_2tuple, trunc_normal_
+from timm.models import register_model
 from typing import Tuple
+
+# MobileSAM registers vendored TinyViT variants that can already be present in
+# timm's global registry. The local definitions intentionally take precedence.
+warnings.filterwarnings("ignore", message=r"Overwriting .* in registry", category=UserWarning)
 
 
 class Conv2d_BN(torch.nn.Sequential):
