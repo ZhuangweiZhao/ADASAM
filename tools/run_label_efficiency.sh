@@ -11,17 +11,26 @@ SEED="${SEED:-42}"
 EPOCHS="${EPOCHS:-100}"
 EPISODES="${EPISODES:-100}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
-DATA_ROOT="${DATA_ROOT:-data/NEU_Seg}"
+DATA_ROOT="${DATA_ROOT:-/root/auto-tmp/NEU_Seg}"
 STAGE1_CKPT="${STAGE1_CKPT:-runs/neuseg_stage1_k5_seed42/best_adapter.pt}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/label_efficiency}"
 VAL_FRACTION="${VAL_FRACTION:-0.2}"
 KS="${KS:-5 10 20 50 100}"
 
 export CUDA_VISIBLE_DEVICES="${GPU}"
+# Some container images export an invalid OMP_NUM_THREADS string. OpenMP aborts
+# before Python starts in that case, so normalize it to a safe integer.
+if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && (( OMP_NUM_THREADS > 0 )); then
+  export OMP_NUM_THREADS
+else
+  export OMP_NUM_THREADS=1
+fi
 mkdir -p "${OUTPUT_ROOT}/manifests"
 
 echo "Repository: ${REPO_ROOT}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "DATA_ROOT=${DATA_ROOT}"
+echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
 echo "K values: ${KS}"
 
 for K in ${KS}; do
@@ -37,6 +46,7 @@ for K in ${KS}; do
   "${PYTHON_BIN}" tools/U-Net/train_low_data_neu_seg.py \
     --stage1-ckpt "${STAGE1_CKPT}" \
     --manifest "${MANIFEST}" \
+    --data-root "${DATA_ROOT}" \
     --config configs/neu_seg_unet.yaml \
     --epochs "${EPOCHS}" \
     --batch-size "${BATCH_SIZE}" \
@@ -49,6 +59,7 @@ for K in ${KS}; do
   "${PYTHON_BIN}" tools/neuseg/train_stage2.py \
     --stage1-ckpt "${STAGE1_CKPT}" \
     --manifest "${MANIFEST}" \
+    --data-root "${DATA_ROOT}" \
     --config configs/neu_seg_stage2.yaml \
     --epochs "${EPOCHS}" \
     --episodes "${EPISODES}" \
@@ -61,6 +72,7 @@ done
 echo "=== Full-supervision U-Net ==="
 "${PYTHON_BIN}" tools/U-Net/train_neu_seg.py \
   --config configs/neu_seg_unet.yaml \
+  --data-root "${DATA_ROOT}" \
   --epochs "${EPOCHS}" \
   --batch-size "${BATCH_SIZE}" \
   --seed "${SEED}" \
