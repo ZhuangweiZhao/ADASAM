@@ -11,7 +11,7 @@ SEED="${SEED:-42}"
 EPOCHS="${EPOCHS:-100}"
 EPISODES="${EPISODES:-100}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
-DATA_ROOT="${DATA_ROOT:-/root/auto-tmp/NEU_Seg}"
+DATA_ROOT="${DATA_ROOT:-/root/autodl-tmp/NEU_Seg}"
 STAGE1_CKPT="${STAGE1_CKPT:-runs/neuseg_stage1_k5_seed42/best_adapter.pt}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/label_efficiency}"
 VAL_FRACTION="${VAL_FRACTION:-0.2}"
@@ -24,6 +24,23 @@ if [[ "${OMP_NUM_THREADS:-}" =~ ^[0-9]+$ ]] && (( OMP_NUM_THREADS > 0 )); then
   export OMP_NUM_THREADS
 else
   export OMP_NUM_THREADS=1
+fi
+
+# Auto-detect an extra extraction level, e.g. /root/auto-tmp/NEU_Seg/NEU_Seg.
+if [[ ! -d "${DATA_ROOT}/images/training" || ! -d "${DATA_ROOT}/annotations/training" ]]; then
+  SEARCH_ROOT="${DATA_SEARCH_ROOT:-/root/autodl-tmp}"
+  DETECTED_IMAGE_DIR="$(find "${SEARCH_ROOT}" -type d -path '*/images/training' -print -quit 2>/dev/null || true)"
+  if [[ -n "${DETECTED_IMAGE_DIR}" ]]; then
+    DETECTED_ROOT="$(dirname "$(dirname "${DETECTED_IMAGE_DIR}")")"
+    if [[ -d "${DETECTED_ROOT}/annotations/training" ]]; then
+      DATA_ROOT="${DETECTED_ROOT}"
+    fi
+  fi
+fi
+if [[ ! -d "${DATA_ROOT}/images/training" || ! -d "${DATA_ROOT}/annotations/training" ]]; then
+  echo "ERROR: NEU_Seg root not found. Expected images/training and annotations/training under: ${DATA_ROOT}" >&2
+  echo "Set DATA_ROOT=/actual/path/to/NEU_Seg and rerun." >&2
+  exit 2
 fi
 mkdir -p "${OUTPUT_ROOT}/manifests"
 
