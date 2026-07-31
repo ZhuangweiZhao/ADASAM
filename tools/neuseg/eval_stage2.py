@@ -71,7 +71,7 @@ def main() -> None:
     missing, unexpected = trainer.model.load_state_dict(checkpoint["model"], strict=False)
     if missing or unexpected:
         raise RuntimeError(f"checkpoint mismatch: missing={missing}, unexpected={unexpected}")
-    metrics = trainer.validate()
+    metrics = trainer.validate(use_all_support=True)
     output = Path(cli.output) if cli.output else checkpoint_path.parent / "evaluation.json"
     output.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(json.dumps(metrics, indent=2))

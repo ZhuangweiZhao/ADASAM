@@ -87,8 +87,9 @@ def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -
             inter[class_id] += (pred_class & target_class).sum().item()
             union[class_id] += (pred_class | target_class).sum().item()
     ious = [float(inter[c] / union[c]) if union[c] else None for c in range(4)]
+    foreground_ious = [iou for iou in ious[1:] if iou is not None]
     return {
-        "mIoU_fg": sum(ious[1:]) / 3,
+        "mIoU_fg": sum(foreground_ious) / max(len(foreground_ious), 1),
         "per_class_iou": dict(zip(NEUSegDataset.CLASS_NAMES, ious)),
         "n_samples": len(loader.dataset),
     }

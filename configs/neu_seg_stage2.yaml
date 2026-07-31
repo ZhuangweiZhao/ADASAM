@@ -45,7 +45,8 @@ train:
   backbone_lr: 5.0e-6
   unfreeze_after: 70
   val_every: 1             # evaluate every epoch for best-checkpoint selection
-  val_samples: 120
+  support_val_fraction: 0.2
+  val_samples: 0           # validation is the held-out K-shot support pool
   device: cuda
 
 eval:

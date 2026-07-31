@@ -66,13 +66,19 @@ class Stage2Trainer:
         self.device = torch.device(requested if torch.cuda.is_available() else "cpu")
         self.stage1_path = resolve_path(args.stage1_ckpt)
         self.stage1 = load_stage1(self.stage1_path, self.device)
-        self.manifest = self.stage1["kshot_manifest"]
+        manifest_override = cfg.get("fewshot", {}).get("manifest")
+        self.manifest = (
+            json.loads(Path(manifest_override).read_text(encoding="utf-8"))
+            if manifest_override
+            else self.stage1["kshot_manifest"]
+        )
         self.k_shot = int(self.manifest["k_shot"])
 
         data_root = resolve_path(cfg["data"]["data_root"])
         self.train_ds = NEUSegDataset(data_root, split="train")
         self.val_ds = NEUSegDataset(data_root, split="test")
         self.selected_indices = manifest_indices(self.train_ds, self.manifest)
+        self.train_support_indices, self.validation_indices = self._split_support_pool()
         self.class_indices = self._class_indices()
         requested_support = int(cfg["fewshot"].get("support_shot", 1))
         self.support_shot = min(requested_support, self.k_shot)
@@ -126,9 +132,28 @@ class Stage2Trainer:
         )
         print(f"[NEU Query Stage2] output={self.out_dir}")
 
+    def _split_support_pool(self) -> tuple[list[int], list[int]]:
+        fraction = float(self.cfg.get("train", {}).get("support_val_fraction", 0.2))
+        rng = random.Random(self.seed)
+        candidates = list(dict.fromkeys(self.selected_indices))
+        rng.shuffle(candidates)
+        val_count = 0 if len(candidates) <= 1 else max(1, round(len(candidates) * fraction))
+        validation_indices = candidates[:val_count]
+        train_indices = candidates[val_count:]
+        for class_id in FOREGROUND_CLASSES:
+            if not any((self.train_ds[idx]["masks"] == class_id).any() for idx in train_indices):
+                replacement = next(
+                    (idx for idx in validation_indices if (self.train_ds[idx]["masks"] == class_id).any()),
+                    None,
+                )
+                if replacement is not None:
+                    validation_indices.remove(replacement)
+                    train_indices.append(replacement)
+        return train_indices, validation_indices
+
     def _class_indices(self) -> dict[int, list[int]]:
         result = {class_id: [] for class_id in FOREGROUND_CLASSES}
-        for idx in self.selected_indices:
+        for idx in self.train_support_indices:
             labels = torch.unique(self.train_ds[idx]["masks"])
             for class_id in FOREGROUND_CLASSES:
                 if (labels == class_id).any():
@@ -251,49 +276,29 @@ class Stage2Trainer:
         return {key: float(value.detach()) for key, value in losses.items()}
 
     @torch.no_grad()
-    def support_cache(self) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+    def support_cache(self, use_all_support: bool = False) -> dict[int, tuple[torch.Tensor, torch.Tensor]]:
+        source_indices = self.selected_indices if use_all_support else self.train_support_indices
         return {
-            class_id: self._support(indices, class_id, augment=False)
+            class_id: self._support(
+                [idx for idx in source_indices if idx in self.class_indices[class_id] or use_all_support],
+                class_id,
+                augment=False,
+            )
             for class_id, indices in self.class_indices.items()
         }
 
     @torch.no_grad()
-    def validate(self) -> dict:
+    def validate(self, use_all_support: bool = False) -> dict:
         self.model.eval()
-        supports = self.support_cache()
+        supports = self.support_cache(use_all_support=use_all_support)
         cached_predictions: list[tuple[torch.Tensor, torch.Tensor]] = []
-        if self.val_samples >= len(self.val_ds):
+        if use_all_support:
             val_indices = list(range(len(self.val_ds)))
         else:
-            pools = {
-                class_id: [
-                    i for i in range(len(self.val_ds))
-                    if (self.val_ds[i]["masks"] == class_id).any()
-                ]
-                for class_id in FOREGROUND_CLASSES
-            }
-            val_indices, selected = [], set()
-            cursor = {class_id: 0 for class_id in FOREGROUND_CLASSES}
-            while len(val_indices) < min(self.val_samples, len(self.val_ds)):
-                added = False
-                for class_id in FOREGROUND_CLASSES:
-                    pool = pools[class_id]
-                    while cursor[class_id] < len(pool) and pool[cursor[class_id]] in selected:
-                        cursor[class_id] += 1
-                    if cursor[class_id] < len(pool):
-                        idx = pool[cursor[class_id]]
-                        cursor[class_id] += 1
-                        selected.add(idx)
-                        val_indices.append(idx)
-                        added = True
-                        if len(val_indices) >= self.val_samples:
-                            break
-                if not added:
-                    remaining = [i for i in range(len(self.val_ds)) if i not in selected]
-                    val_indices.extend(remaining[: self.val_samples - len(val_indices)])
-                    break
+            val_indices = list(dict.fromkeys(self.validation_indices))
+        query_dataset = self.val_ds if use_all_support else self.train_ds
         for idx in tqdm(val_indices, desc="validate", leave=False):
-            sample = self.val_ds[idx]
+            sample = query_dataset[idx]
             query_features, _ = self._embed(sample["image"])
             class_probabilities = []
             for class_id in FOREGROUND_CLASSES:
@@ -339,6 +344,7 @@ class Stage2Trainer:
             "mIoU_fg": sum(foreground) / max(len(foreground), 1),
             "per_class_iou": {self.val_ds.CLASS_NAMES[c]: ious[c] for c in range(4)},
             "n_samples": len(val_indices),
+            "support_mode": "all_k" if use_all_support else "train_pool",
             "class_thresholds": {
                 self.val_ds.CLASS_NAMES[class_id]: self.class_thresholds[class_id - 1]
                 for class_id in FOREGROUND_CLASSES
@@ -354,6 +360,10 @@ class Stage2Trainer:
                 "adapter": self.adapter.state_dict(),
                 "config": self.cfg,
                 "kshot_manifest": self.manifest,
+                "support_pool_split": {
+                    "train_support_ids": [self.train_ds.sample_names[i] for i in self.train_support_indices],
+                    "validation_query_ids": [self.train_ds.sample_names[i] for i in self.validation_indices],
+                },
                 "stage1_checkpoint": str(self.stage1_path),
                 "metrics": metrics,
                 "class_thresholds": self.class_thresholds,
@@ -402,6 +412,15 @@ class Stage2Trainer:
             with (self.out_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record) + "\n")
         self.save(self.out_dir / "last_model.pt", self.epochs, {"train": means})
+        best_checkpoint = torch.load(best_path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(best_checkpoint["model"])
+        self.class_thresholds = list(best_checkpoint.get("class_thresholds", []))
+        self.calibrate_thresholds = False
+        test_metrics = self.validate(use_all_support=True)
+        (self.out_dir / "test_evaluation.json").write_text(
+            json.dumps(test_metrics, indent=2), encoding="utf-8"
+        )
+        print(f"[NEU Query Stage2] test mIoU_fg={test_metrics['mIoU_fg']:.4f}")
         return best_path
 
 
@@ -418,6 +437,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root")
     parser.add_argument("--output-dir")
     parser.add_argument("--val-samples", type=int)
+    parser.add_argument("--manifest", help="Override K-shot manifest JSON")
     return parser.parse_args()
 
 
@@ -433,6 +453,7 @@ def load_config(args: argparse.Namespace) -> dict:
         (("data", "data_root"), args.data_root),
         (("seed",), args.seed),
         (("output_dir",), args.output_dir),
+        (("fewshot", "manifest"), args.manifest),
     ]
     for keys, value in overrides:
         if value is None:
