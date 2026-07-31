@@ -10,7 +10,8 @@ GPU="${GPU:-0}"
 SEED="${SEED:-42}"
 EPOCHS="${EPOCHS:-100}"
 EPISODES="${EPISODES:-100}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
+LOW_BATCH_SIZE="${LOW_BATCH_SIZE:-4}"
+FULL_BATCH_SIZE="${FULL_BATCH_SIZE:-16}"
 DATA_ROOT="${DATA_ROOT:-/root/autodl-tmp/NEU_Seg}"
 STAGE1_CKPT="${STAGE1_CKPT:-runs/neuseg_stage1_k5_seed42/best_adapter.pt}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/label_efficiency}"
@@ -44,10 +45,24 @@ if [[ ! -d "${DATA_ROOT}/images/training" || ! -d "${DATA_ROOT}/annotations/trai
 fi
 mkdir -p "${OUTPUT_ROOT}/manifests"
 
+# Stage1 is commonly stored under OUTPUT_ROOT on cloud machines. Resolve it
+# automatically when the repository-relative default is unavailable.
+if [[ ! -f "${STAGE1_CKPT}" ]]; then
+  CANDIDATE="$(find "${OUTPUT_ROOT}" -type f -name 'best_adapter.pt' -print -quit 2>/dev/null || true)"
+  if [[ -n "${CANDIDATE}" ]]; then
+    STAGE1_CKPT="${CANDIDATE}"
+  else
+    echo "ERROR: Stage1 checkpoint not found: ${STAGE1_CKPT}" >&2
+    echo "Set STAGE1_CKPT=/path/to/best_adapter.pt and rerun." >&2
+    exit 2
+  fi
+fi
+
 echo "Repository: ${REPO_ROOT}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "DATA_ROOT=${DATA_ROOT}"
 echo "OUTPUT_ROOT=${OUTPUT_ROOT}"
+echo "STAGE1_CKPT=${STAGE1_CKPT}"
 echo "K values: ${KS}"
 
 for K in ${KS}; do
@@ -66,7 +81,7 @@ for K in ${KS}; do
     --data-root "${DATA_ROOT}" \
     --config configs/neu_seg_unet.yaml \
     --epochs "${EPOCHS}" \
-    --batch-size "${BATCH_SIZE}" \
+    --batch-size "${LOW_BATCH_SIZE}" \
     --val-fraction "${VAL_FRACTION}" \
     --seed "${SEED}" \
     --device cuda \
@@ -91,7 +106,7 @@ echo "=== Full-supervision U-Net ==="
   --config configs/neu_seg_unet.yaml \
   --data-root "${DATA_ROOT}" \
   --epochs "${EPOCHS}" \
-  --batch-size "${BATCH_SIZE}" \
+  --batch-size "${FULL_BATCH_SIZE}" \
   --seed "${SEED}" \
   --device cuda \
   --output-dir "${OUTPUT_ROOT}/unet_full_seed${SEED}"

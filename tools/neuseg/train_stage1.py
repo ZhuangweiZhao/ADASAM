@@ -51,6 +51,38 @@ def multiclass_dice_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Te
     return (1.0 - (2.0 * inter + 1e-6) / (denom + 1e-6)).mean()
 
 
+def hard_negative_correlation_loss(
+    features: torch.Tensor,
+    targets: torch.Tensor,
+    margin: float = 0.1,
+    negative_ratio: float = 1.0,
+) -> torch.Tensor:
+    """Separate foreground correlations from the hardest background pixels."""
+    resized_targets = F.interpolate(
+        targets[:, None].float(), size=features.shape[-2:], mode="nearest"
+    )[:, 0].long()
+    normalized_features = F.normalize(features, dim=1)
+    losses = []
+    for batch_index in range(features.shape[0]):
+        feature = features[batch_index]
+        normalized = normalized_features[batch_index]
+        labels = resized_targets[batch_index]
+        for class_id in (1, 2, 3):
+            positive_mask = labels == class_id
+            negative_mask = labels != class_id
+            positive_count = int(positive_mask.sum().item())
+            negative_count = int(negative_mask.sum().item())
+            if positive_count == 0 or negative_count == 0:
+                continue
+            prototype = F.normalize(feature[:, positive_mask].mean(dim=1), dim=0)
+            correlation = torch.einsum("chw,c->hw", normalized, prototype)
+            positive = correlation[positive_mask].mean()
+            hard_k = max(1, min(negative_count, round(positive_count * negative_ratio)))
+            hard_negative = correlation[negative_mask].topk(hard_k).values.mean()
+            losses.append(F.relu(features.new_tensor(margin) - (positive - hard_negative)))
+    return torch.stack(losses).mean() if losses else features.sum() * 0.0
+
+
 def select_k_shot(dataset: NEUSegDataset, k_shot: int, seed: int) -> list[int]:
     """Select a deterministic union containing at least K images per FG class."""
     if k_shot < 1:
@@ -124,6 +156,15 @@ class Trainer:
         self.grad_clip = float(tcfg.get("grad_clip", 1.0))
         self.ce_weight = float(cfg.get("loss", {}).get("ce_weight", 1.0))
         self.dice_weight = float(cfg.get("loss", {}).get("dice_weight", 1.0))
+        self.correlation_loss_weight = float(
+            cfg.get("loss", {}).get("correlation_margin_weight", 0.2)
+        )
+        self.correlation_loss_margin = float(
+            cfg.get("loss", {}).get("correlation_margin", 0.1)
+        )
+        self.hard_negative_ratio = float(
+            cfg.get("loss", {}).get("hard_negative_ratio", 1.0)
+        )
         selection_cfg = cfg.get("domain_selection", {})
         self.retrieval_weight = float(selection_cfg.get("retrieval_weight", 0.4))
         self.correlation_margin_weight = float(
@@ -133,6 +174,7 @@ class Trainer:
             selection_cfg.get("localization_recall_weight", 0.3)
         )
         self.localization_topk = int(selection_cfg.get("localization_topk", 20))
+        self.checkpoint_every = int(tcfg.get("checkpoint_every", 10))
 
         output_root = Path(cfg.get("output_dir", "runs"))
         if not output_root.is_absolute():
@@ -262,13 +304,17 @@ class Trainer:
 
     def train(self) -> Path:
         rng = random.Random(self.seed)
-        best_score = -1.0
+        best_selection = (-1.0, float("-inf"))
+        best_domain_score = -1.0
+        best_margin = float("-inf")
         best_path = self.out_dir / "best_adapter.pt"
+        metrics_path = self.out_dir / "metrics.jsonl"
+        metrics_path.write_text("", encoding="utf-8")
         params = list(self.adapter.parameters()) + list(self.seg_head.parameters())
         for epoch in range(1, self.epochs + 1):
             order = self.train_indices.copy()
             rng.shuffle(order)
-            losses = []
+            losses, correlation_losses = [], []
             self.adapter.train()
             self.seg_head.train()
             batches = [order[i : i + self.batch_size] for i in range(0, len(order), self.batch_size)]
@@ -278,36 +324,71 @@ class Trainer:
                 images, targets = self._batch(batch_indices)
                 with torch.no_grad():
                     embedding = self.backbone(images)["image_embedding"]
-                logits = self.seg_head(self.adapter(embedding), tuple(targets.shape[-2:]))
+                features = self.adapter(embedding)
+                logits = self.seg_head(features, tuple(targets.shape[-2:]))
                 ce = F.cross_entropy(logits, targets)
                 dice = multiclass_dice_loss(logits, targets)
-                loss = self.ce_weight * ce + self.dice_weight * dice
+                correlation_loss = hard_negative_correlation_loss(
+                    features,
+                    targets,
+                    margin=self.correlation_loss_margin,
+                    negative_ratio=self.hard_negative_ratio,
+                )
+                loss = (
+                    self.ce_weight * ce
+                    + self.dice_weight * dice
+                    + self.correlation_loss_weight * correlation_loss
+                )
                 self.optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(params, self.grad_clip)
                 self.optimizer.step()
                 losses.append(float(loss.item()))
+                correlation_losses.append(float(correlation_loss.item()))
             self.scheduler.step()
             avg_loss = sum(losses) / max(len(losses), 1)
+            avg_correlation_loss = sum(correlation_losses) / max(len(correlation_losses), 1)
             should_validate = self.val_every > 0 and (
                 epoch % self.val_every == 0 or epoch == self.epochs
             )
             if should_validate:
                 metrics = self.validate_domain_adaptation()
                 score = metrics["domain_score"]
+                localization = metrics[f"localization_recall_at_{self.localization_topk}"]
+                margin = metrics["correlation_margin"]
+                checkpoint_metrics = {
+                    **metrics,
+                    "train_loss": avg_loss,
+                    "train_correlation_loss": avg_correlation_loss,
+                }
                 print(
                     f"[NEU Stage1] epoch={epoch} loss={avg_loss:.4f} "
+                    f"corr_loss={avg_correlation_loss:.4f} "
                     f"domain_score={score:.4f} "
                     f"retrieval@1={metrics['prototype_retrieval_at_1']:.4f} "
                     f"corr_margin={metrics['correlation_margin']:.4f} "
                     f"loc_recall@{self.localization_topk}="
                     f"{metrics[f'localization_recall_at_{self.localization_topk}']:.4f}"
                 )
-                if score > best_score:
-                    best_score = score
-                    self.save(best_path, epoch, {**metrics, "train_loss": avg_loss})
+                with metrics_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({"epoch": epoch, **checkpoint_metrics}) + "\n")
+                selection = (localization, margin)
+                if selection > best_selection:
+                    best_selection = selection
+                    self.save(best_path, epoch, checkpoint_metrics)
+                if score > best_domain_score:
+                    best_domain_score = score
+                    self.save(self.out_dir / "best_domain_adapter.pt", epoch, checkpoint_metrics)
+                if margin > best_margin:
+                    best_margin = margin
+                    self.save(self.out_dir / "best_margin_adapter.pt", epoch, checkpoint_metrics)
+                if self.checkpoint_every > 0 and epoch % self.checkpoint_every == 0:
+                    self.save(self.out_dir / f"adapter_epoch_{epoch:03d}.pt", epoch, checkpoint_metrics)
             else:
-                print(f"[NEU Stage1] epoch={epoch} loss={avg_loss:.4f}")
+                print(
+                    f"[NEU Stage1] epoch={epoch} loss={avg_loss:.4f} "
+                    f"corr_loss={avg_correlation_loss:.4f}"
+                )
                 if avg_loss < 0 or not best_path.exists():
                     self.save(best_path, epoch, {"train_loss": avg_loss})
         self.save(self.out_dir / "last_adapter.pt", self.epochs, {"train_loss": avg_loss})

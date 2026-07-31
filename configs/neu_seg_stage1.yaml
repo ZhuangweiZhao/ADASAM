@@ -21,18 +21,24 @@ train:
   weight_decay: 1.0e-4
   grad_clip: 1.0
   val_every: 1             # evaluate every epoch for best-checkpoint selection
+  checkpoint_every: 10     # retain candidates for Stage2 correlation analysis
   val_samples: 120
   device: cuda
 
 loss:
   ce_weight: 1.0
   dice_weight: 1.0
+  correlation_margin_weight: 0.2
+  correlation_margin: 0.1
+  hard_negative_ratio: 1.0
 
 domain_selection:
   retrieval_weight: 0.4
   correlation_margin_weight: 0.3
   localization_recall_weight: 0.3
   localization_topk: 20
+  # best_adapter.pt uses localization recall first and correlation margin as
+  # the tie-breaker; best_domain_adapter.pt and best_margin_adapter.pt are kept.
 
 seed: 42
 output_dir: runs

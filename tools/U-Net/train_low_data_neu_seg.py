@@ -25,6 +25,7 @@ from train_neu_seg import (  # noqa: E402
     UNet,
     dice_loss,
     evaluate,
+    focal_tversky_loss,
 )
 from adasam.datasets import NEUSegDataset  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
@@ -103,9 +104,16 @@ def main() -> None:
     train_indices, val_indices = stratified_support_split(
         full_train, support_indices, float(train_cfg.get("val_fraction", 0.2)), int(train_cfg["seed"])
     )
-    train_ds = AugmentedDataset(Subset(full_train, train_indices), int(train_cfg["seed"]))
+    batch_size = int(train_cfg["batch_size"])
+    epoch_batches = int(train_cfg.get("low_data_epoch_batches", 100))
+    train_ds = AugmentedDataset(
+        Subset(full_train, train_indices),
+        int(train_cfg["seed"]),
+        epoch_samples=epoch_batches * batch_size,
+        copy_paste_prob=float(train_cfg.get("copy_paste_prob", 0.5)),
+    )
     val_ds = Subset(full_train, val_indices)
-    loader_kwargs = {"batch_size": int(train_cfg["batch_size"]), "num_workers": int(train_cfg.get("num_workers", 0)), "pin_memory": device.type == "cuda"}
+    loader_kwargs = {"batch_size": batch_size, "num_workers": int(train_cfg.get("num_workers", 0)), "pin_memory": device.type == "cuda"}
     train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
     test_loader = DataLoader(test_ds, shuffle=False, **loader_kwargs)
@@ -125,7 +133,19 @@ def main() -> None:
         for batch in tqdm(train_loader, desc=f"epoch {epoch}/{train_cfg['epochs']}"):
             image, target = batch["image"].to(device), batch["masks"].squeeze(1).to(device)
             logits = model(image)
-            loss = F.cross_entropy(logits, target) + float(cfg["loss"].get("dice_weight", 1.0)) * dice_loss(logits, target, 4)
+            class_weights = logits.new_tensor(cfg["loss"].get("class_weights", [0.2, 1.5, 1.0, 1.15]))
+            loss = (
+                F.cross_entropy(logits, target, weight=class_weights)
+                + float(cfg["loss"].get("dice_weight", 1.0)) * dice_loss(logits, target, 4)
+                + float(cfg["loss"].get("focal_tversky_weight", 1.0))
+                * focal_tversky_loss(
+                    logits,
+                    target,
+                    alpha=float(cfg["loss"].get("tversky_alpha", 0.3)),
+                    beta=float(cfg["loss"].get("tversky_beta", 0.7)),
+                    gamma=float(cfg["loss"].get("tversky_gamma", 1.33)),
+                )
+            )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(train_cfg.get("grad_clip", 1.0)))

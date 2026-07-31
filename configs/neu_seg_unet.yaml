@@ -4,6 +4,11 @@ model:
 
 loss:
   dice_weight: 1.0
+  focal_tversky_weight: 1.0
+  tversky_alpha: 0.3
+  tversky_beta: 0.7
+  tversky_gamma: 1.33
+  class_weights: [0.2, 1.5, 1.0, 1.15]
 
 train:
   data_root: data/NEU_Seg
@@ -12,6 +17,8 @@ train:
   val_fraction: 0.1
   early_stopping_patience: 20
   batch_size: 16
+  low_data_epoch_batches: 100
+  copy_paste_prob: 0.5
   lr: 1.0e-3
   weight_decay: 1.0e-5
   grad_clip: 1.0

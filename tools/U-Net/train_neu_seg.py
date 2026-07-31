@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -28,20 +29,71 @@ from unet import UNet  # noqa: E402
 
 
 class AugmentedDataset(Dataset):
-    def __init__(self, dataset: Dataset, seed: int) -> None:
+    """Dynamic augmentation aligned with the Stage2 episode pipeline."""
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        seed: int,
+        epoch_samples: int | None = None,
+        copy_paste_prob: float = 0.5,
+    ) -> None:
         self.dataset = dataset
         self.rng = random.Random(seed)
+        self.epoch_samples = epoch_samples
+        self.copy_paste_prob = copy_paste_prob
 
     def __len__(self) -> int:
-        return len(self.dataset)
+        return self.epoch_samples or len(self.dataset)
+
+    def _copy_paste(
+        self, image: torch.Tensor, mask: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if len(self.dataset) < 2 or self.rng.random() >= self.copy_paste_prob:
+            return image, mask
+        donor = self.dataset[self.rng.randrange(len(self.dataset))]
+        donor_mask = donor["masks"]
+        labels = [int(v) for v in torch.unique(donor_mask) if int(v) > 0]
+        if not labels or donor["image"].shape[-2:] != image.shape[-2:]:
+            return image, mask
+        class_id = self.rng.choice(labels)
+        region = donor_mask.squeeze(0) == class_id
+        image = image.clone()
+        mask = mask.clone()
+        image[:, region] = donor["image"][:, region]
+        mask[:, region] = class_id
+        return image, mask
 
     def __getitem__(self, index: int) -> dict:
-        sample = self.dataset[index]
+        sample = self.dataset[index % len(self.dataset)]
         image, mask = sample["image"], sample["masks"]
+        image, mask = self._copy_paste(image, mask)
         if self.rng.random() < 0.5:
             image, mask = image.flip(-1), mask.flip(-1)
         if self.rng.random() < 0.5:
             image, mask = image.flip(-2), mask.flip(-2)
+        angle = self.rng.uniform(-12.0, 12.0) * math.pi / 180.0
+        scale = self.rng.uniform(0.75, 1.25)
+        theta = image.new_tensor(
+            [[scale * math.cos(angle), -scale * math.sin(angle), 0.0],
+             [scale * math.sin(angle), scale * math.cos(angle), 0.0]]
+        )[None]
+        grid = F.affine_grid(theta, (1, *image.shape), align_corners=False)
+        image = F.grid_sample(
+            image[None], grid, mode="bilinear", padding_mode="reflection", align_corners=False
+        )[0]
+        mask = F.grid_sample(
+            mask[None].float(), grid, mode="nearest", padding_mode="zeros", align_corners=False
+        )[0].to(mask.dtype)
+        brightness = self.rng.uniform(0.8, 1.2)
+        contrast = self.rng.uniform(0.8, 1.2)
+        mean = image.mean(dim=(-2, -1), keepdim=True)
+        image = ((image - mean) * contrast + mean) * brightness
+        image = image.clamp(0.0, 1.0).clamp_min(1e-4).pow(self.rng.uniform(0.8, 1.2))
+        if self.rng.random() < 0.35:
+            image = (image + torch.randn_like(image) * self.rng.uniform(0.005, 0.03)).clamp(0.0, 1.0)
+        if self.rng.random() < 0.25:
+            image = F.avg_pool2d(image[None], 3, stride=1, padding=1)[0]
         return {**sample, "image": image, "masks": mask}
 
 
@@ -52,6 +104,25 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor, num_classes: int) -> t
     intersection = (probabilities * target_one_hot).sum(dim=(0, 2, 3))
     denominator = probabilities.sum(dim=(0, 2, 3)) + target_one_hot.sum(dim=(0, 2, 3))
     return (1.0 - (2.0 * intersection + 1.0) / (denominator + 1.0)).mean()
+
+
+def focal_tversky_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.3,
+    beta: float = 0.7,
+    gamma: float = 1.33,
+) -> torch.Tensor:
+    probabilities = logits.softmax(dim=1)[:, 1:]
+    one_hot = F.one_hot(target, logits.shape[1]).permute(0, 3, 1, 2).float()[:, 1:]
+    dims = (0, 2, 3)
+    true_positive = (probabilities * one_hot).sum(dims)
+    false_positive = (probabilities * (1.0 - one_hot)).sum(dims)
+    false_negative = ((1.0 - probabilities) * one_hot).sum(dims)
+    score = (true_positive + 1.0) / (
+        true_positive + alpha * false_positive + beta * false_negative + 1.0
+    )
+    return (1.0 - score).pow(gamma).mean()
 
 
 def stratified_split(dataset: NEUSegDataset, val_fraction: float, seed: int) -> tuple[list[int], list[int]]:
