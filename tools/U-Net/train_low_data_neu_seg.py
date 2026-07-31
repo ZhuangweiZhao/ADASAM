@@ -54,7 +54,7 @@ def stratified_support_split(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Low-data U-Net baseline on NEU_Seg")
     parser.add_argument("--config", default=str(REPO_ROOT / "configs" / "neu_seg_unet.yaml"))
-    parser.add_argument("--stage1-ckpt", required=True, help="Checkpoint containing kshot_manifest")
+    parser.add_argument("--stage1-ckpt", help="Legacy checkpoint containing kshot_manifest")
     parser.add_argument("--data-root")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
@@ -86,10 +86,14 @@ def main() -> None:
         data_root = REPO_ROOT / data_root
     full_train = NEUSegDataset(data_root, split="train")
     test_ds = NEUSegDataset(data_root, split="test")
-    checkpoint = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=False)
-    manifest = checkpoint.get("kshot_manifest")
+    # The shared K-shot manifest is authoritative.  A Stage1 checkpoint is
+    # only needed for backward compatibility when no manifest was supplied.
+    manifest = None
     if args.manifest:
         manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    elif args.stage1_ckpt:
+        checkpoint = torch.load(args.stage1_ckpt, map_location="cpu", weights_only=False)
+        manifest = checkpoint.get("kshot_manifest")
     if not manifest:
         raise ValueError("Stage1 checkpoint does not contain kshot_manifest")
     by_name = {name: index for index, name in enumerate(full_train.sample_names)}
