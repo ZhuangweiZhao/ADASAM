@@ -13,7 +13,7 @@ EPISODES="${EPISODES:-100}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 DATA_ROOT="${DATA_ROOT:-data/NEU_Seg}"
 STAGE1_CKPT="${STAGE1_CKPT:-runs/neuseg_stage1_k5_seed42/best_adapter.pt}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-runs/label_efficiency}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/label_efficiency}"
 VAL_FRACTION="${VAL_FRACTION:-0.2}"
 KS="${KS:-5 10 20 50 100}"
 
