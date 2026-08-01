@@ -90,8 +90,11 @@ def stage2_predictions(args, dataset):
             target = sample["masks"].squeeze(0).cpu()
             for class_id in (1, 2, 3):
                 a, b = pred == class_id, target == class_id
-                iou = float((a & b).sum() / (a | b).sum().clamp_min(1))
-                records[class_id].append((iou, idx, pred.numpy(), target.numpy(), sample["image"].permute(1, 2, 0).numpy()))
+                # An absent GT class has no diagnostic IoU for that class and
+                # must not dominate the representative failure selection.
+                if b.any():
+                    iou = float((a & b).sum() / (a | b).sum().clamp_min(1))
+                    records[class_id].append((iou, idx, pred.numpy(), target.numpy(), sample["image"].permute(1, 2, 0).numpy()))
     return records
 
 
@@ -111,8 +114,9 @@ def unet_predictions(args, dataset):
             image = sample["image"].permute(1, 2, 0).numpy()
             for class_id in (1, 2, 3):
                 a, b = pred == class_id, target == class_id
-                iou = float((a & b).sum() / (a | b).sum().clamp_min(1))
-                records[class_id].append((iou, idx, pred.numpy(), target.numpy(), image))
+                if b.any():
+                    iou = float((a & b).sum() / (a | b).sum().clamp_min(1))
+                    records[class_id].append((iou, idx, pred.numpy(), target.numpy(), image))
     return records
 
 
@@ -135,7 +139,13 @@ def main():
         values.sort(key=lambda x: x[0])
         class_name = dataset.CLASS_NAMES[class_id]
         summary[class_name] = []
-        for rank, (iou, idx, pred, target, image) in enumerate(values[:4], 1):
+        if not values:
+            continue
+        # Show failure, lower-middle, upper-middle, and best performance. This
+        # makes the four figures representative rather than four duplicates.
+        selected_positions = sorted({round(q * (len(values) - 1)) for q in (0.0, 1 / 3, 2 / 3, 1.0)})
+        selected = [values[position] for position in selected_positions]
+        for rank, (iou, idx, pred, target, image) in enumerate(selected, 1):
             path = output / f"{class_name.lower()}_{rank}_{dataset.sample_names[idx]}.png"
             save_panel(image, target, pred, class_id, path, dataset.sample_names[idx], iou)
             summary[class_name].append({"rank": rank, "sample_id": dataset.sample_names[idx], "iou": iou, "file": str(path)})
