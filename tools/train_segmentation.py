@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
     parser.add_argument("--use-dapg", action="store_true")
-    parser.add_argument("--prompt-version", choices=["none", "v1", "v2"], default=None)
+    parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
     parser.add_argument("--num-prompt", type=int, default=None)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -134,7 +134,7 @@ def main() -> None:
         test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
     prompt_version = args.prompt_version or ("v1" if args.use_dapg else "none")
-    num_prompt = args.num_prompt if args.num_prompt is not None else (8 if prompt_version == "v2" else 16)
+    num_prompt = args.num_prompt if args.num_prompt is not None else (8 if prompt_version in {"v2", "v3"} else 16)
     model = LabelEfficientSAM.build(
         resolve_path(args.checkpoint),
         num_classes=base_dataset.NUM_CLASSES,

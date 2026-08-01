@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--data-root", default="data/NEU_Seg")
     parser.add_argument("--use-dapg", action="store_true")
-    parser.add_argument("--prompt-version", choices=["none", "v1", "v2"], default=None)
+    parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
     parser.add_argument("--num-prompt", type=int, default=None)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)

@@ -11,7 +11,11 @@ import torch.nn.functional as F
 from adasam.adapters import MultiScaleCATAdapter
 from adasam.backbone import LabelEfficientMobileSAMBackbone
 from adasam.models.decoder import LightweightSemanticDecoder
-from adasam.models.prompt import DefectAwarePromptGeneratorV2, DefectPromptGenerator
+from adasam.models.prompt import (
+    DefectAwarePromptGeneratorV2,
+    DefectPromptGenerator,
+    FrequencyAwareDefectPromptGenerator,
+)
 from adasam.utils.transforms import PIXEL_MEAN, PIXEL_STD
 
 
@@ -33,18 +37,19 @@ class LabelEfficientSAM(nn.Module):
         self.adapter = MultiScaleCATAdapter(bottleneck_ratio=adapter_ratio)
         if prompt_version is None:
             prompt_version = "v1" if use_dapg else "none"
-        if prompt_version not in {"none", "v1", "v2"}:
-            raise ValueError("prompt_version must be one of: none, v1, v2")
+        if prompt_version not in {"none", "v1", "v2", "v3"}:
+            raise ValueError("prompt_version must be one of: none, v1, v2, v3")
         self.prompt_version = prompt_version
         self.use_dapg = prompt_version == "v1"
         self.prompt_generator = (
             DefectPromptGenerator(num_prompt=num_prompt) if prompt_version == "v1"
             else DefectAwarePromptGeneratorV2(num_prompt=num_prompt) if prompt_version == "v2"
+            else FrequencyAwareDefectPromptGenerator(num_prompt=num_prompt) if prompt_version == "v3"
             else None
         )
         self.decoder = LightweightSemanticDecoder(
             num_classes, decoder_dim=decoder_dim, enable_prompt_fusion=prompt_version == "v1",
-            enable_spatial_prompt_fusion=prompt_version == "v2",
+            enable_spatial_prompt_fusion=prompt_version in {"v2", "v3"},
         )
         self.register_buffer(
             "pixel_mean", torch.tensor(PIXEL_MEAN).view(1, 3, 1, 1), persistent=False
@@ -97,7 +102,7 @@ class LabelEfficientSAM(nn.Module):
         return self.decoder(
             adapted, output_size=output_size,
             prompt_tokens=prompts if self.prompt_version == "v1" else None,
-            prompt=prompts if self.prompt_version == "v2" else None,
+            prompt=prompts if self.prompt_version in {"v2", "v3"} else None,
         )
 
     def forward_with_prompts(
@@ -112,7 +117,7 @@ class LabelEfficientSAM(nn.Module):
         logits = self.decoder(
             adapted, output_size,
             prompt_tokens=prompts if self.prompt_version == "v1" else None,
-            prompt=prompts if self.prompt_version == "v2" else None,
+            prompt=prompts if self.prompt_version in {"v2", "v3"} else None,
         )
         return logits, prompts
 
