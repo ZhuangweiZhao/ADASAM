@@ -17,6 +17,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--data-root", default="data/NEU_Seg")
+    parser.add_argument("--use-dapg", action="store_true")
+    parser.add_argument("--num-prompt", type=int, default=16)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default="runs/label_ratio_benchmark")
@@ -41,6 +43,8 @@ def main() -> None:
             "--seed", str(args.seed),
             "--output-dir", str(output_root),
         ]
+        if args.use_dapg:
+            command.extend(["--use-dapg", "--num-prompt", str(args.num_prompt)])
         subprocess.run(command, cwd=_REPO_ROOT, check=True)
 
     rows = []
@@ -64,6 +68,7 @@ def main() -> None:
     summary = {
         "protocol": {
             "dataset": "NEU_Seg",
+            "model": "LabelEfficientSAM+DAPG" if args.use_dapg else "LabelEfficientSAM",
             "seed": args.seed,
             "epochs": args.epochs,
             "validation_fraction": 0.2,

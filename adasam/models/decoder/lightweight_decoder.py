@@ -24,6 +24,7 @@ class LightweightSemanticDecoder(nn.Module):
         num_classes: int,
         feature_dims: dict[str, int] | None = None,
         decoder_dim: int = 96,
+        enable_prompt_fusion: bool = False,
     ) -> None:
         super().__init__()
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
@@ -33,12 +34,21 @@ class LightweightSemanticDecoder(nn.Module):
         self.p4_fuse = ConvNormAct(decoder_dim, decoder_dim)
         self.p3_fuse = ConvNormAct(decoder_dim, decoder_dim)
         self.refine = ConvNormAct(decoder_dim, decoder_dim)
+        self.prompt_norm = nn.LayerNorm(256) if enable_prompt_fusion else None
+        self.prompt_scale = nn.Linear(256, decoder_dim) if enable_prompt_fusion else None
+        self.prompt_shift = nn.Linear(256, decoder_dim) if enable_prompt_fusion else None
         self.classifier = nn.Conv2d(decoder_dim, num_classes, 1)
+        if self.prompt_scale is not None and self.prompt_shift is not None:
+            nn.init.zeros_(self.prompt_scale.weight)
+            nn.init.zeros_(self.prompt_scale.bias)
+            nn.init.zeros_(self.prompt_shift.weight)
+            nn.init.zeros_(self.prompt_shift.bias)
 
     def forward(
         self,
         features: dict[str, torch.Tensor],
         output_size: tuple[int, int],
+        prompt_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         required = {"P3", "P4", "embedding"}
         missing = required - features.keys()
@@ -53,5 +63,14 @@ class LightweightSemanticDecoder(nn.Module):
         p4 = self.p4_fuse(p4 + embedding)
         p4 = F.interpolate(p4, size=p3.shape[-2:], mode="bilinear", align_corners=False)
         fused = self.refine(self.p3_fuse(p3 + p4))
+        if prompt_tokens is not None:
+            if self.prompt_norm is None or self.prompt_scale is None or self.prompt_shift is None:
+                raise RuntimeError("decoder prompt fusion is disabled")
+            if prompt_tokens.ndim != 3 or prompt_tokens.shape[0] != fused.shape[0]:
+                raise ValueError("prompt_tokens must have shape [B,N,256]")
+            prompt = self.prompt_norm(prompt_tokens.mean(dim=1))
+            scale = torch.tanh(self.prompt_scale(prompt)).unsqueeze(-1).unsqueeze(-1)
+            shift = self.prompt_shift(prompt).unsqueeze(-1).unsqueeze(-1)
+            fused = fused * (1.0 + scale) + shift
         logits = self.classifier(fused)
         return F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)

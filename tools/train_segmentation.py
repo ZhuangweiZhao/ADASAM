@@ -34,6 +34,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument("--use-dapg", action="store_true")
+    parser.add_argument("--num-prompt", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
@@ -136,6 +138,8 @@ def main() -> None:
         img_size=args.img_size,
         device=device,
         decoder_dim=args.decoder_dim,
+        use_dapg=args.use_dapg,
+        num_prompt=args.num_prompt,
     )
     criterion = LabelEfficientSegmentationLoss()
     optimizer = AdamW(
@@ -153,8 +157,10 @@ def main() -> None:
         f"label_pool={len(label_pool)} train={len(dataset)} validation={len(validation)}"
     )
 
+    variant = "dapg" if args.use_dapg else "baseline"
     output_dir = resolve_path(args.output_dir) / f"neu_seg_ratio{args.label_ratio}_seed{args.seed}"
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"variant={variant} num_prompt={args.num_prompt if args.use_dapg else 0}")
     history = []
     best_score = -1.0
     best_path = output_dir / "best_model.pt"
