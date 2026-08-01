@@ -47,8 +47,12 @@ def colorize_mask(mask: np.ndarray) -> np.ndarray:
 
 def normalize_map(tensor: torch.Tensor) -> np.ndarray:
     value = tensor.detach().float().cpu().numpy()
+    low = np.percentile(value, 2.0)
+    high = np.percentile(value, 98.0)
+    value = np.clip(value, low, high)
     value = value - value.min()
     value = value / (value.max() + 1e-9)
+    value = np.power(value, 0.6)
     return value
 
 
@@ -129,8 +133,7 @@ def main() -> None:
         axes[row_idx, 2].imshow(pred_rgb)
         axes[row_idx, 2].set_title("Prediction")
         if "prompt_map" in row:
-            axes[row_idx, 3].imshow(image)
-            axes[row_idx, 3].imshow(row["prompt_map"], cmap="magma", alpha=0.55)
+            axes[row_idx, 3].imshow(row["prompt_map"], cmap="inferno", vmin=0.0, vmax=1.0)
             axes[row_idx, 3].set_title("Prompt Heatmap")
         else:
             axes[row_idx, 3].axis("off")
@@ -138,6 +141,20 @@ def main() -> None:
             axes[row_idx, col].axis("off")
     fig.tight_layout()
     fig.savefig(output_dir / "prompt_alignment_grid.png", dpi=220, bbox_inches="tight")
+    for row in summary:
+        if "prompt_map" not in row:
+            continue
+        base = Path(output_dir) / f"prompt_{row['index']:03d}_{row['id']}"
+        plt.imsave(base.with_name(base.name + "_heatmap.png"), row["prompt_map"], cmap="inferno", vmin=0.0, vmax=1.0)
+        plt.imsave(base.with_name(base.name + "_heatmap_gray.png"), row["prompt_map"], cmap="gray", vmin=0.0, vmax=1.0)
+        overlay = np.clip(row["image"], 0.0, 1.0)
+        plt.figure(figsize=(4, 4))
+        plt.imshow(overlay)
+        plt.imshow(row["prompt_map"], cmap="inferno", alpha=0.6, vmin=0.0, vmax=1.0)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(base.with_name(base.name + "_overlay.png"), dpi=220, bbox_inches="tight")
+        plt.close()
     (output_dir / "prompt_alignment_summary.json").write_text(
         json.dumps(
             {
@@ -146,6 +163,7 @@ def main() -> None:
                 "split": args.split,
                 "indices": args.indices,
                 "output": "prompt_alignment_grid.png",
+                "heatmap_normalization": "percentile_2_98_gamma_0.6",
             },
             indent=2,
         ),
