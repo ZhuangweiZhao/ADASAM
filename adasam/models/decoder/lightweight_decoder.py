@@ -25,6 +25,7 @@ class LightweightSemanticDecoder(nn.Module):
         feature_dims: dict[str, int] | None = None,
         decoder_dim: int = 96,
         enable_prompt_fusion: bool = False,
+        enable_spatial_prompt_fusion: bool = False,
     ) -> None:
         super().__init__()
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
@@ -37,18 +38,33 @@ class LightweightSemanticDecoder(nn.Module):
         self.prompt_norm = nn.LayerNorm(256) if enable_prompt_fusion else None
         self.prompt_scale = nn.Linear(256, decoder_dim) if enable_prompt_fusion else None
         self.prompt_shift = nn.Linear(256, decoder_dim) if enable_prompt_fusion else None
+        self.dense_prompt_proj = (
+            nn.Conv2d(256, decoder_dim, 1, bias=False) if enable_spatial_prompt_fusion else None
+        )
+        self.token_query = (
+            nn.Linear(decoder_dim, 64, bias=False) if enable_spatial_prompt_fusion else None
+        )
+        self.token_key = nn.Linear(256, 64, bias=False) if enable_spatial_prompt_fusion else None
+        self.token_value = nn.Linear(256, 64, bias=False) if enable_spatial_prompt_fusion else None
+        self.token_output = (
+            nn.Linear(64, decoder_dim, bias=False) if enable_spatial_prompt_fusion else None
+        )
         self.classifier = nn.Conv2d(decoder_dim, num_classes, 1)
         if self.prompt_scale is not None and self.prompt_shift is not None:
             nn.init.zeros_(self.prompt_scale.weight)
             nn.init.zeros_(self.prompt_scale.bias)
             nn.init.zeros_(self.prompt_shift.weight)
             nn.init.zeros_(self.prompt_shift.bias)
+        if self.dense_prompt_proj is not None:
+            nn.init.zeros_(self.dense_prompt_proj.weight)
+            nn.init.zeros_(self.token_output.weight)
 
     def forward(
         self,
         features: dict[str, torch.Tensor],
         output_size: tuple[int, int],
         prompt_tokens: torch.Tensor | None = None,
+        prompt: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         required = {"P3", "P4", "embedding"}
         missing = required - features.keys()
@@ -72,5 +88,24 @@ class LightweightSemanticDecoder(nn.Module):
             scale = torch.tanh(self.prompt_scale(prompt)).unsqueeze(-1).unsqueeze(-1)
             shift = self.prompt_shift(prompt).unsqueeze(-1).unsqueeze(-1)
             fused = fused * (1.0 + scale) + shift
+        if prompt is not None:
+            if any(module is None for module in (self.dense_prompt_proj, self.token_query, self.token_key, self.token_value, self.token_output)):
+                raise RuntimeError("decoder spatial prompt fusion is disabled")
+            dense_prompt = prompt.get("dense_prompt")
+            token_prompt = prompt.get("token_prompt")
+            if dense_prompt is None or token_prompt is None:
+                raise KeyError("spatial prompt requires dense_prompt and token_prompt")
+            if dense_prompt.ndim != 4 or dense_prompt.shape[:2] != (fused.shape[0], 256):
+                raise ValueError("dense_prompt must have shape [B,256,H,W]")
+            if token_prompt.ndim != 3 or token_prompt.shape[0] != fused.shape[0] or token_prompt.shape[2] != 256:
+                raise ValueError("token_prompt must have shape [B,N,256]")
+            dense = F.interpolate(dense_prompt, fused.shape[-2:], mode="bilinear", align_corners=False)
+            fused = fused + self.dense_prompt_proj(dense)
+            query = self.token_query(fused.flatten(2).transpose(1, 2))
+            key = self.token_key(token_prompt)
+            value = self.token_value(token_prompt)
+            attention = torch.softmax(query @ key.transpose(-2, -1) / 8.0, dim=-1)
+            modulation = self.token_output(attention @ value).transpose(1, 2).reshape_as(fused)
+            fused = fused + modulation
         logits = self.classifier(fused)
         return F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)

@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from adasam.adapters import MultiScaleCATAdapter
 from adasam.backbone import LabelEfficientMobileSAMBackbone
 from adasam.models.decoder import LightweightSemanticDecoder
-from adasam.models.prompt import DefectPromptGenerator
+from adasam.models.prompt import DefectAwarePromptGeneratorV2, DefectPromptGenerator
 from adasam.utils.transforms import PIXEL_MEAN, PIXEL_STD
 
 
@@ -26,16 +26,25 @@ class LabelEfficientSAM(nn.Module):
         adapter_ratio: float = 0.25,
         use_dapg: bool = False,
         num_prompt: int = 16,
+        prompt_version: str | None = None,
     ) -> None:
         super().__init__()
         self.backbone = backbone
         self.adapter = MultiScaleCATAdapter(bottleneck_ratio=adapter_ratio)
-        self.use_dapg = use_dapg
+        if prompt_version is None:
+            prompt_version = "v1" if use_dapg else "none"
+        if prompt_version not in {"none", "v1", "v2"}:
+            raise ValueError("prompt_version must be one of: none, v1, v2")
+        self.prompt_version = prompt_version
+        self.use_dapg = prompt_version == "v1"
         self.prompt_generator = (
-            DefectPromptGenerator(num_prompt=num_prompt) if use_dapg else None
+            DefectPromptGenerator(num_prompt=num_prompt) if prompt_version == "v1"
+            else DefectAwarePromptGeneratorV2(num_prompt=num_prompt) if prompt_version == "v2"
+            else None
         )
         self.decoder = LightweightSemanticDecoder(
-            num_classes, decoder_dim=decoder_dim, enable_prompt_fusion=use_dapg
+            num_classes, decoder_dim=decoder_dim, enable_prompt_fusion=prompt_version == "v1",
+            enable_spatial_prompt_fusion=prompt_version == "v2",
         )
         self.register_buffer(
             "pixel_mean", torch.tensor(PIXEL_MEAN).view(1, 3, 1, 1), persistent=False
@@ -56,6 +65,7 @@ class LabelEfficientSAM(nn.Module):
         adapter_ratio: float = 0.25,
         use_dapg: bool = False,
         num_prompt: int = 16,
+        prompt_version: str | None = None,
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -63,6 +73,7 @@ class LabelEfficientSAM(nn.Module):
         return cls(
             backbone, num_classes, decoder_dim, adapter_ratio,
             use_dapg=use_dapg, num_prompt=num_prompt,
+            prompt_version=prompt_version,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
@@ -82,19 +93,28 @@ class LabelEfficientSAM(nn.Module):
         with torch.no_grad():
             features = self.backbone(self._preprocess(image))
         adapted = self.adapter(features)
-        prompt_tokens = self.prompt_generator(adapted) if self.prompt_generator is not None else None
-        return self.decoder(adapted, output_size=output_size, prompt_tokens=prompt_tokens)
+        prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
+        return self.decoder(
+            adapted, output_size=output_size,
+            prompt_tokens=prompts if self.prompt_version == "v1" else None,
+            prompt=prompts if self.prompt_version == "v2" else None,
+        )
 
     def forward_with_prompts(
         self, image: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Diagnostic forward returning logits and generated prompt tokens."""
+    ) -> tuple[torch.Tensor, torch.Tensor | dict[str, torch.Tensor] | None]:
+        """Diagnostic forward returning logits and the selected prompt representation."""
         output_size = tuple(image.shape[-2:])
         with torch.no_grad():
             features = self.backbone(self._preprocess(image))
         adapted = self.adapter(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
-        return self.decoder(adapted, output_size, prompt_tokens=prompts), prompts
+        logits = self.decoder(
+            adapted, output_size,
+            prompt_tokens=prompts if self.prompt_version == "v1" else None,
+            prompt=prompts if self.prompt_version == "v2" else None,
+        )
+        return logits, prompts
 
     def parameter_counts(self) -> dict[str, int]:
         total = sum(parameter.numel() for parameter in self.parameters())
