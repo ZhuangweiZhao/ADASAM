@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ratios", nargs="+", type=int, default=[1, 5, 10, 25, 100])
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--data-root", default="data/NEU_Seg")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default="runs/label_ratio_benchmark")
@@ -35,6 +36,7 @@ def main() -> None:
             "--label_ratio", str(ratio),
             "--epochs", str(args.epochs),
             "--batch-size", str(args.batch_size),
+            "--data-root", args.data_root,
             "--device", args.device,
             "--seed", str(args.seed),
             "--output-dir", str(output_root),
