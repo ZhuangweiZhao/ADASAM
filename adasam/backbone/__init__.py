@@ -3,6 +3,7 @@
 from adasam.backbone.mobile_sam import (
     MobileSAMBackbone,
     MultiScaleMobileSAMBackbone,
+    LabelEfficientMobileSAMBackbone,
     build_mobile_sam,
     build_mobile_sam_for_size,
 )
@@ -10,6 +11,7 @@ from adasam.backbone.mobile_sam import (
 __all__ = [
     "MobileSAMBackbone",
     "MultiScaleMobileSAMBackbone",
+    "LabelEfficientMobileSAMBackbone",
     "build_mobile_sam",
     "build_mobile_sam_for_size",
 ]

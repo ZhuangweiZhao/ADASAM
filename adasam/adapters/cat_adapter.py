@@ -83,3 +83,32 @@ class CATAdapter(nn.Module):
 
     def extra_repr(self) -> str:
         return f"dim={self.dim}, bottleneck={self.bottleneck}, params={self._n_params:,}"
+
+
+class MultiScaleCATAdapter(nn.Module):
+    """Apply independent lightweight CAT adapters to a feature dictionary."""
+
+    DEFAULT_DIMS = {"P3": 128, "P4": 160, "embedding": 256}
+
+    def __init__(
+        self,
+        feature_dims: dict[str, int] | None = None,
+        bottleneck_ratio: float = 0.25,
+    ) -> None:
+        super().__init__()
+        dims = dict(feature_dims or self.DEFAULT_DIMS)
+        self.adapters = nn.ModuleDict(
+            {
+                name: CATAdapter(
+                    dim=channels,
+                    bottleneck=max(8, int(round(channels * bottleneck_ratio))),
+                )
+                for name, channels in dims.items()
+            }
+        )
+
+    def forward(self, features: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        missing = self.adapters.keys() - features.keys()
+        if missing:
+            raise KeyError(f"missing adapter features: {sorted(missing)}")
+        return {name: self.adapters[name](features[name]) for name in self.adapters}

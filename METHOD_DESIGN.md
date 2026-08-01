@@ -1,10 +1,86 @@
-# METHOD_DESIGN — AdaSAM V2: Dense Prompt Generation
+# METHOD_DESIGN — AdaSAM V3: Real-Time Label-Efficient Industrial Segmentation
 
-## Status: Phase 0 — Architecture Design (Revision 2, ✅ Approved — Phases 1-4 implemented)
+## Status: Research Repositioning (Revision 3)
+
+> **Document authority:** This revision defines the primary paper direction. The
+> earlier aerial few-shot instance-segmentation design retained below is an
+> implementation and ablation reference; its base/novel FSS framing is no longer the
+> primary task definition.
+
+## 0. Revision 3 Research Position
+
+**Working title:** *Real-Time Label-Efficient Industrial Defect Segmentation via
+Lightweight SAM Adaptation*.
+
+**Primary task:** support-conditioned, label-efficient industrial defect semantic
+segmentation with a frozen MobileSAM encoder. The study varies the pixel-level
+annotation budget and evaluates whether compact prompt-, prototype-memory-, and
+decoder-side adaptation can approach full-supervision references while reducing
+training and inference cost.
+
+This is not classical base-to-novel few-shot segmentation. For the primary NEU_Seg
+study, support and query share the same defect vocabulary, absent-class queries have
+empty-mask targets, and all methods receive the same labeled images. K-shot results
+and percentage-budget results are annotation-efficiency measurements, not
+novel-class generalization claims.
+
+### 0.1 Paper Claim
+
+The paper should test an **accuracy-efficiency trade-off**:
+
+1. A learnable prompt generator adapts MobileSAM without retraining its image
+   encoder.
+2. Dynamic multi-prototype memory represents intra-class defect variation better
+   than a single averaged prototype.
+3. Sparse adaptation limits optimization to prompt, memory/adapter, and selected
+   decoder parameters.
+4. Frozen-feature caching and prompt-side augmentation reduce adaptation time.
+
+These are hypotheses until verified. Do not state "95% frozen," "10x faster,"
+"real-time," or "5% labels match full supervision" without measurements from the
+controlled protocol.
+
+### 0.2 Target Architecture
+
+```text
+Image -> Frozen MobileSAM Encoder -> Cached image features
+                                      |
+Support masks -> Dynamic prototype memory
+                                      |
+                        Learnable prompt generator
+                         (point + box + token)
+                                      |
+                           Lightweight mask decoder
+                                      |
+                                     Mask
+```
+
+Only the prompt generator, prototype memory or lightweight adapters, and the minimum
+necessary decoder parameters are trainable in the primary configuration. Full
+decoder tuning and uncached training remain controlled comparisons.
+
+### 0.3 Primary Evaluation
+
+- **Industrial dataset:** NEU_Seg is the primary benchmark. Use exact labeled-image
+  counts and, where feasible, 1%, 5%, 10%, 25%, and 100% nested annotation budgets.
+- **Baselines:** low-data U-Net, DeepLabV3+, SegFormer, representative
+  support-conditioned methods, SAM adaptation baselines, and full-data models as
+  explicitly labeled upper-bound references.
+- **Accuracy:** foreground macro mIoU, per-class IoU, background IoU, and mean/std
+  over at least three manifests or seeds.
+- **Efficiency:** trainable/total parameters, wall-clock training time, peak GPU
+  memory, cache construction/storage cost, end-to-end latency, and FPS under a fixed
+  hardware and timing protocol.
+- **Generalization:** after establishing the industrial result, validate on one
+  out-of-domain dataset such as iSAID or ISIC.
+
+The decisive result is not simply the highest mIoU. It is whether AdaSAM improves
+the Pareto trade-off between segmentation quality, annotation cost, adaptation cost,
+and deployment latency.
 
 ---
 
-## 1. Paper Narrative
+## 1. Legacy V2 Paper Narrative (Implementation Reference)
 
 **Title direction**: *Automatic Prompt Generation for SAM in Remote Sensing Few-shot Segmentation*
 

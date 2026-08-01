@@ -257,3 +257,50 @@ class MultiScaleMobileSAMBackbone(nn.Module):
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError(f"expected [B, 3, H, W], got {tuple(image.shape)}")
         return self.image_encoder.forward_multi_scale(image)
+
+
+class LabelEfficientMobileSAMBackbone(nn.Module):
+    """Frozen multi-scale MobileSAM encoder for standard semantic segmentation.
+
+    Unlike the legacy Stage2 wrapper, this class has no unfreeze API and exposes a
+    stable feature contract independent of TinyViT's internal stage names.
+    """
+
+    def __init__(self, image_encoder: nn.Module, img_size: int) -> None:
+        super().__init__()
+        self.image_encoder = image_encoder
+        self.img_size = int(img_size)
+        for parameter in self.image_encoder.parameters():
+            parameter.requires_grad_(False)
+        self.image_encoder.eval()
+
+    @classmethod
+    def build(
+        cls,
+        checkpoint: str | Path,
+        model_type: str = "vit_t",
+        device: str | torch.device = "cpu",
+        img_size: int = 224,
+    ) -> "LabelEfficientMobileSAMBackbone":
+        if model_type != "vit_t":
+            raise ValueError("the label-efficient backbone currently supports MobileSAM vit_t")
+        encoder = build_mobile_sam_for_size(
+            checkpoint, target_size=img_size, model_type=model_type, device=device
+        )
+        return cls(encoder, img_size=img_size)
+
+    def train(self, mode: bool = True) -> "LabelEfficientMobileSAMBackbone":
+        super().train(False)
+        self.image_encoder.eval()
+        return self
+
+    @torch.no_grad()
+    def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
+        if image.ndim != 4 or image.shape[1] != 3:
+            raise ValueError(f"expected [B, 3, H, W], got {tuple(image.shape)}")
+        stages = self.image_encoder.forward_multi_scale(image)
+        return {
+            "P3": stages["stage1"],
+            "P4": stages["stage2"],
+            "embedding": stages["stage3"],
+        }

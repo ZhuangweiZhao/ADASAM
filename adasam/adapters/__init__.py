@@ -10,6 +10,6 @@ natural images and remote sensing imagery.
     CATAdapter — 瓶颈残差特征适配器 | bottleneck residual feature adapter.
 """
 
-from adasam.adapters.cat_adapter import CATAdapter
+from adasam.adapters.cat_adapter import CATAdapter, MultiScaleCATAdapter
 
-__all__ = ["CATAdapter"]
+__all__ = ["CATAdapter", "MultiScaleCATAdapter"]

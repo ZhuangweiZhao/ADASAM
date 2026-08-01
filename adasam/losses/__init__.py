@@ -8,6 +8,7 @@ from adasam.losses.seg_losses import (
 )
 from adasam.losses.semantic_loss import SemanticSegLoss
 from adasam.losses.prototype_query_loss import PrototypeQuerySemanticLoss
+from adasam.losses.label_efficient_loss import LabelEfficientSegmentationLoss
 
 __all__ = [
     "focal_loss",
@@ -16,4 +17,5 @@ __all__ = [
     "mask_iou",
     "SemanticSegLoss",
     "PrototypeQuerySemanticLoss",
+    "LabelEfficientSegmentationLoss",
 ]
