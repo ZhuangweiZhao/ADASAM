@@ -68,10 +68,12 @@ def main() -> None:
         "decoder_dim": ckpt_args.get("decoder_dim", 96),
         "adapter_ratio": ckpt_args.get("adapter_ratio", 0.25),
         "use_dapg": ckpt_args.get("use_dapg", False),
-        "num_prompt": ckpt_args.get("num_prompt", 8),
+        "num_prompt": ckpt_args.get("num_prompt"),
         "prompt_version": ckpt_args.get("prompt_version"),
         "prompt_fusion_mode": ckpt_args.get("prompt_fusion_mode", "both"),
     }
+    if model_args["num_prompt"] is None:
+        model_args["num_prompt"] = 8 if model_args["prompt_version"] in {"v2", "v3"} else 16
 
     from adasam.datasets.industrial import NEUSegSemanticDataset
     from adasam.models import LabelEfficientSAM
