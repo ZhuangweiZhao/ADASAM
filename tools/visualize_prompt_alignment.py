@@ -59,7 +59,9 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    ckpt_args = checkpoint.get("args", {})
+    metadata_path = checkpoint_path.parent / "last_model.pt"
+    metadata = torch.load(metadata_path, map_location="cpu", weights_only=False) if metadata_path.exists() else {}
+    ckpt_args = metadata.get("args", checkpoint.get("args", {}))
     model_args = {
         "num_classes": 4,
         "img_size": ckpt_args.get("img_size", 224),
@@ -76,8 +78,9 @@ def main() -> None:
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     dataset = NEUSegSemanticDataset(resolve(args.data_root), split=args.split)
+    backbone_checkpoint = resolve(ckpt_args.get("checkpoint", ckpt_args.get("backbone_checkpoint", "weights/mobile_sam.pt")))
     model = LabelEfficientSAM.build(
-        checkpoint=checkpoint_path,
+        checkpoint=backbone_checkpoint,
         num_classes=model_args["num_classes"],
         img_size=model_args["img_size"],
         device=device,
