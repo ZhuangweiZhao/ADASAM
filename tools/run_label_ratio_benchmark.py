@@ -19,7 +19,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", default="data/NEU_Seg")
     parser.add_argument("--use-dapg", action="store_true")
     parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
+    parser.add_argument("--prompt-fusion-mode", choices=["both", "dense", "token"], default="both")
     parser.add_argument("--num-prompt", type=int, default=None)
+    parser.add_argument("--prompt-align-weight", type=float, default=0.0)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default="runs/label_ratio_benchmark")
@@ -47,8 +49,11 @@ def main() -> None:
         prompt_version = args.prompt_version or ("v1" if args.use_dapg else "none")
         if prompt_version != "none":
             command.extend(["--prompt-version", prompt_version])
+            command.extend(["--prompt-fusion-mode", args.prompt_fusion_mode])
         if args.num_prompt is not None:
             command.extend(["--num-prompt", str(args.num_prompt)])
+        if args.prompt_align_weight > 0.0:
+            command.extend(["--prompt-align-weight", str(args.prompt_align_weight)])
         subprocess.run(command, cwd=_REPO_ROOT, check=True)
 
     rows = []
@@ -77,6 +82,8 @@ def main() -> None:
             "epochs": args.epochs,
             "validation_fraction": 0.2,
             "test_images": 840,
+            "prompt_fusion_mode": args.prompt_fusion_mode,
+            "prompt_align_weight": args.prompt_align_weight,
         },
         "results": rows,
     }

@@ -40,3 +40,31 @@ class LabelEfficientSegmentationLoss(nn.Module):
         denominator = probabilities.sum(dims) + one_hot.sum(dims)
         dice = 1.0 - ((2.0 * intersection + self.eps) / (denominator + self.eps)).mean()
         return self.ce_weight * ce + self.dice_weight * dice
+
+
+class DefectPromptAlignmentLoss(nn.Module):
+    """Align dense prompt activation with foreground defect regions."""
+
+    def __init__(self, bce_weight: float = 1.0, dice_weight: float = 1.0, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.bce_weight = bce_weight
+        self.dice_weight = dice_weight
+        self.eps = eps
+
+    def forward(self, dense_prompt: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        if dense_prompt.ndim != 4 or target.ndim != 3:
+            raise ValueError("expected dense_prompt [B,C,H,W] and target [B,H,W]")
+        if dense_prompt.shape[0] != target.shape[0]:
+            raise ValueError("dense_prompt and target batch sizes must match")
+        activation = dense_prompt.abs().mean(dim=1, keepdim=True)
+        foreground = (target > 0).to(dtype=activation.dtype).unsqueeze(1)
+        foreground = F.interpolate(
+            foreground, size=activation.shape[-2:], mode="nearest"
+        )
+        bce = F.binary_cross_entropy_with_logits(activation, foreground)
+        probability = activation.sigmoid()
+        dims = (0, 2, 3)
+        intersection = (probability * foreground).sum(dims)
+        denominator = probability.sum(dims) + foreground.sum(dims)
+        dice = 1.0 - ((2.0 * intersection + self.eps) / (denominator + self.eps)).mean()
+        return self.bce_weight * bce + self.dice_weight * dice

@@ -31,6 +31,7 @@ class LabelEfficientSAM(nn.Module):
         use_dapg: bool = False,
         num_prompt: int = 16,
         prompt_version: str | None = None,
+        prompt_fusion_mode: str = "both",
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -48,8 +49,11 @@ class LabelEfficientSAM(nn.Module):
             else None
         )
         self.decoder = LightweightSemanticDecoder(
-            num_classes, decoder_dim=decoder_dim, enable_prompt_fusion=prompt_version == "v1",
+            num_classes,
+            decoder_dim=decoder_dim,
+            enable_prompt_fusion=prompt_version == "v1",
             enable_spatial_prompt_fusion=prompt_version in {"v2", "v3"},
+            spatial_prompt_mode=prompt_fusion_mode,
         )
         self.register_buffer(
             "pixel_mean", torch.tensor(PIXEL_MEAN).view(1, 3, 1, 1), persistent=False
@@ -71,6 +75,7 @@ class LabelEfficientSAM(nn.Module):
         use_dapg: bool = False,
         num_prompt: int = 16,
         prompt_version: str | None = None,
+        prompt_fusion_mode: str = "both",
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -79,6 +84,7 @@ class LabelEfficientSAM(nn.Module):
             backbone, num_classes, decoder_dim, adapter_ratio,
             use_dapg=use_dapg, num_prompt=num_prompt,
             prompt_version=prompt_version,
+            prompt_fusion_mode=prompt_fusion_mode,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":

@@ -18,7 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.datasets.industrial import LabelRatioSubset, NEUSegSemanticDataset  # noqa: E402
-from adasam.losses import LabelEfficientSegmentationLoss  # noqa: E402
+from adasam.losses import DefectPromptAlignmentLoss, LabelEfficientSegmentationLoss  # noqa: E402
 from adasam.models import LabelEfficientSAM  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
 
@@ -36,7 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder-dim", type=int, default=96)
     parser.add_argument("--use-dapg", action="store_true")
     parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
+    parser.add_argument("--prompt-fusion-mode", choices=["both", "dense", "token"], default="both")
     parser.add_argument("--num-prompt", type=int, default=None)
+    parser.add_argument("--prompt-align-weight", type=float, default=0.0)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
@@ -142,8 +144,10 @@ def main() -> None:
         device=device,
         decoder_dim=args.decoder_dim,
         use_dapg=args.use_dapg, num_prompt=num_prompt, prompt_version=prompt_version,
+        prompt_fusion_mode=args.prompt_fusion_mode,
     )
     criterion = LabelEfficientSegmentationLoss()
+    prompt_criterion = DefectPromptAlignmentLoss()
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -170,12 +174,17 @@ def main() -> None:
         model.train()
         started = time.perf_counter()
         losses = []
+        prompt_losses = []
         for batch in tqdm(loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            prediction = model(image)
+            prediction, prompts = model.forward_with_prompts(image)
             loss = criterion(prediction, target)
+            if args.prompt_align_weight > 0.0 and prompts is not None and "dense_prompt" in prompts:
+                align_loss = prompt_criterion(prompts["dense_prompt"], target)
+                loss = loss + args.prompt_align_weight * align_loss
+                prompt_losses.append(float(align_loss.detach()))
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach()))
@@ -187,6 +196,8 @@ def main() -> None:
             "last_loss": losses[-1],
             "seconds": elapsed,
         }
+        if prompt_losses:
+            record["mean_prompt_align_loss"] = sum(prompt_losses) / len(prompt_losses)
         record["validation"] = evaluate(
             model, validation_loader, device, base_dataset.NUM_CLASSES
         )
@@ -207,6 +218,8 @@ def main() -> None:
         "history": history,
         "best_epoch": best["epoch"],
         "test": test_metrics,
+        "prompt_align_weight": args.prompt_align_weight,
+        "prompt_fusion_mode": args.prompt_fusion_mode,
     }
     torch.save(checkpoint, output_dir / "last_model.pt")
     (output_dir / "metrics.json").write_text(

@@ -26,8 +26,11 @@ class LightweightSemanticDecoder(nn.Module):
         decoder_dim: int = 96,
         enable_prompt_fusion: bool = False,
         enable_spatial_prompt_fusion: bool = False,
+        spatial_prompt_mode: str = "both",
     ) -> None:
         super().__init__()
+        if spatial_prompt_mode not in {"both", "dense", "token"}:
+            raise ValueError("spatial_prompt_mode must be one of: both, dense, token")
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
         self.lateral = nn.ModuleDict(
             {name: nn.Conv2d(channels, decoder_dim, 1) for name, channels in dims.items()}
@@ -49,6 +52,7 @@ class LightweightSemanticDecoder(nn.Module):
         self.token_output = (
             nn.Linear(64, decoder_dim, bias=False) if enable_spatial_prompt_fusion else None
         )
+        self.spatial_prompt_mode = spatial_prompt_mode
         self.classifier = nn.Conv2d(decoder_dim, num_classes, 1)
         if self.prompt_scale is not None and self.prompt_shift is not None:
             nn.init.zeros_(self.prompt_scale.weight)
@@ -93,19 +97,23 @@ class LightweightSemanticDecoder(nn.Module):
                 raise RuntimeError("decoder spatial prompt fusion is disabled")
             dense_prompt = prompt.get("dense_prompt")
             token_prompt = prompt.get("token_prompt")
-            if dense_prompt is None or token_prompt is None:
-                raise KeyError("spatial prompt requires dense_prompt and token_prompt")
-            if dense_prompt.ndim != 4 or dense_prompt.shape[:2] != (fused.shape[0], 256):
-                raise ValueError("dense_prompt must have shape [B,256,H,W]")
-            if token_prompt.ndim != 3 or token_prompt.shape[0] != fused.shape[0] or token_prompt.shape[2] != 256:
-                raise ValueError("token_prompt must have shape [B,N,256]")
-            dense = F.interpolate(dense_prompt, fused.shape[-2:], mode="bilinear", align_corners=False)
-            fused = fused + self.dense_prompt_proj(dense)
-            query = self.token_query(fused.flatten(2).transpose(1, 2))
-            key = self.token_key(token_prompt)
-            value = self.token_value(token_prompt)
-            attention = torch.softmax(query @ key.transpose(-2, -1) / 8.0, dim=-1)
-            modulation = self.token_output(attention @ value).transpose(1, 2).reshape_as(fused)
-            fused = fused + modulation
+            if self.spatial_prompt_mode in {"both", "dense"}:
+                if dense_prompt is None:
+                    raise KeyError("spatial prompt requires dense_prompt")
+                if dense_prompt.ndim != 4 or dense_prompt.shape[:2] != (fused.shape[0], 256):
+                    raise ValueError("dense_prompt must have shape [B,256,H,W]")
+                dense = F.interpolate(dense_prompt, fused.shape[-2:], mode="bilinear", align_corners=False)
+                fused = fused + self.dense_prompt_proj(dense)
+            if self.spatial_prompt_mode in {"both", "token"}:
+                if token_prompt is None:
+                    raise KeyError("spatial prompt requires token_prompt")
+                if token_prompt.ndim != 3 or token_prompt.shape[0] != fused.shape[0] or token_prompt.shape[2] != 256:
+                    raise ValueError("token_prompt must have shape [B,N,256]")
+                query = self.token_query(fused.flatten(2).transpose(1, 2))
+                key = self.token_key(token_prompt)
+                value = self.token_value(token_prompt)
+                attention = torch.softmax(query @ key.transpose(-2, -1) / 8.0, dim=-1)
+                modulation = self.token_output(attention @ value).transpose(1, 2).reshape_as(fused)
+                fused = fused + modulation
         logits = self.classifier(fused)
         return F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)
