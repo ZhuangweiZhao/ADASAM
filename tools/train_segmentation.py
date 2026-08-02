@@ -18,7 +18,11 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.datasets.industrial import LabelRatioSubset, NEUSegSemanticDataset  # noqa: E402
-from adasam.losses import DefectPromptAlignmentLoss, LabelEfficientSegmentationLoss  # noqa: E402
+from adasam.losses import (  # noqa: E402
+    DefectPromptAlignmentLoss,
+    LabelEfficientSegmentationLoss,
+    PrototypeCompactnessLoss,
+)
 from adasam.models import LabelEfficientSAM  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
 
@@ -40,6 +44,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prompt-fusion-mode", choices=["both", "dense", "token"], default="both")
     parser.add_argument("--num-prompt", type=int, default=None)
     parser.add_argument("--prompt-align-weight", type=float, default=0.0)
+    parser.add_argument("--use-prototype", action="store_true")
+    parser.add_argument("--prototype-version", choices=["none", "dpm"], default=None)
+    parser.add_argument("--prototype-momentum", type=float, default=0.9)
+    parser.add_argument("--prototype-loss-weight", type=float, default=0.05)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=42)
@@ -137,6 +145,7 @@ def main() -> None:
         test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
     prompt_version = args.prompt_version or ("v1" if args.use_dapg else "none")
+    prototype_version = args.prototype_version or ("dpm" if args.use_prototype else "none")
     num_prompt = args.num_prompt if args.num_prompt is not None else (8 if prompt_version in {"v2", "v3"} else 16)
     model = LabelEfficientSAM.build(
         resolve_path(args.checkpoint),
@@ -147,9 +156,12 @@ def main() -> None:
         use_dapg=args.use_dapg, num_prompt=num_prompt, prompt_version=prompt_version,
         prompt_fusion_mode=args.prompt_fusion_mode,
         use_cat_adapter=args.adapter == "cat",
+        prototype_version=prototype_version,
+        prototype_momentum=args.prototype_momentum,
     )
     criterion = LabelEfficientSegmentationLoss()
     prompt_criterion = DefectPromptAlignmentLoss()
+    prototype_criterion = PrototypeCompactnessLoss()
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -167,11 +179,14 @@ def main() -> None:
 
     adapter_name = "cat" if args.adapter == "cat" else "no_cat"
     variant = f"dapg_{prompt_version}" if prompt_version != "none" else "baseline"
+    if prototype_version == "dpm":
+        variant += "+dpm"
     output_dir = resolve_path(args.output_dir) / f"neu_seg_ratio{args.label_ratio}_seed{args.seed}"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"variant={variant} adapter={adapter_name} "
-        f"num_prompt={num_prompt if prompt_version != 'none' else 0}"
+        f"num_prompt={num_prompt if prompt_version != 'none' else 0} "
+        f"prototype={prototype_version}"
     )
     history = []
     best_score = -1.0
@@ -181,16 +196,26 @@ def main() -> None:
         started = time.perf_counter()
         losses = []
         prompt_losses = []
+        prototype_losses = []
         for batch in tqdm(loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            prediction, prompts = model.forward_with_prompts(image)
+            prediction, prompts, prototype_aux = model.forward_with_auxiliary(image, target)
             loss = criterion(prediction, target)
             if args.prompt_align_weight > 0.0 and prompts is not None and "dense_prompt" in prompts:
                 align_loss = prompt_criterion(prompts["dense_prompt"], target)
                 loss = loss + args.prompt_align_weight * align_loss
                 prompt_losses.append(float(align_loss.detach()))
+            if prototype_aux is not None and args.prototype_loss_weight > 0.0:
+                prototype_loss = prototype_criterion(
+                    prototype_aux["source_feature"],
+                    target,
+                    prototype_aux["prototypes"],
+                    prototype_aux["initialized"],
+                )
+                loss = loss + args.prototype_loss_weight * prototype_loss
+                prototype_losses.append(float(prototype_loss.detach()))
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach()))
@@ -204,6 +229,8 @@ def main() -> None:
         }
         if prompt_losses:
             record["mean_prompt_align_loss"] = sum(prompt_losses) / len(prompt_losses)
+        if prototype_losses:
+            record["mean_prototype_loss"] = sum(prototype_losses) / len(prototype_losses)
         record["validation"] = evaluate(
             model, validation_loader, device, base_dataset.NUM_CLASSES
         )
@@ -227,6 +254,9 @@ def main() -> None:
         "prompt_align_weight": args.prompt_align_weight,
         "prompt_fusion_mode": args.prompt_fusion_mode,
         "adapter": args.adapter,
+        "prototype_version": prototype_version,
+        "prototype_momentum": args.prototype_momentum,
+        "prototype_loss_weight": args.prototype_loss_weight,
     }
     torch.save(checkpoint, output_dir / "last_model.pt")
     (output_dir / "metrics.json").write_text(
@@ -240,6 +270,9 @@ def main() -> None:
                 "best_epoch": best["epoch"],
                 "test": test_metrics,
                 "adapter": args.adapter,
+                "prototype_version": prototype_version,
+                "prototype_momentum": args.prototype_momentum,
+                "prototype_loss_weight": args.prototype_loss_weight,
             },
             indent=2,
         ),

@@ -11,6 +11,7 @@ from adasam.losses.prototype_query_loss import PrototypeQuerySemanticLoss
 from adasam.losses.label_efficient_loss import (
     DefectPromptAlignmentLoss,
     LabelEfficientSegmentationLoss,
+    PrototypeCompactnessLoss,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "PrototypeQuerySemanticLoss",
     "LabelEfficientSegmentationLoss",
     "DefectPromptAlignmentLoss",
+    "PrototypeCompactnessLoss",
 ]

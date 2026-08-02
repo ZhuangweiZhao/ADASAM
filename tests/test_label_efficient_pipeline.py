@@ -52,6 +52,27 @@ def test_parameter_counts_partition_total() -> None:
     assert counts["frozen"] > 0
 
 
+def test_dapg_v2_dpm_batch_four_forward_backward() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(),
+        num_classes=4,
+        decoder_dim=32,
+        prompt_version="v2",
+        num_prompt=8,
+        prototype_version="dpm",
+    )
+    image = torch.rand(4, 3, 512, 512)
+    target = torch.randint(0, 4, (4, 512, 512))
+    logits, prompts, prototype_aux = model.forward_with_auxiliary(image, target)
+    assert logits.shape == (4, 4, 512, 512)
+    assert prompts is not None and prompts["dense_prompt"].ndim == 4
+    assert prototype_aux is not None
+    assert prototype_aux["similarity"].shape[:2] == (4, 4)
+    LabelEfficientSegmentationLoss()(logits, target).backward()
+    assert model.prototype_memory is not None
+    assert model.prototype_memory.prior_projection.weight.grad is not None
+
+
 def test_label_ratio_subsets_are_nested() -> None:
     dataset = list(range(1000))
     one = LabelRatioSubset(dataset, 1, seed=7)

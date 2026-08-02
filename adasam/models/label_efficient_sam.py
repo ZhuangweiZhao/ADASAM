@@ -16,6 +16,7 @@ from adasam.models.prompt import (
     DefectPromptGenerator,
     FrequencyAwareDefectPromptGenerator,
 )
+from adasam.models.prototype import DefectPrototypeMemory
 from adasam.utils.transforms import PIXEL_MEAN, PIXEL_STD
 
 
@@ -33,6 +34,8 @@ class LabelEfficientSAM(nn.Module):
         prompt_version: str | None = None,
         prompt_fusion_mode: str = "both",
         use_cat_adapter: bool = True,
+        prototype_version: str = "none",
+        prototype_momentum: float = 0.9,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -42,6 +45,14 @@ class LabelEfficientSAM(nn.Module):
             else nn.Identity()
         )
         self.use_cat_adapter = use_cat_adapter
+        if prototype_version not in {"none", "dpm"}:
+            raise ValueError("prototype_version must be one of: none, dpm")
+        self.prototype_version = prototype_version
+        self.prototype_memory = (
+            DefectPrototypeMemory(num_classes, feature_dim=256, momentum=prototype_momentum)
+            if prototype_version == "dpm"
+            else None
+        )
         if prompt_version is None:
             prompt_version = "v1" if use_dapg else "none"
         if prompt_version not in {"none", "v1", "v2", "v3"}:
@@ -83,6 +94,8 @@ class LabelEfficientSAM(nn.Module):
         prompt_version: str | None = None,
         prompt_fusion_mode: str = "both",
         use_cat_adapter: bool = True,
+        prototype_version: str = "none",
+        prototype_momentum: float = 0.9,
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -93,6 +106,8 @@ class LabelEfficientSAM(nn.Module):
             prompt_version=prompt_version,
             prompt_fusion_mode=prompt_fusion_mode,
             use_cat_adapter=use_cat_adapter,
+            prototype_version=prototype_version,
+            prototype_momentum=prototype_momentum,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
@@ -113,8 +128,12 @@ class LabelEfficientSAM(nn.Module):
             features = self.backbone(self._preprocess(image))
         adapted = self.adapter(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
+        decoder_features = adapted
+        if self.prototype_memory is not None:
+            enhanced, _ = self.prototype_memory(adapted["embedding"], update_memory=False)
+            decoder_features = {**adapted, "embedding": enhanced}
         return self.decoder(
-            adapted, output_size=output_size,
+            decoder_features, output_size=output_size,
             prompt_tokens=prompts if self.prompt_version == "v1" else None,
             prompt=prompts if self.prompt_version in {"v2", "v3"} else None,
         )
@@ -123,17 +142,36 @@ class LabelEfficientSAM(nn.Module):
         self, image: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | dict[str, torch.Tensor] | None]:
         """Diagnostic forward returning logits and the selected prompt representation."""
+        logits, prompts, _ = self.forward_with_auxiliary(image)
+        return logits, prompts
+
+    def forward_with_auxiliary(
+        self, image: torch.Tensor, target: torch.Tensor | None = None
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor | dict[str, torch.Tensor] | None,
+        dict[str, torch.Tensor] | None,
+    ]:
+        """Training/diagnostic forward exposing prompt and prototype representations."""
+        if image.ndim != 4 or image.shape[1] != 3:
+            raise ValueError(f"expected image [B,3,H,W], got {tuple(image.shape)}")
         output_size = tuple(image.shape[-2:])
         with torch.no_grad():
             features = self.backbone(self._preprocess(image))
         adapted = self.adapter(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
+        prototype_aux = None
+        decoder_features = adapted
+        if self.prototype_memory is not None:
+            enhanced, prototype_aux = self.prototype_memory(adapted["embedding"], target=target)
+            decoder_features = {**adapted, "embedding": enhanced}
         logits = self.decoder(
-            adapted, output_size,
+            decoder_features,
+            output_size,
             prompt_tokens=prompts if self.prompt_version == "v1" else None,
             prompt=prompts if self.prompt_version in {"v2", "v3"} else None,
         )
-        return logits, prompts
+        return logits, prompts, prototype_aux
 
     def parameter_counts(self) -> dict[str, int]:
         total = sum(parameter.numel() for parameter in self.parameters())

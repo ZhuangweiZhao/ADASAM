@@ -1,0 +1,5 @@
+prototype:
+  enabled: true
+  version: dpm
+  momentum: 0.9
+  lambda_proto: 0.05

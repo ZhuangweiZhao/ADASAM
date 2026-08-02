@@ -68,3 +68,35 @@ class DefectPromptAlignmentLoss(nn.Module):
         denominator = probability.sum(dims) + foreground.sum(dims)
         dice = 1.0 - ((2.0 * intersection + self.eps) / (denominator + self.eps)).mean()
         return self.bce_weight * bce + self.dice_weight * dice
+
+
+class PrototypeCompactnessLoss(nn.Module):
+    """Pull labeled feature pixels toward their corresponding class prototype."""
+
+    def forward(
+        self,
+        feature: torch.Tensor,
+        target: torch.Tensor,
+        prototypes: torch.Tensor,
+        initialized: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if feature.ndim != 4 or target.ndim != 3 or prototypes.ndim != 2:
+            raise ValueError("expected feature [B,D,H,W], target [B,H,W], prototypes [C,D]")
+        target_small = F.interpolate(
+            target.unsqueeze(1).float(), size=feature.shape[-2:], mode="nearest"
+        ).squeeze(1).long()
+        class_losses = []
+        for class_id in range(prototypes.shape[0]):
+            if initialized is not None and not bool(initialized[class_id]):
+                continue
+            class_mask = target_small == class_id
+            if not class_mask.any():
+                continue
+            pixels = feature.permute(0, 2, 3, 1)[class_mask]
+            class_prototype = prototypes[class_id].detach().unsqueeze(0)
+            class_losses.append(
+                (1.0 - F.cosine_similarity(pixels, class_prototype, dim=1, eps=1e-6)).mean()
+            )
+        if not class_losses:
+            return feature.sum() * 0.0
+        return torch.stack(class_losses).mean()
