@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--use-dapg", action="store_true")
     parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
     parser.add_argument("--prompt-fusion-mode", choices=["both", "dense", "token"], default="both")
@@ -145,6 +146,7 @@ def main() -> None:
         decoder_dim=args.decoder_dim,
         use_dapg=args.use_dapg, num_prompt=num_prompt, prompt_version=prompt_version,
         prompt_fusion_mode=args.prompt_fusion_mode,
+        use_cat_adapter=args.adapter == "cat",
     )
     criterion = LabelEfficientSegmentationLoss()
     prompt_criterion = DefectPromptAlignmentLoss()
@@ -163,10 +165,14 @@ def main() -> None:
         f"label_pool={len(label_pool)} train={len(dataset)} validation={len(validation)}"
     )
 
+    adapter_name = "cat" if args.adapter == "cat" else "no_cat"
     variant = f"dapg_{prompt_version}" if prompt_version != "none" else "baseline"
     output_dir = resolve_path(args.output_dir) / f"neu_seg_ratio{args.label_ratio}_seed{args.seed}"
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"variant={variant} num_prompt={num_prompt if prompt_version != 'none' else 0}")
+    print(
+        f"variant={variant} adapter={adapter_name} "
+        f"num_prompt={num_prompt if prompt_version != 'none' else 0}"
+    )
     history = []
     best_score = -1.0
     best_path = output_dir / "best_model.pt"
@@ -220,6 +226,7 @@ def main() -> None:
         "test": test_metrics,
         "prompt_align_weight": args.prompt_align_weight,
         "prompt_fusion_mode": args.prompt_fusion_mode,
+        "adapter": args.adapter,
     }
     torch.save(checkpoint, output_dir / "last_model.pt")
     (output_dir / "metrics.json").write_text(
@@ -232,6 +239,7 @@ def main() -> None:
                 "history": history,
                 "best_epoch": best["epoch"],
                 "test": test_metrics,
+                "adapter": args.adapter,
             },
             indent=2,
         ),

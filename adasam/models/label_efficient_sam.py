@@ -32,10 +32,16 @@ class LabelEfficientSAM(nn.Module):
         num_prompt: int = 16,
         prompt_version: str | None = None,
         prompt_fusion_mode: str = "both",
+        use_cat_adapter: bool = True,
     ) -> None:
         super().__init__()
         self.backbone = backbone
-        self.adapter = MultiScaleCATAdapter(bottleneck_ratio=adapter_ratio)
+        self.adapter = (
+            MultiScaleCATAdapter(bottleneck_ratio=adapter_ratio)
+            if use_cat_adapter
+            else nn.Identity()
+        )
+        self.use_cat_adapter = use_cat_adapter
         if prompt_version is None:
             prompt_version = "v1" if use_dapg else "none"
         if prompt_version not in {"none", "v1", "v2", "v3"}:
@@ -76,6 +82,7 @@ class LabelEfficientSAM(nn.Module):
         num_prompt: int = 16,
         prompt_version: str | None = None,
         prompt_fusion_mode: str = "both",
+        use_cat_adapter: bool = True,
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -85,6 +92,7 @@ class LabelEfficientSAM(nn.Module):
             use_dapg=use_dapg, num_prompt=num_prompt,
             prompt_version=prompt_version,
             prompt_fusion_mode=prompt_fusion_mode,
+            use_cat_adapter=use_cat_adapter,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":

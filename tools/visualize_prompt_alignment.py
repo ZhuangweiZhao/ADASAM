@@ -75,6 +75,7 @@ def main() -> None:
         "num_prompt": ckpt_args.get("num_prompt"),
         "prompt_version": ckpt_args.get("prompt_version"),
         "prompt_fusion_mode": ckpt_args.get("prompt_fusion_mode", "both"),
+        "adapter": ckpt_args.get("adapter", "cat"),
     }
     if model_args["num_prompt"] is None:
         model_args["num_prompt"] = 8 if model_args["prompt_version"] in {"v2", "v3"} else 16
@@ -96,6 +97,7 @@ def main() -> None:
         num_prompt=model_args["num_prompt"],
         prompt_version=model_args["prompt_version"],
         prompt_fusion_mode=model_args["prompt_fusion_mode"],
+        use_cat_adapter=model_args["adapter"] == "cat",
     )
     model.load_state_dict(checkpoint["model"])
     model.eval()

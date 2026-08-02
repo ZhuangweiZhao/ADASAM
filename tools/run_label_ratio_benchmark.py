@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--data-root", default="data/NEU_Seg")
+    parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--use-dapg", action="store_true")
     parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
     parser.add_argument("--prompt-fusion-mode", choices=["both", "dense", "token"], default="both")
@@ -42,6 +43,7 @@ def main() -> None:
             "--epochs", str(args.epochs),
             "--batch-size", str(args.batch_size),
             "--data-root", args.data_root,
+            "--adapter", args.adapter,
             "--device", args.device,
             "--seed", str(args.seed),
             "--output-dir", str(output_root),
@@ -78,6 +80,7 @@ def main() -> None:
         "protocol": {
             "dataset": "NEU_Seg",
             "model": "LabelEfficientSAM" if (args.prompt_version or ("v1" if args.use_dapg else "none")) == "none" else f"LabelEfficientSAM+DAPG-{(args.prompt_version or 'v1').upper()}",
+            "adapter": args.adapter,
             "seed": args.seed,
             "epochs": args.epochs,
             "validation_fraction": 0.2,
