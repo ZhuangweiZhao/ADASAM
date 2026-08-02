@@ -10,6 +10,7 @@ from tqdm import tqdm
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from adasam.datasets.industrial import LabelRatioSubset, NEUSegSemanticDataset  # noqa: E402
+from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.losses import LabelEfficientSegmentationLoss  # noqa: E402
 from adasam.models import LabelEfficientUNet  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
@@ -23,13 +24,16 @@ def args():
     p.add_argument("--lr",type=float,default=1e-3); p.add_argument("--weight-decay",type=float,default=1e-4)
     p.add_argument("--seed",type=int,default=42); p.add_argument("--device",default="cuda")
     p.add_argument("--val-fraction",type=float,default=.2); p.add_argument("--output-dir",default="runs/unet_label_ratio")
+    p.add_argument("--augmentation",choices=["none","basic","defect"],default="none")
     return p.parse_args()
 
 def main():
     a=args(); set_seed(a.seed); device=torch.device(a.device if torch.cuda.is_available() else "cpu")
     root=Path(a.data_root); root=root if root.is_absolute() else ROOT/root
     base=NEUSegSemanticDataset(root,"train"); pool=LabelRatioSubset(base,a.label_ratio,a.seed)
-    n=max(1,round(len(pool)*a.val_fraction)); val=Subset(base,pool.indices[:n]); train=Subset(base,pool.indices[n:])
+    train_base=NEUSegSemanticDataset(root,"train",transforms=build_augmentation(a.augmentation))
+    validation_base=NEUSegSemanticDataset(root,"train")
+    n=max(1,round(len(pool)*a.val_fraction)); val=Subset(validation_base,pool.indices[:n]); train=Subset(train_base,pool.indices[n:])
     test=NEUSegSemanticDataset(root,"test"); kw={"batch_size":a.batch_size,"shuffle":False,"num_workers":0}
     train_loader=DataLoader(train,shuffle=True,**{k:v for k,v in kw.items() if k!="shuffle"}); val_loader=DataLoader(val,**kw); test_loader=DataLoader(test,**kw)
     model=LabelEfficientUNet(base.NUM_CLASSES,a.base_channels).to(device); criterion=LabelEfficientSegmentationLoss(); opt=AdamW(model.parameters(),lr=a.lr,weight_decay=a.weight_decay)
@@ -45,6 +49,6 @@ def main():
         print(json.dumps(record))
         if val_metrics["mIoU_fg"]>best: best=val_metrics["mIoU_fg"]; torch.save({"model":model.state_dict(),"epoch":epoch},best_path)
     model.load_state_dict(torch.load(best_path,map_location=device,weights_only=False)["model"]); test_metrics=evaluate(model,test_loader,device,base.NUM_CLASSES)
-    metrics={"parameters":counts,"label_pool_samples":len(pool),"train_samples":len(train),"validation_samples":len(val),"history":history,"best_epoch":torch.load(best_path,map_location="cpu",weights_only=False)["epoch"],"test":test_metrics}
+    metrics={"parameters":counts,"label_pool_samples":len(pool),"train_samples":len(train),"validation_samples":len(val),"history":history,"best_epoch":torch.load(best_path,map_location="cpu",weights_only=False)["epoch"],"test":test_metrics,"augmentation":a.augmentation}
     (out/"metrics.json").write_text(json.dumps(metrics,indent=2),encoding="utf-8"); torch.save({"model":model.state_dict(),"metrics":metrics},out/"last_model.pt"); print(f"test={json.dumps(test_metrics)}\nsaved={out}")
 if __name__=="__main__": main()
