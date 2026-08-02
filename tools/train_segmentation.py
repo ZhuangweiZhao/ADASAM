@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from adasam.datasets.industrial import LabelRatioSubset, NEUSegSemanticDataset  # noqa: E402
+from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.losses import (  # noqa: E402
     DefectPromptAlignmentLoss,
     LabelEfficientSegmentationLoss,
@@ -54,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", default="runs/label_efficient")
+    parser.add_argument("--augmentation", choices=["none", "basic", "defect"], default="none")
     return parser.parse_args()
 
 
@@ -128,8 +130,12 @@ def main() -> None:
     val_count = max(1, round(len(label_pool) * args.val_fraction))
     if val_count >= len(label_pool):
         raise ValueError("label pool is too small for a non-empty train/validation split")
-    validation = Subset(base_dataset, label_pool.indices[:val_count])
-    dataset = Subset(base_dataset, label_pool.indices[val_count:])
+    train_dataset = NEUSegSemanticDataset(
+        resolve_path(args.data_root), split="train", transforms=build_augmentation(args.augmentation)
+    )
+    validation_dataset = NEUSegSemanticDataset(resolve_path(args.data_root), split="train")
+    validation = Subset(validation_dataset, label_pool.indices[:val_count])
+    dataset = Subset(train_dataset, label_pool.indices[val_count:])
     test_dataset = NEUSegSemanticDataset(resolve_path(args.data_root), split="test")
     loader = DataLoader(
         dataset,
@@ -186,7 +192,7 @@ def main() -> None:
     print(
         f"variant={variant} adapter={adapter_name} "
         f"num_prompt={num_prompt if prompt_version != 'none' else 0} "
-        f"prototype={prototype_version}"
+        f"prototype={prototype_version} augmentation={args.augmentation}"
     )
     history = []
     best_score = -1.0
@@ -257,6 +263,7 @@ def main() -> None:
         "prototype_version": prototype_version,
         "prototype_momentum": args.prototype_momentum,
         "prototype_loss_weight": args.prototype_loss_weight,
+        "augmentation": args.augmentation,
     }
     torch.save(checkpoint, output_dir / "last_model.pt")
     (output_dir / "metrics.json").write_text(
@@ -273,6 +280,7 @@ def main() -> None:
                 "prototype_version": prototype_version,
                 "prototype_momentum": args.prototype_momentum,
                 "prototype_loss_weight": args.prototype_loss_weight,
+                "augmentation": args.augmentation,
             },
             indent=2,
         ),

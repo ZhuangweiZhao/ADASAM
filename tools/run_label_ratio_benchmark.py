@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default="runs/label_ratio_benchmark")
+    parser.add_argument("--augmentation", choices=["none", "basic", "defect"], default="none")
     return parser.parse_args()
 
 
@@ -51,6 +52,7 @@ def main() -> None:
             "--device", args.device,
             "--seed", str(args.seed),
             "--output-dir", str(output_root),
+            "--augmentation", args.augmentation,
         ]
         prompt_version = args.prompt_version or ("v1" if args.use_dapg else "none")
         if prompt_version != "none":
@@ -80,6 +82,7 @@ def main() -> None:
                 "mIoU_fg": test["mIoU_fg"],
                 "Dice": test["Dice"],
                 "Dice_fg": test["Dice_fg"],
+                "pixel_accuracy": test["pixel_accuracy"],
                 "train_time_seconds": sum(item["seconds"] for item in metrics["history"]),
                 "FPS": test["FPS"],
                 "best_epoch": metrics["best_epoch"],
@@ -99,6 +102,7 @@ def main() -> None:
             "prototype_version": args.prototype_version or ("dpm" if args.use_prototype else "none"),
             "prototype_momentum": args.prototype_momentum,
             "prototype_loss_weight": args.prototype_loss_weight,
+            "augmentation": args.augmentation,
         },
         "results": rows,
     }

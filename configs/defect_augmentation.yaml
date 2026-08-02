@@ -1,0 +1,10 @@
+augmentation:
+  mode: defect
+  horizontal_flip_probability: 0.5
+  vertical_flip_probability: 0.5
+  rotation_probability: 0.5
+  brightness: 0.15
+  contrast: 0.15
+  copy_paste_probability: 0.7
+  scale_range: [0.65, 1.25]
+  max_added_area_ratio: 0.15
