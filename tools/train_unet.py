@@ -18,7 +18,7 @@ from tools.train_segmentation import evaluate  # noqa: E402
 
 def args():
     p=argparse.ArgumentParser(); p.add_argument("--dataset",choices=["neu_seg"],default="neu_seg")
-    p.add_argument("--label_ratio",type=int,choices=[1,5,10,25,100],required=True)
+    p.add_argument("--label_ratio",type=int,choices=[1,5,10,20,25,50,100],required=True)
     p.add_argument("--data-root",default="data/NEU_Seg"); p.add_argument("--epochs",type=int,default=100)
     p.add_argument("--batch-size",type=int,default=16); p.add_argument("--base-channels",type=int,default=32)
     p.add_argument("--lr",type=float,default=1e-3); p.add_argument("--weight-decay",type=float,default=1e-4)

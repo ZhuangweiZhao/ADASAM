@@ -12,8 +12,8 @@ class LabelRatioSubset(Dataset):
     """Deterministic nested percentage subset of a semantic dataset."""
 
     def __init__(self, dataset: Dataset, ratio: int, seed: int = 42) -> None:
-        if ratio not in {1, 5, 10, 25, 100}:
-            raise ValueError("label_ratio must be one of 1, 5, 10, 25, 100")
+        if ratio not in {1, 5, 10, 20, 25, 50, 100}:
+            raise ValueError("label_ratio must be one of 1, 5, 10, 20, 25, 50, 100")
         self.dataset = dataset
         indices = list(range(len(dataset)))
         random.Random(seed).shuffle(indices)

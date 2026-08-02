@@ -80,3 +80,14 @@ def test_label_ratio_subsets_are_nested() -> None:
     assert len(one) == 10
     assert len(five) == 50
     assert set(one.indices).issubset(five.indices)
+
+
+def test_extended_label_ratios_are_nested() -> None:
+    dataset = list(range(1000))
+    ten = LabelRatioSubset(dataset, 10, seed=7)
+    twenty = LabelRatioSubset(dataset, 20, seed=7)
+    fifty = LabelRatioSubset(dataset, 50, seed=7)
+    assert len(twenty) == 200
+    assert len(fifty) == 500
+    assert set(ten.indices).issubset(twenty.indices)
+    assert set(twenty.indices).issubset(fifty.indices)

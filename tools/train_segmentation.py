@@ -31,7 +31,7 @@ from adasam.utils import set_seed  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Label-efficient semantic segmentation")
     parser.add_argument("--dataset", choices=["neu_seg"], default="neu_seg")
-    parser.add_argument("--label_ratio", type=int, choices=[1, 5, 10, 25, 100], required=True)
+    parser.add_argument("--label_ratio", type=int, choices=[1, 5, 10, 20, 25, 50, 100], required=True)
     parser.add_argument("--data-root", default="data/NEU_Seg")
     parser.add_argument("--checkpoint", default="weights/mobile_sam.pt")
     parser.add_argument("--epochs", type=int, default=1)
