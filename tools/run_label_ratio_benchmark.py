@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", default="runs/label_ratio_benchmark")
     parser.add_argument("--augmentation", choices=["none", "basic", "defect"], default="none")
+    parser.add_argument("--split-protocol", choices=["legacy", "fixed"], default="legacy")
+    parser.add_argument("--validation-seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -53,6 +55,8 @@ def main() -> None:
             "--seed", str(args.seed),
             "--output-dir", str(output_root),
             "--augmentation", args.augmentation,
+            "--split-protocol", args.split_protocol,
+            "--validation-seed", str(args.validation_seed),
         ]
         prompt_version = args.prompt_version or ("v1" if args.use_dapg else "none")
         if prompt_version != "none":
@@ -103,6 +107,8 @@ def main() -> None:
             "prototype_momentum": args.prototype_momentum,
             "prototype_loss_weight": args.prototype_loss_weight,
             "augmentation": args.augmentation,
+            "split_protocol": args.split_protocol,
+            "validation_seed": args.validation_seed,
         },
         "results": rows,
     }

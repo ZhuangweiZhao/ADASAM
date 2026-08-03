@@ -15,12 +15,14 @@ class LabelEfficientSegmentationLoss(nn.Module):
         ce_weight: float = 1.0,
         dice_weight: float = 1.0,
         include_background: bool = True,
+        ignore_index: int | None = None,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
         self.include_background = include_background
+        self.ignore_index = ignore_index
         self.eps = eps
 
     def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -28,10 +30,21 @@ class LabelEfficientSegmentationLoss(nn.Module):
             raise ValueError("expected prediction [B,C,H,W] and target [B,H,W]")
         if prediction.shape[0] != target.shape[0] or prediction.shape[-2:] != target.shape[-2:]:
             raise ValueError("prediction and target batch/spatial shapes must match")
-        ce = F.cross_entropy(prediction, target.long())
+        ce = F.cross_entropy(
+            prediction,
+            target.long(),
+            ignore_index=self.ignore_index if self.ignore_index is not None else -100,
+        )
         probabilities = prediction.softmax(dim=1)
-        one_hot = F.one_hot(target.long(), prediction.shape[1]).permute(0, 3, 1, 2)
+        valid = torch.ones_like(target, dtype=torch.bool)
+        if self.ignore_index is not None:
+            valid = target != self.ignore_index
+        safe_target = target.long().masked_fill(~valid, 0)
+        one_hot = F.one_hot(safe_target, prediction.shape[1]).permute(0, 3, 1, 2)
         one_hot = one_hot.to(probabilities.dtype)
+        valid_mask = valid.unsqueeze(1).to(probabilities.dtype)
+        probabilities = probabilities * valid_mask
+        one_hot = one_hot * valid_mask
         if not self.include_background:
             probabilities = probabilities[:, 1:]
             one_hot = one_hot[:, 1:]

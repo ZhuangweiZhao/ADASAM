@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from adasam.datasets.industrial import LabelRatioSubset
+from adasam.datasets.industrial import LabelRatioSubset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
 from adasam.models import LabelEfficientSAM
 
@@ -91,3 +91,16 @@ def test_extended_label_ratios_are_nested() -> None:
     assert len(fifty) == 500
     assert set(ten.indices).issubset(twenty.indices)
     assert set(twenty.indices).issubset(fifty.indices)
+
+
+def test_fixed_validation_protocol_is_fixed_and_training_sets_are_nested() -> None:
+    train_5, validation_5, pool_5 = fixed_validation_split_indices(1000, 5, seed=123)
+    train_10, validation_10, pool_10 = fixed_validation_split_indices(1000, 10, seed=123)
+    _, validation_other_seed, _ = fixed_validation_split_indices(1000, 10, seed=456)
+    assert validation_5 == validation_10 == validation_other_seed
+    assert len(validation_5) == 200
+    assert len(pool_5) == len(pool_10) == 800
+    assert len(train_5) == 40
+    assert len(train_10) == 80
+    assert set(train_5).issubset(train_10)
+    assert set(train_10).isdisjoint(validation_10)

@@ -25,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", default="data/NEU_Seg")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", default="runs/multiseed_matrix")
+    parser.add_argument("--split-protocol", choices=["legacy", "fixed"], default="fixed")
+    parser.add_argument("--validation-seed", type=int, default=42)
     parser.add_argument("--rerun-completed", action="store_true")
     return parser.parse_args()
 
@@ -33,13 +35,18 @@ def experiment_dir(root: Path, model: str, augmentation: str, ratio: int, seed: 
     return root / f"{model}_{augmentation}" / f"neu_seg_ratio{ratio}_seed{seed}"
 
 
-def is_complete(path: Path, epochs: int) -> bool:
+def is_complete(path: Path, epochs: int, split_protocol: str, validation_seed: int) -> bool:
     metrics_path = path / "metrics.json"
     if not metrics_path.exists():
         return False
     try:
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        return len(metrics.get("history", [])) == epochs and "test" in metrics
+        return (
+            len(metrics.get("history", [])) == epochs
+            and "test" in metrics
+            and metrics.get("split_protocol", "legacy") == split_protocol
+            and int(metrics.get("validation_seed", 42)) == validation_seed
+        )
     except (OSError, json.JSONDecodeError):
         return False
 
@@ -54,6 +61,8 @@ def training_command(args: argparse.Namespace, model: str, augmentation: str, ra
         "--device", args.device,
         "--seed", str(seed),
         "--output-dir", str(output_root / f"{model}_{augmentation}"),
+        "--split-protocol", args.split_protocol,
+        "--validation-seed", str(args.validation_seed),
     ]
     if model == "unet":
         return [sys.executable, str(ROOT / "tools" / "train_unet.py"), *common, "--base-channels", str(args.base_channels)]
@@ -79,6 +88,8 @@ def collect(output_root: Path, args: argparse.Namespace) -> tuple[list[dict], li
                         "ratio": ratio,
                         "seed": seed,
                         "labeled_images": saved["label_pool_samples"],
+                        "training_pool_images": saved.get("training_pool_samples"),
+                        "validation_images": saved.get("validation_samples"),
                         **{metric: test[metric] for metric in METRICS},
                         "train_time_seconds": sum(epoch["seconds"] for epoch in saved["history"]),
                         "best_epoch": saved["best_epoch"],
@@ -112,6 +123,8 @@ def write_summary(output_root: Path, args: argparse.Namespace) -> None:
             "validation_fraction": 0.2,
             "validation_augmentation": "none",
             "test_augmentation": "none",
+            "split_protocol": args.split_protocol,
+            "validation_seed": args.validation_seed,
             "planned_runs": len(args.seeds) * len(args.ratios) * len(args.models) * len(args.augmentations),
             "completed_runs": len(rows),
         },
@@ -135,7 +148,9 @@ def main() -> None:
                 for seed in args.seeds:
                     current += 1
                     path = experiment_dir(output_root, model, augmentation, ratio, seed)
-                    if not args.rerun_completed and is_complete(path, args.epochs):
+                    if not args.rerun_completed and is_complete(
+                        path, args.epochs, args.split_protocol, args.validation_seed
+                    ):
                         print(f"[{current}/{total}] skip completed: {model} aug={augmentation} ratio={ratio} seed={seed}")
                         continue
                     print(f"[{current}/{total}] run: {model} aug={augmentation} ratio={ratio} seed={seed}")

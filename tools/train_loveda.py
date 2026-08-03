@@ -1,0 +1,187 @@
+"""Train U-Net, Frozen MobileSAM, or DAPG-v2 on LoveDA."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import torch
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from adasam.datasets.augmentation import build_augmentation  # noqa: E402
+from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices  # noqa: E402
+from adasam.losses import LabelEfficientSegmentationLoss  # noqa: E402
+from adasam.models import LabelEfficientSAM, LabelEfficientUNet  # noqa: E402
+from adasam.utils import set_seed  # noqa: E402
+from tools.train_segmentation import evaluate  # noqa: E402
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Label-efficient LoveDA segmentation")
+    parser.add_argument("--model", choices=["unet", "mobilesam", "ours"], required=True)
+    parser.add_argument("--label-ratio", type=int, choices=[1, 5, 10, 20, 25, 50, 100], required=True)
+    parser.add_argument("--data-root", default="data/LoveDA")
+    parser.add_argument("--checkpoint", default="weights/mobile_sam.pt")
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--image-size", type=int, default=512)
+    parser.add_argument("--sam-image-size", type=int, default=224)
+    parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument("--base-channels", type=int, default=32)
+    parser.add_argument("--augmentation", choices=["none", "basic"], default="basic")
+    parser.add_argument("--val-fraction", type=float, default=0.2)
+    parser.add_argument("--validation-seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--output-dir", default="runs/loveda")
+    return parser.parse_args()
+
+
+def resolve(value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
+
+
+def main() -> None:
+    args = parse_args()
+    set_seed(args.seed)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    data_root = resolve(args.data_root)
+    selection_dataset = LoveDASemanticDataset(data_root, "train", args.image_size)
+    train_indices, validation_indices, training_pool = fixed_validation_split_indices(
+        len(selection_dataset), args.label_ratio, args.seed, args.val_fraction, args.validation_seed
+    )
+    train_base = LoveDASemanticDataset(
+        data_root, "train", args.image_size, transforms=build_augmentation(args.augmentation)
+    )
+    validation_base = LoveDASemanticDataset(data_root, "train", args.image_size)
+    official_validation = LoveDASemanticDataset(data_root, "val", args.image_size)
+    train_dataset = Subset(train_base, train_indices)
+    validation_dataset = Subset(validation_base, validation_indices)
+    loader_options = {
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": device.type == "cuda",
+    }
+    train_loader = DataLoader(train_dataset, shuffle=True, **loader_options)
+    validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
+    test_loader = DataLoader(official_validation, shuffle=False, **loader_options)
+
+    if args.model == "unet":
+        model = LabelEfficientUNet(
+            LoveDASemanticDataset.NUM_CLASSES, args.base_channels
+        ).to(device)
+    else:
+        model = LabelEfficientSAM.build(
+            resolve(args.checkpoint),
+            num_classes=LoveDASemanticDataset.NUM_CLASSES,
+            img_size=args.sam_image_size,
+            device=device,
+            decoder_dim=args.decoder_dim,
+            prompt_version="v2" if args.model == "ours" else "none",
+            num_prompt=8,
+            prompt_fusion_mode="both",
+            use_cat_adapter=True,
+        )
+    criterion = LabelEfficientSegmentationLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
+    optimizer = AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+    )
+    counts = model.parameter_counts()
+    output_dir = resolve(args.output_dir) / f"loveda_ratio{args.label_ratio}_seed{args.seed}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_path = output_dir / "best_model.pt"
+    best_score = -1.0
+    history = []
+    print(
+        f"model={args.model} ratio={args.label_ratio}% train={len(train_dataset)} "
+        f"validation={len(validation_dataset)} official_val={len(official_validation)} "
+        f"augmentation={args.augmentation} image_size={args.image_size}"
+    )
+    print(
+        f"parameters total={counts['total']:,} trainable={counts['trainable']:,} "
+        f"frozen={counts['frozen']:,}"
+    )
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        started = time.perf_counter()
+        losses = []
+        for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
+            image = batch["image"].to(device, non_blocking=True)
+            target = batch["mask"].to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            loss = criterion(model(image), target)
+            loss.backward()
+            optimizer.step()
+            losses.append(float(loss.detach()))
+        elapsed = time.perf_counter() - started
+        validation_metrics = evaluate(
+            model,
+            validation_loader,
+            device,
+            LoveDASemanticDataset.NUM_CLASSES,
+            ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+        )
+        record = {
+            "epoch": epoch,
+            "mean_loss": sum(losses) / len(losses),
+            "first_loss": losses[0],
+            "last_loss": losses[-1],
+            "seconds": elapsed,
+            "validation": validation_metrics,
+        }
+        history.append(record)
+        print(json.dumps(record))
+        if validation_metrics["mIoU"] > best_score:
+            best_score = validation_metrics["mIoU"]
+            torch.save({"model": model.state_dict(), "epoch": epoch}, best_path)
+
+    best = torch.load(best_path, map_location=device, weights_only=False)
+    model.load_state_dict(best["model"])
+    test_metrics = evaluate(
+        model,
+        test_loader,
+        device,
+        LoveDASemanticDataset.NUM_CLASSES,
+        ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+    )
+    metrics = {
+        "dataset": "LoveDA",
+        "model": args.model,
+        "augmentation": args.augmentation,
+        "label_ratio": args.label_ratio,
+        "label_pool_samples": len(train_dataset),
+        "training_pool_samples": len(training_pool),
+        "train_samples": len(train_dataset),
+        "validation_samples": len(validation_dataset),
+        "test_samples": len(official_validation),
+        "split_protocol": "fixed_train_validation_official_val_test",
+        "validation_seed": args.validation_seed,
+        "parameters": counts,
+        "history": history,
+        "best_epoch": best["epoch"],
+        "test": test_metrics,
+        "args": vars(args),
+    }
+    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    torch.save({"model": model.state_dict(), "metrics": metrics}, output_dir / "last_model.pt")
+    print(f"test={json.dumps(test_metrics)}")
+    print(f"saved={output_dir}")
+
+
+if __name__ == "__main__":
+    main()

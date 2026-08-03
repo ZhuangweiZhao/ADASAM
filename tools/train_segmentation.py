@@ -17,7 +17,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from adasam.datasets.industrial import LabelRatioSubset, NEUSegSemanticDataset  # noqa: E402
+from adasam.datasets.industrial import (  # noqa: E402
+    LabelRatioSubset,
+    NEUSegSemanticDataset,
+    fixed_validation_split_indices,
+)
 from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.losses import (  # noqa: E402
     DefectPromptAlignmentLoss,
@@ -56,6 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", default="runs/label_efficient")
     parser.add_argument("--augmentation", choices=["none", "basic", "defect"], default="none")
+    parser.add_argument("--split-protocol", choices=["legacy", "fixed"], default="legacy")
+    parser.add_argument("--validation-seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -75,6 +81,7 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     num_classes: int,
+    ignore_index: int | None = None,
 ) -> dict:
     model.eval()
     intersection = torch.zeros(num_classes, dtype=torch.float64)
@@ -91,10 +98,13 @@ def evaluate(
         target = batch["mask"].to(device, non_blocking=True)
         prediction = model(image).argmax(dim=1)
         samples += image.shape[0]
-        correct += int((prediction == target).sum())
-        pixels += target.numel()
+        valid = torch.ones_like(target, dtype=torch.bool)
+        if ignore_index is not None:
+            valid = target != ignore_index
+        correct += int(((prediction == target) & valid).sum())
+        pixels += int(valid.sum())
         for class_id in range(num_classes):
-            pred_class = prediction == class_id
+            pred_class = (prediction == class_id) & valid
             target_class = target == class_id
             inter = (pred_class & target_class).sum().cpu()
             intersection[class_id] += inter
@@ -124,18 +134,29 @@ def main() -> None:
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     base_dataset = NEUSegSemanticDataset(resolve_path(args.data_root), split="train")
-    label_pool = LabelRatioSubset(base_dataset, args.label_ratio, seed=args.seed)
     if not 0.0 < args.val_fraction < 1.0:
         raise ValueError("val-fraction must be between 0 and 1")
-    val_count = max(1, round(len(label_pool) * args.val_fraction))
-    if val_count >= len(label_pool):
-        raise ValueError("label pool is too small for a non-empty train/validation split")
     train_dataset = NEUSegSemanticDataset(
         resolve_path(args.data_root), split="train", transforms=build_augmentation(args.augmentation)
     )
     validation_dataset = NEUSegSemanticDataset(resolve_path(args.data_root), split="train")
-    validation = Subset(validation_dataset, label_pool.indices[:val_count])
-    dataset = Subset(train_dataset, label_pool.indices[val_count:])
+    if args.split_protocol == "fixed":
+        train_indices, validation_indices, training_pool = fixed_validation_split_indices(
+            len(base_dataset), args.label_ratio, args.seed, args.val_fraction, args.validation_seed
+        )
+        label_pool_samples = len(train_indices)
+        dataset = Subset(train_dataset, train_indices)
+        validation = Subset(validation_dataset, validation_indices)
+        training_pool_samples = len(training_pool)
+    else:
+        label_pool = LabelRatioSubset(base_dataset, args.label_ratio, seed=args.seed)
+        val_count = max(1, round(len(label_pool) * args.val_fraction))
+        if val_count >= len(label_pool):
+            raise ValueError("label pool is too small for a non-empty train/validation split")
+        validation = Subset(validation_dataset, label_pool.indices[:val_count])
+        dataset = Subset(train_dataset, label_pool.indices[val_count:])
+        label_pool_samples = len(label_pool)
+        training_pool_samples = len(base_dataset)
     test_dataset = NEUSegSemanticDataset(resolve_path(args.data_root), split="test")
     loader = DataLoader(
         dataset,
@@ -180,7 +201,8 @@ def main() -> None:
     )
     print(
         f"dataset={args.dataset} label_ratio={args.label_ratio}% "
-        f"label_pool={len(label_pool)} train={len(dataset)} validation={len(validation)}"
+        f"label_pool={label_pool_samples} train={len(dataset)} validation={len(validation)} "
+        f"split_protocol={args.split_protocol} validation_seed={args.validation_seed}"
     )
 
     adapter_name = "cat" if args.adapter == "cat" else "no_cat"
@@ -270,9 +292,12 @@ def main() -> None:
         json.dumps(
             {
                 "parameters": counts,
-                "label_pool_samples": len(label_pool),
+                "label_pool_samples": label_pool_samples,
                 "train_samples": len(dataset),
                 "validation_samples": len(validation),
+                "training_pool_samples": training_pool_samples,
+                "split_protocol": args.split_protocol,
+                "validation_seed": args.validation_seed,
                 "history": history,
                 "best_epoch": best["epoch"],
                 "test": test_metrics,

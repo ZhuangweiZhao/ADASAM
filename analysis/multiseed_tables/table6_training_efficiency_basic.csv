@@ -1,0 +1,4 @@
+model,time_5_percent_seconds,time_10_percent_seconds,time_100_percent_seconds,fps_min,fps_max
+unet,60.2,116.5,1150.6,680,723
+frozen_mobilesam,27.7,54.3,499.7,785,855
+dapg_v2,29.4,57.1,552.0,718,769
