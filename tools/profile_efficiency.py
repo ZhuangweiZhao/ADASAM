@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 
@@ -15,6 +16,8 @@ import torch
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def parse_args() -> argparse.Namespace:
