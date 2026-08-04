@@ -52,6 +52,30 @@ def test_parameter_counts_partition_total() -> None:
     assert counts["frozen"] > 0
 
 
+def test_feature_scale_ablation_has_clean_parameter_and_gradient_scope() -> None:
+    embedding = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32, feature_scales="embedding"
+    )
+    full = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        feature_scales="p3_p4_embedding",
+    )
+    assert embedding.parameter_counts()["trainable"] < full.parameter_counts()["trainable"]
+    logits = embedding(torch.rand(2, 3, 128, 128))
+    logits.mean().backward()
+    assert set(embedding.adapter.adapters) == {"embedding"}
+    assert set(embedding.decoder.lateral) == {"embedding"}
+    assert all(parameter.grad is not None for parameter in embedding.adapter.parameters())
+
+
+def test_no_adapter_embedding_decoder_forward() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, feature_scales="embedding",
+    )
+    assert model(torch.rand(2, 3, 128, 128)).shape == (2, 4, 128, 128)
+
+
 def test_dapg_v2_dpm_batch_four_forward_backward() -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(),

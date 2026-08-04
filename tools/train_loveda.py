@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--sam-image-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
+    parser.add_argument("--feature-scales", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -95,8 +97,9 @@ def main() -> None:
             prompt_version="v2" if args.model == "ours" else "none",
             num_prompt=8,
             prompt_fusion_mode="both",
-            use_cat_adapter=True,
+            use_cat_adapter=args.adapter == "cat",
             decoder_version=args.decoder_version,
+            feature_scales=args.feature_scales,
         )
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
@@ -190,6 +193,8 @@ def main() -> None:
         "best_epoch": best["epoch"],
         "test": test_metrics,
         "args": vars(args),
+        "adapter": args.adapter,
+        "feature_scales": args.feature_scales,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     torch.save({"model": model.state_dict(), "metrics": metrics}, output_dir / "last_model.pt")

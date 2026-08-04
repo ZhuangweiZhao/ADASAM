@@ -24,6 +24,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--sam-image-size", type=int, default=224)
     parser.add_argument("--base-channels", type=int, default=32)
+    parser.add_argument("--adapters", nargs="+", choices=["cat", "none"], default=["cat"])
+    parser.add_argument("--feature-scales", nargs="+", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default=["p3_p4_embedding"])
     parser.add_argument("--decoder-versions", nargs="+", choices=["lightweight", "boundary_aux", "boundary"], default=["lightweight"])
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--data-root", default="data/LoveDA")
@@ -46,21 +48,29 @@ def main() -> None:
         for _seed in args.seeds
         for _augmentation in args.augmentations
         for model in args.models
+        for adapter in args.adapters
+        for feature_scales in args.feature_scales
         for decoder in args.decoder_versions
-        if model != "unet" or decoder == "lightweight"
+        if (model != "unet" or (decoder == "lightweight" and adapter == "cat" and feature_scales == "p3_p4_embedding"))
     )
     current = 0
     for ratio in args.ratios:
         for seed in args.seeds:
             for augmentation in args.augmentations:
                 for model in args.models:
-                  for decoder_version in args.decoder_versions:
-                    if model == "unet" and decoder_version != "lightweight":
+                  for adapter in args.adapters:
+                   for feature_scales in args.feature_scales:
+                    for decoder_version in args.decoder_versions:
+                     if model == "unet" and (decoder_version != "lightweight" or adapter != "cat" or feature_scales != "p3_p4_embedding"):
                         continue
                     current += 1
                     variant_name = f"{model}_{augmentation}"
                     if decoder_version != "lightweight":
                         variant_name += f"_{decoder_version}"
+                    if adapter != "cat":
+                        variant_name += f"_{adapter}_adapter"
+                    if feature_scales != "p3_p4_embedding":
+                        variant_name += f"_{feature_scales}"
                     variant_root = output_root / variant_name
                     run_dir = variant_root / f"loveda_ratio{ratio}_seed{seed}"
                     metrics_path = run_dir / "metrics.json"
@@ -85,6 +95,8 @@ def main() -> None:
                             "--augmentation", augmentation,
                             "--decoder-version", decoder_version,
                             "--boundary-loss-weight", str(args.boundary_loss_weight),
+                            "--adapter", adapter,
+                            "--feature-scales", feature_scales,
                             "--data-root", args.data_root,
                             "--device", args.device,
                             "--validation-seed", str(args.validation_seed),
@@ -98,6 +110,8 @@ def main() -> None:
                         "model": model,
                         "augmentation": augmentation,
                         "decoder_version": decoder_version,
+                        "adapter": adapter,
+                        "feature_scales": feature_scales,
                         "ratio": ratio,
                         "seed": seed,
                         "labeled_images": saved["label_pool_samples"],
@@ -119,11 +133,13 @@ def main() -> None:
     for model in args.models:
         for augmentation in args.augmentations:
             for decoder_version in args.decoder_versions:
-                for ratio in args.ratios:
-                    group = [row for row in rows if row["model"] == model and row["augmentation"] == augmentation and row["decoder_version"] == decoder_version and row["ratio"] == ratio]
+             for adapter in args.adapters:
+              for feature_scales in args.feature_scales:
+               for ratio in args.ratios:
+                    group = [row for row in rows if row["model"] == model and row["augmentation"] == augmentation and row["decoder_version"] == decoder_version and row["adapter"] == adapter and row["feature_scales"] == feature_scales and row["ratio"] == ratio]
                     if not group:
                         continue
-                    item = {"model": model, "augmentation": augmentation, "decoder_version": decoder_version, "ratio": ratio, "runs": len(group)}
+                    item = {"model": model, "augmentation": augmentation, "decoder_version": decoder_version, "adapter": adapter, "feature_scales": feature_scales, "ratio": ratio, "runs": len(group)}
                     for metric in ("mIoU", "mIoU_fg", "Dice", "Dice_fg", "pixel_accuracy", "Boundary_F1", "building_IoU", "road_IoU", "FPS", "train_time_seconds"):
                         values = [float(row[metric]) for row in group if row.get(metric) is not None]
                         if not values:
@@ -146,6 +162,8 @@ def main() -> None:
             "validation_seed": args.validation_seed,
             "decoder_versions": args.decoder_versions,
             "boundary_loss_weight": args.boundary_loss_weight,
+            "adapters": args.adapters,
+            "feature_scales": args.feature_scales,
             "official_val_used_as_test": True,
         },
         "results": rows,

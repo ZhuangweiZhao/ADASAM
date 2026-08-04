@@ -37,11 +37,24 @@ class LabelEfficientSAM(nn.Module):
         prototype_version: str = "none",
         prototype_momentum: float = 0.9,
         decoder_version: str = "lightweight",
+        feature_scales: str = "p3_p4_embedding",
     ) -> None:
         super().__init__()
         self.backbone = backbone
+        scale_names = {
+            "embedding": ("embedding",),
+            "p4_embedding": ("P4", "embedding"),
+            "p3_p4_embedding": ("P3", "P4", "embedding"),
+        }
+        if feature_scales not in scale_names:
+            raise ValueError(
+                "feature_scales must be one of: embedding, p4_embedding, p3_p4_embedding"
+            )
+        feature_dims = {"P3": 128, "P4": 160, "embedding": 256}
+        selected_dims = {name: feature_dims[name] for name in scale_names[feature_scales]}
+        self.feature_scales = feature_scales
         self.adapter = (
-            MultiScaleCATAdapter(bottleneck_ratio=adapter_ratio)
+            MultiScaleCATAdapter(feature_dims=selected_dims, bottleneck_ratio=adapter_ratio)
             if use_cat_adapter
             else nn.Identity()
         )
@@ -83,6 +96,7 @@ class LabelEfficientSAM(nn.Module):
             enable_prompt_fusion=prompt_version == "v1",
             enable_spatial_prompt_fusion=prompt_version in {"v2", "v3"},
             spatial_prompt_mode=prompt_fusion_mode,
+            feature_scales=feature_scales,
             **decoder_kwargs,
         )
         self.register_buffer(
@@ -110,6 +124,7 @@ class LabelEfficientSAM(nn.Module):
         prototype_version: str = "none",
         prototype_momentum: float = 0.9,
         decoder_version: str = "lightweight",
+        feature_scales: str = "p3_p4_embedding",
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -123,6 +138,7 @@ class LabelEfficientSAM(nn.Module):
             prototype_version=prototype_version,
             prototype_momentum=prototype_momentum,
             decoder_version=decoder_version,
+            feature_scales=feature_scales,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
@@ -135,13 +151,19 @@ class LabelEfficientSAM(nn.Module):
         image = F.interpolate(image, size=size, mode="bilinear", align_corners=False)
         return (image * 255.0 - self.pixel_mean) / self.pixel_std
 
+    def _adapt_features(
+        self, features: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        adapted = self.adapter(features)
+        return {**features, **adapted} if self.use_cat_adapter else adapted
+
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError(f"expected image [B,3,H,W], got {tuple(image.shape)}")
         output_size = tuple(image.shape[-2:])
         with torch.no_grad():
             features = self.backbone(self._preprocess(image))
-        adapted = self.adapter(features)
+        adapted = self._adapt_features(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
         decoder_features = adapted
         if self.prototype_memory is not None:
@@ -173,7 +195,7 @@ class LabelEfficientSAM(nn.Module):
         output_size = tuple(image.shape[-2:])
         with torch.no_grad():
             features = self.backbone(self._preprocess(image))
-        adapted = self.adapter(features)
+        adapted = self._adapt_features(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
         prototype_aux = None
         decoder_features = adapted

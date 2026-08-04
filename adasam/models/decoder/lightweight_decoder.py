@@ -27,16 +27,35 @@ class LightweightSemanticDecoder(nn.Module):
         enable_prompt_fusion: bool = False,
         enable_spatial_prompt_fusion: bool = False,
         spatial_prompt_mode: str = "both",
+        feature_scales: str = "p3_p4_embedding",
     ) -> None:
         super().__init__()
         if spatial_prompt_mode not in {"both", "dense", "token"}:
             raise ValueError("spatial_prompt_mode must be one of: both, dense, token")
+        scale_names = {
+            "embedding": ("embedding",),
+            "p4_embedding": ("P4", "embedding"),
+            "p3_p4_embedding": ("P3", "P4", "embedding"),
+        }
+        if feature_scales not in scale_names:
+            raise ValueError(
+                "feature_scales must be one of: embedding, p4_embedding, p3_p4_embedding"
+            )
+        self.feature_scales = feature_scales
+        self.feature_names = scale_names[feature_scales]
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
         self.lateral = nn.ModuleDict(
-            {name: nn.Conv2d(channels, decoder_dim, 1) for name, channels in dims.items()}
+            {
+                name: nn.Conv2d(dims[name], decoder_dim, 1)
+                for name in self.feature_names
+            }
         )
-        self.p4_fuse = ConvNormAct(decoder_dim, decoder_dim)
-        self.p3_fuse = ConvNormAct(decoder_dim, decoder_dim)
+        self.p4_fuse = (
+            ConvNormAct(decoder_dim, decoder_dim) if "P4" in self.feature_names else None
+        )
+        self.p3_fuse = (
+            ConvNormAct(decoder_dim, decoder_dim) if "P3" in self.feature_names else None
+        )
         self.refine = ConvNormAct(decoder_dim, decoder_dim)
         self.prompt_norm = nn.LayerNorm(256) if enable_prompt_fusion else None
         self.prompt_scale = nn.Linear(256, decoder_dim) if enable_prompt_fusion else None
@@ -69,19 +88,20 @@ class LightweightSemanticDecoder(nn.Module):
         prompt_tokens: torch.Tensor | None = None,
         prompt: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        required = {"P3", "P4", "embedding"}
+        required = set(self.feature_names)
         missing = required - features.keys()
         if missing:
             raise KeyError(f"missing decoder features: {sorted(missing)}")
-        p3 = self.lateral["P3"](features["P3"])
-        p4 = self.lateral["P4"](features["P4"])
-        embedding = self.lateral["embedding"](features["embedding"])
-        embedding = F.interpolate(
-            embedding, size=p4.shape[-2:], mode="bilinear", align_corners=False
-        )
-        p4 = self.p4_fuse(p4 + embedding)
-        p4 = F.interpolate(p4, size=p3.shape[-2:], mode="bilinear", align_corners=False)
-        fused = self.refine(self.p3_fuse(p3 + p4))
+        fused = self.lateral["embedding"](features["embedding"])
+        if "P4" in self.feature_names:
+            p4 = self.lateral["P4"](features["P4"])
+            fused = F.interpolate(fused, size=p4.shape[-2:], mode="bilinear", align_corners=False)
+            fused = self.p4_fuse(p4 + fused)
+        if "P3" in self.feature_names:
+            p3 = self.lateral["P3"](features["P3"])
+            fused = F.interpolate(fused, size=p3.shape[-2:], mode="bilinear", align_corners=False)
+            fused = self.p3_fuse(p3 + fused)
+        fused = self.refine(fused)
         if prompt_tokens is not None:
             if self.prompt_norm is None or self.prompt_scale is None or self.prompt_shift is None:
                 raise RuntimeError("decoder prompt fusion is disabled")
