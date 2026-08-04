@@ -24,6 +24,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--sam-image-size", type=int, default=224)
     parser.add_argument("--base-channels", type=int, default=32)
+    parser.add_argument("--decoder-versions", nargs="+", choices=["lightweight", "boundary_aux", "boundary"], default=["lightweight"])
+    parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--data-root", default="data/LoveDA")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--validation-seed", type=int, default=42)
@@ -38,14 +40,28 @@ def main() -> None:
     if not output_root.is_absolute():
         output_root = ROOT / output_root
     rows = []
-    total = len(args.models) * len(args.ratios) * len(args.seeds) * len(args.augmentations)
+    total = sum(
+        1
+        for _ratio in args.ratios
+        for _seed in args.seeds
+        for _augmentation in args.augmentations
+        for model in args.models
+        for decoder in args.decoder_versions
+        if model != "unet" or decoder == "lightweight"
+    )
     current = 0
     for ratio in args.ratios:
         for seed in args.seeds:
             for augmentation in args.augmentations:
                 for model in args.models:
+                  for decoder_version in args.decoder_versions:
+                    if model == "unet" and decoder_version != "lightweight":
+                        continue
                     current += 1
-                    variant_root = output_root / f"{model}_{augmentation}"
+                    variant_name = f"{model}_{augmentation}"
+                    if decoder_version != "lightweight":
+                        variant_name += f"_{decoder_version}"
+                    variant_root = output_root / variant_name
                     run_dir = variant_root / f"loveda_ratio{ratio}_seed{seed}"
                     metrics_path = run_dir / "metrics.json"
                     complete = False
@@ -67,6 +83,8 @@ def main() -> None:
                             "--sam-image-size", str(args.sam_image_size),
                             "--base-channels", str(args.base_channels),
                             "--augmentation", augmentation,
+                            "--decoder-version", decoder_version,
+                            "--boundary-loss-weight", str(args.boundary_loss_weight),
                             "--data-root", args.data_root,
                             "--device", args.device,
                             "--validation-seed", str(args.validation_seed),
@@ -79,6 +97,7 @@ def main() -> None:
                     rows.append({
                         "model": model,
                         "augmentation": augmentation,
+                        "decoder_version": decoder_version,
                         "ratio": ratio,
                         "seed": seed,
                         "labeled_images": saved["label_pool_samples"],
@@ -87,6 +106,9 @@ def main() -> None:
                         "Dice": test["Dice"],
                         "Dice_fg": test["Dice_fg"],
                         "pixel_accuracy": test["pixel_accuracy"],
+                        "Boundary_F1": test.get("Boundary_F1"),
+                        "building_IoU": test["per_class_IoU"][1],
+                        "road_IoU": test["per_class_IoU"][3],
                         "FPS": test["FPS"],
                         "train_time_seconds": sum(epoch["seconds"] for epoch in saved["history"]),
                         "best_epoch": saved["best_epoch"],
@@ -96,16 +118,19 @@ def main() -> None:
     aggregates = []
     for model in args.models:
         for augmentation in args.augmentations:
-            for ratio in args.ratios:
-                group = [row for row in rows if row["model"] == model and row["augmentation"] == augmentation and row["ratio"] == ratio]
-                if not group:
-                    continue
-                item = {"model": model, "augmentation": augmentation, "ratio": ratio, "runs": len(group)}
-                for metric in ("mIoU", "mIoU_fg", "Dice", "Dice_fg", "pixel_accuracy", "FPS", "train_time_seconds"):
-                    values = [float(row[metric]) for row in group]
-                    item[f"{metric}_mean"] = statistics.mean(values)
-                    item[f"{metric}_std"] = statistics.stdev(values) if len(values) > 1 else 0.0
-                aggregates.append(item)
+            for decoder_version in args.decoder_versions:
+                for ratio in args.ratios:
+                    group = [row for row in rows if row["model"] == model and row["augmentation"] == augmentation and row["decoder_version"] == decoder_version and row["ratio"] == ratio]
+                    if not group:
+                        continue
+                    item = {"model": model, "augmentation": augmentation, "decoder_version": decoder_version, "ratio": ratio, "runs": len(group)}
+                    for metric in ("mIoU", "mIoU_fg", "Dice", "Dice_fg", "pixel_accuracy", "Boundary_F1", "building_IoU", "road_IoU", "FPS", "train_time_seconds"):
+                        values = [float(row[metric]) for row in group if row.get(metric) is not None]
+                        if not values:
+                            continue
+                        item[f"{metric}_mean"] = statistics.mean(values)
+                        item[f"{metric}_std"] = statistics.stdev(values) if len(values) > 1 else 0.0
+                    aggregates.append(item)
     summary = {
         "protocol": {
             "dataset": "LoveDA",
@@ -119,6 +144,8 @@ def main() -> None:
             "image_size": args.image_size,
             "sam_image_size": args.sam_image_size,
             "validation_seed": args.validation_seed,
+            "decoder_versions": args.decoder_versions,
+            "boundary_loss_weight": args.boundary_loss_weight,
             "official_val_used_as_test": True,
         },
         "results": rows,

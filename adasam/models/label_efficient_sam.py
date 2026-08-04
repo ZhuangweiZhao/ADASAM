@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from adasam.adapters import MultiScaleCATAdapter
 from adasam.backbone import LabelEfficientMobileSAMBackbone
-from adasam.models.decoder import LightweightSemanticDecoder
+from adasam.models.decoder import BoundaryAwareSemanticDecoder, LightweightSemanticDecoder
 from adasam.models.prompt import (
     DefectAwarePromptGeneratorV2,
     DefectPromptGenerator,
@@ -36,6 +36,7 @@ class LabelEfficientSAM(nn.Module):
         use_cat_adapter: bool = True,
         prototype_version: str = "none",
         prototype_momentum: float = 0.9,
+        decoder_version: str = "lightweight",
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -65,12 +66,24 @@ class LabelEfficientSAM(nn.Module):
             else FrequencyAwareDefectPromptGenerator(num_prompt=num_prompt) if prompt_version == "v3"
             else None
         )
-        self.decoder = LightweightSemanticDecoder(
+        if decoder_version not in {"lightweight", "boundary_aux", "boundary"}:
+            raise ValueError("decoder_version must be one of: lightweight, boundary_aux, boundary")
+        self.decoder_version = decoder_version
+        decoder_class = (
+            LightweightSemanticDecoder
+            if decoder_version == "lightweight"
+            else BoundaryAwareSemanticDecoder
+        )
+        decoder_kwargs = {}
+        if decoder_version != "lightweight":
+            decoder_kwargs["enable_boundary_fusion"] = decoder_version == "boundary"
+        self.decoder = decoder_class(
             num_classes,
             decoder_dim=decoder_dim,
             enable_prompt_fusion=prompt_version == "v1",
             enable_spatial_prompt_fusion=prompt_version in {"v2", "v3"},
             spatial_prompt_mode=prompt_fusion_mode,
+            **decoder_kwargs,
         )
         self.register_buffer(
             "pixel_mean", torch.tensor(PIXEL_MEAN).view(1, 3, 1, 1), persistent=False
@@ -96,6 +109,7 @@ class LabelEfficientSAM(nn.Module):
         use_cat_adapter: bool = True,
         prototype_version: str = "none",
         prototype_momentum: float = 0.9,
+        decoder_version: str = "lightweight",
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -108,6 +122,7 @@ class LabelEfficientSAM(nn.Module):
             use_cat_adapter=use_cat_adapter,
             prototype_version=prototype_version,
             prototype_momentum=prototype_momentum,
+            decoder_version=decoder_version,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
@@ -171,7 +186,11 @@ class LabelEfficientSAM(nn.Module):
             prompt_tokens=prompts if self.prompt_version == "v1" else None,
             prompt=prompts if self.prompt_version in {"v2", "v3"} else None,
         )
-        return logits, prompts, prototype_aux
+        auxiliary = prototype_aux or {}
+        boundary_logits = getattr(self.decoder, "last_boundary_logits", None)
+        if boundary_logits is not None:
+            auxiliary["boundary_logits"] = boundary_logits
+        return logits, prompts, auxiliary or None
 
     def parameter_counts(self) -> dict[str, int]:
         total = sum(parameter.numel() for parameter in self.parameters())

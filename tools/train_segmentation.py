@@ -24,6 +24,8 @@ from adasam.datasets.industrial import (  # noqa: E402
 )
 from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.losses import (  # noqa: E402
+    BoundaryLoss,
+    boundary_f1_counts,
     DefectPromptAlignmentLoss,
     LabelEfficientSegmentationLoss,
     PrototypeCompactnessLoss,
@@ -43,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
+    parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--use-dapg", action="store_true")
     parser.add_argument("--prompt-version", choices=["none", "v1", "v2", "v3"], default=None)
@@ -91,12 +95,27 @@ def evaluate(
     correct = 0
     pixels = 0
     samples = 0
+    boundary_matched_pred = boundary_predicted = 0
+    boundary_matched_target = boundary_target = 0
+    boundary_metric_seconds = 0.0
     synchronize(device)
     started = time.perf_counter()
     for batch in loader:
         image = batch["image"].to(device, non_blocking=True)
         target = batch["mask"].to(device, non_blocking=True)
         prediction = model(image).argmax(dim=1)
+        synchronize(device)
+        boundary_started = time.perf_counter()
+        tolerance = max(1, round(2 * max(target.shape[-2:]) / 1024))
+        mp, npred, mt, ntarget = boundary_f1_counts(
+            prediction, target, ignore_index=ignore_index, tolerance=tolerance
+        )
+        boundary_matched_pred += mp
+        boundary_predicted += npred
+        boundary_matched_target += mt
+        boundary_target += ntarget
+        synchronize(device)
+        boundary_metric_seconds += time.perf_counter() - boundary_started
         samples += image.shape[0]
         valid = torch.ones_like(target, dtype=torch.bool)
         if ignore_index is not None:
@@ -112,9 +131,15 @@ def evaluate(
             pred_area[class_id] += pred_class.sum().cpu()
             target_area[class_id] += target_class.sum().cpu()
     synchronize(device)
-    elapsed = time.perf_counter() - started
+    elapsed = time.perf_counter() - started - boundary_metric_seconds
     iou = intersection / union.clamp_min(1.0)
     dice = 2.0 * intersection / (pred_area + target_area).clamp_min(1.0)
+    boundary_precision = boundary_matched_pred / max(boundary_predicted, 1)
+    boundary_recall = boundary_matched_target / max(boundary_target, 1)
+    boundary_f1 = (
+        2.0 * boundary_precision * boundary_recall
+        / max(boundary_precision + boundary_recall, 1e-12)
+    )
     return {
         "mIoU": float(iou.mean()),
         "mIoU_fg": float(iou[1:].mean()),
@@ -123,6 +148,9 @@ def evaluate(
         "pixel_accuracy": correct / max(pixels, 1),
         "per_class_IoU": [float(value) for value in iou],
         "per_class_Dice": [float(value) for value in dice],
+        "Boundary_F1": boundary_f1,
+        "Boundary_precision": boundary_precision,
+        "Boundary_recall": boundary_recall,
         "samples": samples,
         "seconds": elapsed,
         "FPS": samples / max(elapsed, 1e-9),
@@ -185,10 +213,12 @@ def main() -> None:
         use_cat_adapter=args.adapter == "cat",
         prototype_version=prototype_version,
         prototype_momentum=args.prototype_momentum,
+        decoder_version=args.decoder_version,
     )
     criterion = LabelEfficientSegmentationLoss()
     prompt_criterion = DefectPromptAlignmentLoss()
     prototype_criterion = PrototypeCompactnessLoss()
+    boundary_criterion = BoundaryLoss()
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -235,7 +265,11 @@ def main() -> None:
                 align_loss = prompt_criterion(prompts["dense_prompt"], target)
                 loss = loss + args.prompt_align_weight * align_loss
                 prompt_losses.append(float(align_loss.detach()))
-            if prototype_aux is not None and args.prototype_loss_weight > 0.0:
+            if (
+                prototype_aux is not None
+                and "source_feature" in prototype_aux
+                and args.prototype_loss_weight > 0.0
+            ):
                 prototype_loss = prototype_criterion(
                     prototype_aux["source_feature"],
                     target,
@@ -244,6 +278,14 @@ def main() -> None:
                 )
                 loss = loss + args.prototype_loss_weight * prototype_loss
                 prototype_losses.append(float(prototype_loss.detach()))
+            if (
+                args.decoder_version != "lightweight"
+                and prototype_aux is not None
+                and "boundary_logits" in prototype_aux
+                and args.boundary_loss_weight > 0.0
+            ):
+                boundary_loss = boundary_criterion(prototype_aux["boundary_logits"], target)
+                loss = loss + args.boundary_loss_weight * boundary_loss
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach()))
@@ -286,6 +328,8 @@ def main() -> None:
         "prototype_momentum": args.prototype_momentum,
         "prototype_loss_weight": args.prototype_loss_weight,
         "augmentation": args.augmentation,
+        "decoder_version": args.decoder_version,
+        "boundary_loss_weight": args.boundary_loss_weight,
     }
     torch.save(checkpoint, output_dir / "last_model.pt")
     (output_dir / "metrics.json").write_text(
@@ -306,6 +350,8 @@ def main() -> None:
                 "prototype_momentum": args.prototype_momentum,
                 "prototype_loss_weight": args.prototype_loss_weight,
                 "augmentation": args.augmentation,
+                "decoder_version": args.decoder_version,
+                "boundary_loss_weight": args.boundary_loss_weight,
             },
             indent=2,
         ),

@@ -63,10 +63,9 @@ class LightweightSemanticDecoder(nn.Module):
             nn.init.zeros_(self.dense_prompt_proj.weight)
             nn.init.zeros_(self.token_output.weight)
 
-    def forward(
+    def forward_features(
         self,
         features: dict[str, torch.Tensor],
-        output_size: tuple[int, int],
         prompt_tokens: torch.Tensor | None = None,
         prompt: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -88,9 +87,9 @@ class LightweightSemanticDecoder(nn.Module):
                 raise RuntimeError("decoder prompt fusion is disabled")
             if prompt_tokens.ndim != 3 or prompt_tokens.shape[0] != fused.shape[0]:
                 raise ValueError("prompt_tokens must have shape [B,N,256]")
-            prompt = self.prompt_norm(prompt_tokens.mean(dim=1))
-            scale = torch.tanh(self.prompt_scale(prompt)).unsqueeze(-1).unsqueeze(-1)
-            shift = self.prompt_shift(prompt).unsqueeze(-1).unsqueeze(-1)
+            token_summary = self.prompt_norm(prompt_tokens.mean(dim=1))
+            scale = torch.tanh(self.prompt_scale(token_summary)).unsqueeze(-1).unsqueeze(-1)
+            shift = self.prompt_shift(token_summary).unsqueeze(-1).unsqueeze(-1)
             fused = fused * (1.0 + scale) + shift
         if prompt is not None:
             if any(module is None for module in (self.dense_prompt_proj, self.token_query, self.token_key, self.token_value, self.token_output)):
@@ -115,5 +114,15 @@ class LightweightSemanticDecoder(nn.Module):
                 attention = torch.softmax(query @ key.transpose(-2, -1) / 8.0, dim=-1)
                 modulation = self.token_output(attention @ value).transpose(1, 2).reshape_as(fused)
                 fused = fused + modulation
+        return fused
+
+    def forward(
+        self,
+        features: dict[str, torch.Tensor],
+        output_size: tuple[int, int],
+        prompt_tokens: torch.Tensor | None = None,
+        prompt: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        fused = self.forward_features(features, prompt_tokens=prompt_tokens, prompt=prompt)
         logits = self.classifier(fused)
         return F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)

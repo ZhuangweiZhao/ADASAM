@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices  # noqa: E402
-from adasam.losses import LabelEfficientSegmentationLoss  # noqa: E402
+from adasam.losses import BoundaryLoss, LabelEfficientSegmentationLoss  # noqa: E402
 from adasam.models import LabelEfficientSAM, LabelEfficientUNet  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
 from tools.train_segmentation import evaluate  # noqa: E402
@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--sam-image-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
+    parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--augmentation", choices=["none", "basic"], default="basic")
     parser.add_argument("--val-fraction", type=float, default=0.2)
@@ -94,8 +96,12 @@ def main() -> None:
             num_prompt=8,
             prompt_fusion_mode="both",
             use_cat_adapter=True,
+            decoder_version=args.decoder_version,
         )
+    if args.model == "unet" and args.decoder_version != "lightweight":
+        raise ValueError("boundary decoder variants are only available for MobileSAM models")
     criterion = LabelEfficientSegmentationLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
+    boundary_criterion = BoundaryLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -124,7 +130,15 @@ def main() -> None:
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
-            loss = criterion(model(image), target)
+            if args.decoder_version == "lightweight":
+                prediction = model(image)
+                boundary_logits = None
+            else:
+                prediction, _, auxiliary = model.forward_with_auxiliary(image, target)
+                boundary_logits = auxiliary["boundary_logits"] if auxiliary is not None else None
+            loss = criterion(prediction, target)
+            if boundary_logits is not None and args.boundary_loss_weight > 0.0:
+                loss = loss + args.boundary_loss_weight * boundary_criterion(boundary_logits, target)
             loss.backward()
             optimizer.step()
             losses.append(float(loss.detach()))

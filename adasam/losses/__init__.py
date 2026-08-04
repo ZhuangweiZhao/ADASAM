@@ -13,6 +13,7 @@ from adasam.losses.label_efficient_loss import (
     LabelEfficientSegmentationLoss,
     PrototypeCompactnessLoss,
 )
+from adasam.losses.boundary_loss import BoundaryLoss, boundary_f1_counts, semantic_boundary_target
 
 __all__ = [
     "focal_loss",
@@ -24,4 +25,7 @@ __all__ = [
     "LabelEfficientSegmentationLoss",
     "DefectPromptAlignmentLoss",
     "PrototypeCompactnessLoss",
+    "BoundaryLoss",
+    "boundary_f1_counts",
+    "semantic_boundary_target",
 ]
