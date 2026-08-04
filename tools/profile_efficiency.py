@@ -139,7 +139,7 @@ def main() -> None:
     rows = []
     checkpoints = {name: resolve(path) for name, path in zip(args.models, args.model_checkpoints)}
     for name in args.models:
-        model = build_model(args, name, checkpoints.get(name, resolve(args.checkpoint)), device)
+        model = build_model(args, name, resolve(args.checkpoint), device)
         if name in checkpoints:
             load_weights(model, checkpoints[name], device)
         counts = model.parameter_counts()
