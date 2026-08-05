@@ -10,10 +10,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VARIANTS = (
-    ("decoder_only", "none", "embedding"),
-    ("multiscale_decoder", "none", "p3_p4_embedding"),
-    ("cat_embedding", "cat", "embedding"),
-    ("full_baseline", "cat", "p3_p4_embedding"),
+    ("decoder_only", "none", "embedding", "pre_fusion"),
+    ("multiscale_decoder", "none", "p3_p4_embedding", "pre_fusion"),
+    ("cat_embedding", "cat", "embedding", "pre_fusion"),
+    ("full_baseline", "cat", "p3_p4_embedding", "pre_fusion"),
+    ("post_fusion_adapter", "cat", "p3_p4_embedding", "post_fusion"),
 )
 
 
@@ -45,7 +46,7 @@ def main() -> None:
     total = len(VARIANTS) * len(args.ratios)
     current = 0
     for ratio in args.ratios:
-        for variant, adapter, feature_scales in VARIANTS:
+        for variant, adapter, feature_scales, adapter_placement in VARIANTS:
             current += 1
             variant_root = output_root / variant
             run_dir = variant_root / f"loveda_ratio{ratio}_seed{args.seed}"
@@ -64,6 +65,7 @@ def main() -> None:
                     "--label-ratio", str(ratio),
                     "--adapter", adapter,
                     "--feature-scales", feature_scales,
+                    "--adapter-placement", adapter_placement,
                     "--augmentation", args.augmentation,
                     "--epochs", str(args.epochs),
                     "--batch-size", str(args.batch_size),
@@ -84,6 +86,7 @@ def main() -> None:
                 "variant": variant,
                 "adapter": adapter,
                 "feature_scales": feature_scales,
+                "adapter_placement": adapter_placement,
                 "ratio": ratio,
                 "seed": args.seed,
                 "labeled_images": saved["label_pool_samples"],
@@ -111,7 +114,7 @@ def main() -> None:
             "image_size": args.image_size,
             "sam_image_size": args.sam_image_size,
             "validation_seed": args.validation_seed,
-            "variants": [variant for variant, _, _ in VARIANTS],
+            "variants": [variant for variant, _, _, _ in VARIANTS],
         },
         "results": rows,
     }

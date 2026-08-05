@@ -38,6 +38,7 @@ class LabelEfficientSAM(nn.Module):
         prototype_momentum: float = 0.9,
         decoder_version: str = "lightweight",
         feature_scales: str = "p3_p4_embedding",
+        adapter_placement: str = "pre_fusion",
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -52,13 +53,18 @@ class LabelEfficientSAM(nn.Module):
             )
         feature_dims = {"P3": 128, "P4": 160, "embedding": 256}
         selected_dims = {name: feature_dims[name] for name in scale_names[feature_scales]}
+        if adapter_placement not in {"pre_fusion", "post_fusion"}:
+            raise ValueError("adapter_placement must be one of: pre_fusion, post_fusion")
         self.feature_scales = feature_scales
+        self.adapter_placement = adapter_placement
+        use_pre_fusion_adapter = use_cat_adapter and adapter_placement == "pre_fusion"
         self.adapter = (
             MultiScaleCATAdapter(feature_dims=selected_dims, bottleneck_ratio=adapter_ratio)
-            if use_cat_adapter
+            if use_pre_fusion_adapter
             else nn.Identity()
         )
         self.use_cat_adapter = use_cat_adapter
+        self.use_pre_fusion_adapter = use_pre_fusion_adapter
         if prototype_version not in {"none", "dpm"}:
             raise ValueError("prototype_version must be one of: none, dpm")
         self.prototype_version = prototype_version
@@ -97,6 +103,8 @@ class LabelEfficientSAM(nn.Module):
             enable_spatial_prompt_fusion=prompt_version in {"v2", "v3"},
             spatial_prompt_mode=prompt_fusion_mode,
             feature_scales=feature_scales,
+            post_fusion_adapter=use_cat_adapter and adapter_placement == "post_fusion",
+            adapter_ratio=adapter_ratio,
             **decoder_kwargs,
         )
         self.register_buffer(
@@ -125,6 +133,7 @@ class LabelEfficientSAM(nn.Module):
         prototype_momentum: float = 0.9,
         decoder_version: str = "lightweight",
         feature_scales: str = "p3_p4_embedding",
+        adapter_placement: str = "pre_fusion",
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -139,6 +148,7 @@ class LabelEfficientSAM(nn.Module):
             prototype_momentum=prototype_momentum,
             decoder_version=decoder_version,
             feature_scales=feature_scales,
+            adapter_placement=adapter_placement,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
@@ -155,7 +165,7 @@ class LabelEfficientSAM(nn.Module):
         self, features: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
         adapted = self.adapter(features)
-        return {**features, **adapted} if self.use_cat_adapter else adapted
+        return {**features, **adapted} if self.use_pre_fusion_adapter else adapted
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         if image.ndim != 4 or image.shape[1] != 3:

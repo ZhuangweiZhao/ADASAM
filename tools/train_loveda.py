@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam-image-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
+    parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
@@ -100,6 +101,7 @@ def main() -> None:
             use_cat_adapter=args.adapter == "cat",
             decoder_version=args.decoder_version,
             feature_scales=args.feature_scales,
+            adapter_placement=args.adapter_placement,
         )
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
@@ -194,6 +196,7 @@ def main() -> None:
         "test": test_metrics,
         "args": vars(args),
         "adapter": args.adapter,
+        "adapter_placement": args.adapter_placement,
         "feature_scales": args.feature_scales,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")

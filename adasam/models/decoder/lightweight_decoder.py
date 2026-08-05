@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from adasam.adapters import CATAdapter
+
 
 class ConvNormAct(nn.Sequential):
     def __init__(self, in_channels: int, out_channels: int) -> None:
@@ -28,6 +30,8 @@ class LightweightSemanticDecoder(nn.Module):
         enable_spatial_prompt_fusion: bool = False,
         spatial_prompt_mode: str = "both",
         feature_scales: str = "p3_p4_embedding",
+        post_fusion_adapter: bool = False,
+        adapter_ratio: float = 0.25,
     ) -> None:
         super().__init__()
         if spatial_prompt_mode not in {"both", "dense", "token"}:
@@ -55,6 +59,14 @@ class LightweightSemanticDecoder(nn.Module):
         )
         self.p3_fuse = (
             ConvNormAct(decoder_dim, decoder_dim) if "P3" in self.feature_names else None
+        )
+        self.post_fusion_adapter = (
+            CATAdapter(
+                dim=decoder_dim,
+                bottleneck=max(8, int(round(decoder_dim * adapter_ratio))),
+            )
+            if post_fusion_adapter
+            else None
         )
         self.refine = ConvNormAct(decoder_dim, decoder_dim)
         self.prompt_norm = nn.LayerNorm(256) if enable_prompt_fusion else None
@@ -101,6 +113,8 @@ class LightweightSemanticDecoder(nn.Module):
             p3 = self.lateral["P3"](features["P3"])
             fused = F.interpolate(fused, size=p3.shape[-2:], mode="bilinear", align_corners=False)
             fused = self.p3_fuse(p3 + fused)
+        if self.post_fusion_adapter is not None:
+            fused = self.post_fusion_adapter(fused)
         fused = self.refine(fused)
         if prompt_tokens is not None:
             if self.prompt_norm is None or self.prompt_scale is None or self.prompt_shift is None:

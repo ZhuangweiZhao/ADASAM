@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import statistics
 import subprocess
@@ -25,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sam-image-size", type=int, default=224)
     parser.add_argument("--base-channels", type=int, default=32)
     parser.add_argument("--adapters", nargs="+", choices=["cat", "none"], default=["cat"])
+    parser.add_argument("--adapter-placements", nargs="+", choices=["pre_fusion", "post_fusion"], default=["pre_fusion"])
     parser.add_argument("--feature-scales", nargs="+", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default=["p3_p4_embedding"])
     parser.add_argument("--decoder-versions", nargs="+", choices=["lightweight", "boundary_aux", "boundary"], default=["lightweight"])
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
@@ -49,19 +51,24 @@ def main() -> None:
         for _augmentation in args.augmentations
         for model in args.models
         for adapter in args.adapters
+        for placement in args.adapter_placements
         for feature_scales in args.feature_scales
         for decoder in args.decoder_versions
-        if (model != "unet" or (decoder == "lightweight" and adapter == "cat" and feature_scales == "p3_p4_embedding"))
+        if (model != "unet" or (decoder == "lightweight" and adapter == "cat" and placement == "pre_fusion" and feature_scales == "p3_p4_embedding"))
     )
     current = 0
     for ratio in args.ratios:
         for seed in args.seeds:
             for augmentation in args.augmentations:
-                for model in args.models:
-                  for adapter in args.adapters:
-                   for feature_scales in args.feature_scales:
-                    for decoder_version in args.decoder_versions:
-                     if model == "unet" and (decoder_version != "lightweight" or adapter != "cat" or feature_scales != "p3_p4_embedding"):
+                combinations = itertools.product(
+                    args.models,
+                    args.adapters,
+                    args.adapter_placements,
+                    args.feature_scales,
+                    args.decoder_versions,
+                )
+                for model, adapter, adapter_placement, feature_scales, decoder_version in combinations:
+                    if model == "unet" and (decoder_version != "lightweight" or adapter != "cat" or adapter_placement != "pre_fusion" or feature_scales != "p3_p4_embedding"):
                         continue
                     current += 1
                     variant_name = f"{model}_{augmentation}"
@@ -69,6 +76,8 @@ def main() -> None:
                         variant_name += f"_{decoder_version}"
                     if adapter != "cat":
                         variant_name += f"_{adapter}_adapter"
+                    if adapter_placement != "pre_fusion":
+                        variant_name += f"_{adapter_placement}"
                     if feature_scales != "p3_p4_embedding":
                         variant_name += f"_{feature_scales}"
                     variant_root = output_root / variant_name
@@ -96,6 +105,7 @@ def main() -> None:
                             "--decoder-version", decoder_version,
                             "--boundary-loss-weight", str(args.boundary_loss_weight),
                             "--adapter", adapter,
+                            "--adapter-placement", adapter_placement,
                             "--feature-scales", feature_scales,
                             "--data-root", args.data_root,
                             "--device", args.device,
@@ -111,6 +121,7 @@ def main() -> None:
                         "augmentation": augmentation,
                         "decoder_version": decoder_version,
                         "adapter": adapter,
+                        "adapter_placement": adapter_placement,
                         "feature_scales": feature_scales,
                         "ratio": ratio,
                         "seed": seed,
@@ -130,23 +141,27 @@ def main() -> None:
                     output_root.mkdir(parents=True, exist_ok=True)
                     (output_root / "loveda_results_partial.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
     aggregates = []
-    for model in args.models:
-        for augmentation in args.augmentations:
-            for decoder_version in args.decoder_versions:
-             for adapter in args.adapters:
-              for feature_scales in args.feature_scales:
-               for ratio in args.ratios:
-                    group = [row for row in rows if row["model"] == model and row["augmentation"] == augmentation and row["decoder_version"] == decoder_version and row["adapter"] == adapter and row["feature_scales"] == feature_scales and row["ratio"] == ratio]
-                    if not group:
-                        continue
-                    item = {"model": model, "augmentation": augmentation, "decoder_version": decoder_version, "adapter": adapter, "feature_scales": feature_scales, "ratio": ratio, "runs": len(group)}
-                    for metric in ("mIoU", "mIoU_fg", "Dice", "Dice_fg", "pixel_accuracy", "Boundary_F1", "building_IoU", "road_IoU", "FPS", "train_time_seconds"):
-                        values = [float(row[metric]) for row in group if row.get(metric) is not None]
-                        if not values:
-                            continue
-                        item[f"{metric}_mean"] = statistics.mean(values)
-                        item[f"{metric}_std"] = statistics.stdev(values) if len(values) > 1 else 0.0
-                    aggregates.append(item)
+    aggregate_combinations = itertools.product(
+        args.models,
+        args.augmentations,
+        args.decoder_versions,
+        args.adapters,
+        args.adapter_placements,
+        args.feature_scales,
+        args.ratios,
+    )
+    for model, augmentation, decoder_version, adapter, adapter_placement, feature_scales, ratio in aggregate_combinations:
+        group = [row for row in rows if row["model"] == model and row["augmentation"] == augmentation and row["decoder_version"] == decoder_version and row["adapter"] == adapter and row["adapter_placement"] == adapter_placement and row["feature_scales"] == feature_scales and row["ratio"] == ratio]
+        if not group:
+            continue
+        item = {"model": model, "augmentation": augmentation, "decoder_version": decoder_version, "adapter": adapter, "adapter_placement": adapter_placement, "feature_scales": feature_scales, "ratio": ratio, "runs": len(group)}
+        for metric in ("mIoU", "mIoU_fg", "Dice", "Dice_fg", "pixel_accuracy", "Boundary_F1", "building_IoU", "road_IoU", "FPS", "train_time_seconds"):
+            values = [float(row[metric]) for row in group if row.get(metric) is not None]
+            if not values:
+                continue
+            item[f"{metric}_mean"] = statistics.mean(values)
+            item[f"{metric}_std"] = statistics.stdev(values) if len(values) > 1 else 0.0
+        aggregates.append(item)
     summary = {
         "protocol": {
             "dataset": "LoveDA",
@@ -163,6 +178,7 @@ def main() -> None:
             "decoder_versions": args.decoder_versions,
             "boundary_loss_weight": args.boundary_loss_weight,
             "adapters": args.adapters,
+            "adapter_placements": args.adapter_placements,
             "feature_scales": args.feature_scales,
             "official_val_used_as_test": True,
         },

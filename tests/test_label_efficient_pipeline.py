@@ -76,6 +76,20 @@ def test_no_adapter_embedding_decoder_forward() -> None:
     assert model(torch.rand(2, 3, 128, 128)).shape == (2, 4, 128, 128)
 
 
+def test_post_fusion_adapter_forward_and_scope() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        adapter_placement="post_fusion",
+    )
+    assert model.use_pre_fusion_adapter is False
+    assert model.decoder.post_fusion_adapter is not None
+    logits = model(torch.rand(2, 3, 128, 128))
+    assert logits.shape == (2, 4, 128, 128)
+    logits.mean().backward()
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+    assert any(parameter.grad is not None for parameter in model.decoder.post_fusion_adapter.parameters())
+
+
 def test_dapg_v2_dpm_batch_four_forward_backward() -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(),
