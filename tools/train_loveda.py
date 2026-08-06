@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
@@ -39,7 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder-dim", type=int, default=96)
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
-    parser.add_argument("--feature-scales", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
+    parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr"], default="hierarchical")
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -57,6 +59,51 @@ def parse_args() -> argparse.Namespace:
 def resolve(value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else ROOT / path
+
+
+@torch.no_grad()
+def collect_routing_statistics(model, loader, device, num_classes: int, ignore_index: int):
+    if getattr(model.decoder, "fusion_version", None) != "scsr":
+        return None
+    weight_sum = torch.zeros(3, dtype=torch.float64)
+    dominant = torch.zeros(3, dtype=torch.float64)
+    class_sum = torch.zeros(num_classes, 3, dtype=torch.float64)
+    class_pixels = torch.zeros(num_classes, dtype=torch.float64)
+    entropy_sum = 0.0
+    pixels = 0
+    model.eval()
+    for batch in loader:
+        target = batch["mask"].to(device, non_blocking=True)
+        model(batch["image"].to(device, non_blocking=True))
+        routing = model.decoder.last_routing
+        weights = routing["weights"]
+        routed_target = F.interpolate(target[:, None].float(), weights.shape[-2:], mode="nearest")[:, 0].long()
+        valid = routed_target != ignore_index
+        count = int(valid.sum())
+        if not count:
+            continue
+        weight_sum += weights.permute(1, 0, 2, 3)[:, valid].sum(1).cpu().double()
+        dominant += torch.stack([((weights.argmax(1) == i) & valid).sum() for i in range(3)]).cpu().double()
+        entropy_sum += float(routing["entropy"][valid].sum().cpu())
+        pixels += count
+        for class_id in range(num_classes):
+            selected = valid & (routed_target == class_id)
+            class_count = int(selected.sum())
+            if class_count:
+                class_sum[class_id] += weights.permute(1, 0, 2, 3)[:, selected].sum(1).cpu().double()
+                class_pixels[class_id] += class_count
+    names = ("P3", "P4", "embedding")
+    return {
+        "scale_names": names,
+        "mean_weights": {name: float(weight_sum[i] / pixels) for i, name in enumerate(names)},
+        "mean_entropy": entropy_sum / pixels,
+        "dominant_pixel_fraction": {name: float(dominant[i] / pixels) for i, name in enumerate(names)},
+        "class_mean_weights": {
+            str(c): {name: float(class_sum[c, i] / class_pixels[c]) for i, name in enumerate(names)}
+            for c in range(num_classes) if class_pixels[c] > 0
+        },
+        "pixels": pixels,
+    }
 
 
 def main() -> None:
@@ -102,6 +149,7 @@ def main() -> None:
             decoder_version=args.decoder_version,
             feature_scales=args.feature_scales,
             adapter_placement=args.adapter_placement,
+            fusion_version=args.fusion_version,
         )
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
@@ -178,6 +226,10 @@ def main() -> None:
         LoveDASemanticDataset.NUM_CLASSES,
         ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
     )
+    routing_statistics = collect_routing_statistics(
+        model, test_loader, device, LoveDASemanticDataset.NUM_CLASSES,
+        LoveDASemanticDataset.IGNORE_INDEX,
+    )
     metrics = {
         "dataset": "LoveDA",
         "model": args.model,
@@ -198,6 +250,8 @@ def main() -> None:
         "adapter": args.adapter,
         "adapter_placement": args.adapter_placement,
         "feature_scales": args.feature_scales,
+        "fusion_version": args.fusion_version,
+        "routing_statistics": routing_statistics,
     }
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     torch.save({"model": model.state_dict(), "metrics": metrics}, output_dir / "last_model.pt")

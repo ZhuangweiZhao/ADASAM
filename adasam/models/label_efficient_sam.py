@@ -39,23 +39,26 @@ class LabelEfficientSAM(nn.Module):
         decoder_version: str = "lightweight",
         feature_scales: str = "p3_p4_embedding",
         adapter_placement: str = "pre_fusion",
+        fusion_version: str = "hierarchical",
     ) -> None:
         super().__init__()
         self.backbone = backbone
         scale_names = {
-            "embedding": ("embedding",),
+            "p3": ("P3",), "p4": ("P4",), "embedding": ("embedding",),
+            "p3_p4": ("P3", "P4"), "p3_embedding": ("P3", "embedding"),
             "p4_embedding": ("P4", "embedding"),
             "p3_p4_embedding": ("P3", "P4", "embedding"),
         }
         if feature_scales not in scale_names:
             raise ValueError(
-                "feature_scales must be one of: embedding, p4_embedding, p3_p4_embedding"
+                "feature_scales must be one of: p3, p4, embedding, p3_p4, p3_embedding, p4_embedding, p3_p4_embedding"
             )
         feature_dims = {"P3": 128, "P4": 160, "embedding": 256}
         selected_dims = {name: feature_dims[name] for name in scale_names[feature_scales]}
         if adapter_placement not in {"pre_fusion", "post_fusion"}:
             raise ValueError("adapter_placement must be one of: pre_fusion, post_fusion")
         self.feature_scales = feature_scales
+        self.fusion_version = fusion_version
         self.adapter_placement = adapter_placement
         use_pre_fusion_adapter = use_cat_adapter and adapter_placement == "pre_fusion"
         self.adapter = (
@@ -103,6 +106,7 @@ class LabelEfficientSAM(nn.Module):
             enable_spatial_prompt_fusion=prompt_version in {"v2", "v3"},
             spatial_prompt_mode=prompt_fusion_mode,
             feature_scales=feature_scales,
+            fusion_version=fusion_version,
             post_fusion_adapter=use_cat_adapter and adapter_placement == "post_fusion",
             adapter_ratio=adapter_ratio,
             **decoder_kwargs,
@@ -134,6 +138,7 @@ class LabelEfficientSAM(nn.Module):
         decoder_version: str = "lightweight",
         feature_scales: str = "p3_p4_embedding",
         adapter_placement: str = "pre_fusion",
+        fusion_version: str = "hierarchical",
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -149,6 +154,7 @@ class LabelEfficientSAM(nn.Module):
             decoder_version=decoder_version,
             feature_scales=feature_scales,
             adapter_placement=adapter_placement,
+            fusion_version=fusion_version,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":

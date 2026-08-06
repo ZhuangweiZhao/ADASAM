@@ -30,6 +30,7 @@ class LightweightSemanticDecoder(nn.Module):
         enable_spatial_prompt_fusion: bool = False,
         spatial_prompt_mode: str = "both",
         feature_scales: str = "p3_p4_embedding",
+        fusion_version: str = "hierarchical",
         post_fusion_adapter: bool = False,
         adapter_ratio: float = 0.25,
     ) -> None:
@@ -37,16 +38,24 @@ class LightweightSemanticDecoder(nn.Module):
         if spatial_prompt_mode not in {"both", "dense", "token"}:
             raise ValueError("spatial_prompt_mode must be one of: both, dense, token")
         scale_names = {
+            "p3": ("P3",), "p4": ("P4",),
             "embedding": ("embedding",),
+            "p3_p4": ("P3", "P4"),
+            "p3_embedding": ("P3", "embedding"),
             "p4_embedding": ("P4", "embedding"),
             "p3_p4_embedding": ("P3", "P4", "embedding"),
         }
         if feature_scales not in scale_names:
             raise ValueError(
-                "feature_scales must be one of: embedding, p4_embedding, p3_p4_embedding"
+                "feature_scales must be one of: p3, p4, embedding, p3_p4, p3_embedding, p4_embedding, p3_p4_embedding"
             )
+        if fusion_version not in {"hierarchical", "concat", "global", "image_conditioned", "scsr"}:
+            raise ValueError("fusion_version must be hierarchical, concat, global, image_conditioned, or scsr")
+        if fusion_version == "scsr" and feature_scales != "p3_p4_embedding":
+            raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
         self.feature_scales = feature_scales
         self.feature_names = scale_names[feature_scales]
+        self.fusion_version = fusion_version
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
         self.lateral = nn.ModuleDict(
             {
@@ -60,6 +69,16 @@ class LightweightSemanticDecoder(nn.Module):
         self.p3_fuse = (
             ConvNormAct(decoder_dim, decoder_dim) if "P3" in self.feature_names else None
         )
+        self.concat_projection = nn.Conv2d(decoder_dim * len(self.feature_names), decoder_dim, 1) if fusion_version == "concat" else None
+        self.global_logits = nn.Parameter(torch.zeros(len(self.feature_names))) if fusion_version == "global" else None
+        self.image_router = nn.Linear(decoder_dim, len(self.feature_names)) if fusion_version == "image_conditioned" else None
+        self.scsr_gamma = nn.Parameter(torch.zeros(2)) if fusion_version == "scsr" else None
+        self.scsr_beta = nn.Parameter(torch.zeros(3)) if fusion_version == "scsr" else None
+        self.scsr_confidence = nn.Conv2d(decoder_dim, 1, 1) if fusion_version == "scsr" else None
+        if self.scsr_confidence is not None:
+            nn.init.zeros_(self.scsr_confidence.weight)
+            nn.init.zeros_(self.scsr_confidence.bias)
+        self.last_routing = None
         self.post_fusion_adapter = (
             CATAdapter(
                 dim=decoder_dim,
@@ -104,15 +123,38 @@ class LightweightSemanticDecoder(nn.Module):
         missing = required - features.keys()
         if missing:
             raise KeyError(f"missing decoder features: {sorted(missing)}")
-        fused = self.lateral["embedding"](features["embedding"])
-        if "P4" in self.feature_names:
-            p4 = self.lateral["P4"](features["P4"])
-            fused = F.interpolate(fused, size=p4.shape[-2:], mode="bilinear", align_corners=False)
-            fused = self.p4_fuse(p4 + fused)
-        if "P3" in self.feature_names:
-            p3 = self.lateral["P3"](features["P3"])
-            fused = F.interpolate(fused, size=p3.shape[-2:], mode="bilinear", align_corners=False)
-            fused = self.p3_fuse(p3 + fused)
+        if self.fusion_version == "hierarchical":
+            start = self.feature_names[-1]
+            fused = self.lateral[start](features[start])
+            ordered = list(reversed(self.feature_names[:-1]))
+            for name in ordered:
+                current = self.lateral[name](features[name])
+                fused = F.interpolate(fused, size=current.shape[-2:], mode="bilinear", align_corners=False)
+                block = self.p3_fuse if name == "P3" else self.p4_fuse
+                fused = block(current + fused)
+        else:
+            aligned = [self.lateral[name](features[name]) for name in self.feature_names]
+            target_size = max((x.shape[-2:] for x in aligned), key=lambda s: s[0] * s[1])
+            aligned = [F.interpolate(x, size=target_size, mode="bilinear", align_corners=False) if x.shape[-2:] != target_size else x for x in aligned]
+            if self.fusion_version == "concat":
+                fused = self.concat_projection(torch.cat(aligned, dim=1))
+            else:
+                if self.fusion_version == "global":
+                    logits = self.global_logits.view(1, -1, 1, 1).expand(aligned[0].shape[0], -1, *target_size)
+                elif self.fusion_version == "image_conditioned":
+                    logits = self.image_router(aligned[-1].mean(dim=(-2, -1))).view(aligned[0].shape[0], -1, 1, 1).expand(-1, -1, *target_size)
+                else:
+                    anchor = aligned[-1]
+                    scores = []
+                    for x in aligned[:2]:
+                        scores.append(F.cosine_similarity(anchor, x, dim=1, eps=1e-6))
+                    scores.append(self.scsr_confidence(anchor).squeeze(1))
+                    logits = torch.stack(scores, dim=1)
+                    scales = torch.cat([self.scsr_gamma, torch.ones(1, device=logits.device)])
+                    logits = logits * scales.view(1, 3, 1, 1) + self.scsr_beta.view(1, 3, 1, 1)
+                weights = torch.softmax(logits, dim=1)
+                fused = sum(w.unsqueeze(1) * x for w, x in zip(weights.unbind(1), aligned))
+                self.last_routing = {"weights": weights.detach(), "entropy": (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)).detach()}
         if self.post_fusion_adapter is not None:
             fused = self.post_fusion_adapter(fused)
         fused = self.refine(fused)

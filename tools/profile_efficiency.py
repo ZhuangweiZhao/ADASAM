@@ -31,6 +31,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sam-image-size", type=int, default=None)
     p.add_argument("--base-channels", type=int, default=32)
     p.add_argument("--decoder-dim", type=int, default=96)
+    p.add_argument("--adapter", choices=["cat", "none"], default="cat")
+    p.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
+    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr"], default="hierarchical")
     p.add_argument("--device", default="cuda")
     p.add_argument("--output-csv", default="runs/efficiency_results.csv")
     p.add_argument("--merge-csv", default=None)
@@ -59,7 +62,9 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
         prompt_version="v2" if name == "ours" else "none",
         num_prompt=8,
         prompt_fusion_mode="both",
-        use_cat_adapter=True,
+        use_cat_adapter=args.adapter == "cat",
+        feature_scales=args.feature_scales,
+        fusion_version=args.fusion_version,
         device=device,
     )
 
@@ -153,6 +158,9 @@ def main() -> None:
             "sam_image_size": sam_size,
             "total_params": counts["total"],
             "trainable_params": counts["trainable"],
+            "adapter": args.adapter if name != "unet" else "n/a",
+            "feature_scales": args.feature_scales if name != "unet" else "n/a",
+            "fusion_version": args.fusion_version if name != "unet" else "n/a",
             "FLOPs": flops,
             **timing,
             "device": str(device),

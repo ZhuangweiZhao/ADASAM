@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import pytest
 
 from adasam.datasets.industrial import LabelRatioSubset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
@@ -74,6 +75,68 @@ def test_no_adapter_embedding_decoder_forward() -> None:
         use_cat_adapter=False, feature_scales="embedding",
     )
     assert model(torch.rand(2, 3, 128, 128)).shape == (2, 4, 128, 128)
+
+
+@pytest.mark.parametrize(
+    "feature_scales",
+    ["p3", "p4", "embedding", "p3_p4", "p4_embedding", "p3_p4_embedding"],
+)
+def test_hierarchical_feature_probes_forward_backward(feature_scales: str) -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, feature_scales=feature_scales,
+    )
+    logits = model(torch.rand(2, 3, 128, 128))
+    assert logits.shape == (2, 4, 128, 128)
+    logits.mean().backward()
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+    assert any(parameter.grad is not None for parameter in model.decoder.parameters())
+
+
+@pytest.mark.parametrize("fusion_version", ["concat", "global", "image_conditioned", "scsr"])
+def test_controlled_fusion_variants(fusion_version: str) -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version=fusion_version,
+    )
+    logits = model(torch.rand(2, 3, 128, 128))
+    assert logits.shape == (2, 4, 128, 128)
+    logits.mean().backward()
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
+def test_scsr_starts_uniform_and_records_finite_routing() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="scsr",
+    )
+    model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert routing is not None
+    weights = routing["weights"]
+    assert torch.allclose(weights, torch.full_like(weights, 1.0 / 3.0))
+    assert torch.allclose(weights.sum(1), torch.ones_like(weights[:, 0]))
+    assert torch.isfinite(routing["entropy"]).all()
+
+
+def test_scsr_is_under_ten_thousand_additional_parameters() -> None:
+    fixed = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="global",
+    )
+    scsr = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="scsr",
+    )
+    assert scsr.parameter_counts()["trainable"] - fixed.parameter_counts()["trainable"] < 10_000
+
+
+def test_scsr_rejects_incomplete_feature_set() -> None:
+    with pytest.raises(ValueError, match="SCSR requires"):
+        LabelEfficientSAM(
+            FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+            use_cat_adapter=False, feature_scales="p4_embedding", fusion_version="scsr",
+        )
 
 
 def test_post_fusion_adapter_forward_and_scope() -> None:
