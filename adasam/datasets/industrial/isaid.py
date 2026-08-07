@@ -64,13 +64,18 @@ class ISAIDSemanticDataset(Dataset):
             ]
             self.image_dir = next((p for p in image_candidates if p.exists()), image_candidates[0])
             self.mask_dir = next((p for p in mask_candidates if p.exists()), mask_candidates[0])
-            image_paths = sorted(self.image_dir.rglob("*.png"))
+            image_paths = sorted(
+                p for p in self.image_dir.rglob("*.png")
+                if "-checkpoint" not in p.stem and ".ipynb_checkpoints" not in p.parts
+            )
             if not image_paths:
                 raise FileNotFoundError(f"iSAID {split} images not found; searched: {image_candidates}")
             if not self.mask_dir.exists():
                 raise FileNotFoundError(f"iSAID {split} semantic masks not found; searched: {mask_candidates}")
             mask_index = {}
             for mask_path in self.mask_dir.rglob("*.png"):
+                if "-checkpoint" in mask_path.stem or ".ipynb_checkpoints" in mask_path.parts:
+                    continue
                 key = mask_path.stem.removesuffix("_instance_color_RGB")
                 mask_index[key] = mask_path
             paired = [(p, mask_index.get(p.stem), p.stem) for p in image_paths]
