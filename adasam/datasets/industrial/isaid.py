@@ -46,8 +46,10 @@ class ISAIDSemanticDataset(Dataset):
         self.transforms = transforms
         if split == "train":
             base = self.root / "TrainData" / "train"
+            compact_base = self.root / "train"
         elif split == "val":
             base = self.root / "ValidationData" / "val"
+            compact_base = self.root / "val"
         else:
             base = self.root / "TestData" / "TestData"
         if split == "test":
@@ -55,16 +57,32 @@ class ISAIDSemanticDataset(Dataset):
             image_paths += sorted((base / "Part1-002" / "images").glob("*.png"))
             self.mask_dir = None
         else:
-            self.image_dir = base / "images" / "images"
-            self.mask_dir = base / "Semantic_masks" / "images" / "images"
-            image_paths = sorted(self.image_dir.glob("*.png"))
-            if not self.image_dir.exists() or not image_paths:
-                raise FileNotFoundError(f"iSAID {split} images not found: {self.image_dir}")
+            image_candidates = [base / "images" / "images", compact_base / "images"]
+            mask_candidates = [
+                base / "Semantic_masks" / "images" / "images",
+                compact_base / "semantic_png", compact_base / "semantic_mask",
+            ]
+            self.image_dir = next((p for p in image_candidates if p.exists()), image_candidates[0])
+            self.mask_dir = next((p for p in mask_candidates if p.exists()), mask_candidates[0])
+            image_paths = sorted(self.image_dir.rglob("*.png"))
+            if not image_paths:
+                raise FileNotFoundError(f"iSAID {split} images not found; searched: {image_candidates}")
             if not self.mask_dir.exists():
-                raise FileNotFoundError(f"iSAID {split} semantic masks not found: {self.mask_dir}")
+                raise FileNotFoundError(f"iSAID {split} semantic masks not found; searched: {mask_candidates}")
+            mask_index = {}
+            for mask_path in self.mask_dir.rglob("*.png"):
+                key = mask_path.stem.removesuffix("_instance_color_RGB")
+                mask_index[key] = mask_path
+            paired = [(p, mask_index.get(p.stem), p.stem) for p in image_paths]
+            missing = [p for p, mask, _ in paired if mask is None]
+            if missing:
+                raise FileNotFoundError(
+                    f"Missing semantic masks for {len(missing)}/{len(paired)} {split} images; "
+                    f"first missing: {missing[0].name}; mask_dir={self.mask_dir}"
+                )
         if not image_paths:
             raise RuntimeError(f"No iSAID images found for split={split} under {base}")
-        self.samples = [(p, self._mask_path(p) if split != "test" else None, p.stem) for p in image_paths]
+        self.samples = paired if split != "test" else [(p, None, p.stem) for p in image_paths]
 
     def _mask_path(self, image_path: Path) -> Path:
         return self.mask_dir / f"{image_path.stem}_instance_color_RGB.png"
@@ -74,7 +92,13 @@ class ISAIDSemanticDataset(Dataset):
 
     @classmethod
     def _decode_mask(cls, mask: np.ndarray) -> np.ndarray:
-        rgb = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB) if mask.ndim == 3 else mask[..., None]
+        if mask.ndim == 2 or (mask.ndim == 3 and np.array_equal(mask[..., 0], mask[..., 1]) and np.array_equal(mask[..., 1], mask[..., 2])):
+            labels = mask if mask.ndim == 2 else mask[..., 0]
+            result = np.full(labels.shape, cls.IGNORE_INDEX, dtype=np.int64)
+            valid = (labels >= 0) & (labels < cls.NUM_CLASSES)
+            result[valid] = labels[valid]
+            return result
+        rgb = cv2.cvtColor(mask, cv2.COLOR_BGR2RGB)
         result = np.full(rgb.shape[:2], cls.IGNORE_INDEX, dtype=np.int64)
         for class_id, color in enumerate(cls.PALETTE):
             result[np.all(rgb == color, axis=-1)] = class_id
@@ -91,7 +115,9 @@ class ISAIDSemanticDataset(Dataset):
         if mask_path is not None:
             if not mask_path.exists():
                 raise FileNotFoundError(f"Missing semantic mask for {image_path}: {mask_path}")
-            mask_bgr = cv2.imread(str(mask_path), cv2.IMREAD_COLOR)
+            mask_bgr = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+            if mask_bgr is None:
+                raise FileNotFoundError(mask_path)
             mask = torch.from_numpy(self._decode_mask(mask_bgr))[None]
             mask = F.interpolate(mask.float()[None], self.image_size, mode="nearest")[0].long()
             sample["masks"] = mask
