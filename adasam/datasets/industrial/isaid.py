@@ -44,6 +44,30 @@ class ISAIDSemanticDataset(Dataset):
         self.split = split
         self.image_size = (image_size, image_size) if isinstance(image_size, int) else image_size
         self.transforms = transforms
+        tiled_image_dir = self.root / "images" / split
+        tiled_mask_dir = self.root / "masks" / split
+        if tiled_image_dir.exists():
+            self.image_dir = tiled_image_dir
+            self.mask_dir = tiled_mask_dir if split != "test" and tiled_mask_dir.exists() else None
+            image_paths = sorted(tiled_image_dir.glob("*.png"))
+            image_paths += sorted(tiled_image_dir.glob("*.jpg"))
+            if not image_paths:
+                raise FileNotFoundError(f"No iSAID tile images found: {tiled_image_dir}")
+            if split != "test" and self.mask_dir is None:
+                raise FileNotFoundError(f"iSAID tile masks not found: {tiled_mask_dir}")
+            if self.mask_dir is not None:
+                mask_index = {p.stem: p for p in self.mask_dir.glob("*.png")}
+                paired = [(p, mask_index.get(p.stem), p.stem) for p in image_paths]
+                missing = [p for p, mask, _ in paired if mask is None]
+                if missing:
+                    raise FileNotFoundError(
+                        f"Missing tile masks for {len(missing)}/{len(paired)} {split} images; "
+                        f"first missing: {missing[0].name}; mask_dir={self.mask_dir}"
+                    )
+            else:
+                paired = [(p, None, p.stem) for p in image_paths]
+            self.samples = paired
+            return
         if split == "train":
             base = self.root / "TrainData" / "train"
             compact_base = self.root / "train"
