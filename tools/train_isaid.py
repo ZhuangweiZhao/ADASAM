@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
+from itertools import islice
 from pathlib import Path
 
 import torch
@@ -32,6 +34,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data-root", required=True)
     p.add_argument("--checkpoint", default="weights/mobile_sam.pt")
     p.add_argument("--epochs", type=int, default=100)
+    p.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Stop after this many optimizer updates; overrides --epochs when set.",
+    )
+    p.add_argument(
+        "--eval-interval",
+        type=int,
+        default=2000,
+        help="Validation interval in optimizer updates when --max-iterations is set.",
+    )
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--image-size", type=int, default=800)
@@ -50,12 +64,26 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--device", default="cuda")
     p.add_argument("--output-dir", required=True)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.epochs <= 0:
+        p.error("--epochs must be positive")
+    if args.max_iterations is not None and args.max_iterations <= 0:
+        p.error("--max-iterations must be positive")
+    if args.eval_interval <= 0:
+        p.error("--eval-interval must be positive")
+    return args
 
 
 def resolve(value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else ROOT / path
+
+
+def training_epoch_limit(num_batches: int, epochs: int, max_iterations: int | None) -> int:
+    """Return enough data-loader passes to satisfy the selected stopping rule."""
+    if num_batches <= 0:
+        raise ValueError("training loader must contain at least one batch")
+    return epochs if max_iterations is None else math.ceil(max_iterations / num_batches)
 
 
 def main() -> None:
@@ -90,20 +118,95 @@ def main() -> None:
     out = resolve(args.output_dir) / f"isaid_ratio{args.label_ratio}_seed{args.seed}"
     out.mkdir(parents=True, exist_ok=True)
     best_path, best_score, history = out / "best_model.pt", -1.0, []
-    print(f"model={args.model} ratio={args.label_ratio}% train={len(train_idx)} val={len(val_idx)} test={len(test_dataset)}")
-    for epoch in range(1, args.epochs + 1):
-        model.train(); losses = []; started = time.perf_counter()
-        for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
+    max_epochs = training_epoch_limit(len(train_loader), args.epochs, args.max_iterations)
+    target_iterations = args.max_iterations or (args.epochs * len(train_loader))
+    training_mode = "iterations" if args.max_iterations is not None else "epochs"
+    print(
+        f"model={args.model} ratio={args.label_ratio}% train={len(train_idx)} "
+        f"val={len(val_idx)} test={len(test_dataset)} mode={training_mode} "
+        f"target_iterations={target_iterations}"
+    )
+    global_step = 0
+    best_iteration = None
+    interval_losses: list[float] = []
+    interval_started = time.perf_counter()
+    for epoch in range(1, max_epochs + 1):
+        model.train()
+        epoch_losses: list[float] = []
+        remaining = target_iterations - global_step
+        steps_this_epoch = min(len(train_loader), remaining)
+        batches = islice(train_loader, steps_this_epoch)
+        description = (
+            f"iterations {global_step}/{target_iterations}"
+            if args.max_iterations is not None
+            else f"epoch {epoch}/{max_epochs}"
+        )
+        for batch in tqdm(batches, total=steps_this_epoch, desc=description):
             image, target = batch["image"].to(device), batch["mask"].to(device)
             optimizer.zero_grad(set_to_none=True)
             prediction = model(image)
             loss = criterion(prediction, target)
-            loss.backward(); optimizer.step(); losses.append(float(loss.detach()))
-        metrics = evaluate(model, val_loader, device, ISAIDSemanticDataset.NUM_CLASSES, ISAIDSemanticDataset.IGNORE_INDEX)
-        record = {"epoch": epoch, "mean_loss": sum(losses) / len(losses), "seconds": time.perf_counter() - started, "validation": metrics}
-        history.append(record); print(json.dumps(record))
-        if metrics["mIoU"] > best_score:
-            best_score = metrics["mIoU"]; torch.save({"model": model.state_dict(), "epoch": epoch}, best_path)
+            loss.backward()
+            optimizer.step()
+            loss_value = float(loss.detach())
+            epoch_losses.append(loss_value)
+            interval_losses.append(loss_value)
+            global_step += 1
+
+            validate_by_iteration = args.max_iterations is not None and (
+                global_step % args.eval_interval == 0 or global_step == target_iterations
+            )
+            if validate_by_iteration:
+                metrics = evaluate(
+                    model, val_loader, device,
+                    ISAIDSemanticDataset.NUM_CLASSES, ISAIDSemanticDataset.IGNORE_INDEX,
+                )
+                record = {
+                    "epoch": epoch,
+                    "iteration": global_step,
+                    "mean_loss": sum(interval_losses) / len(interval_losses),
+                    "seconds": time.perf_counter() - interval_started,
+                    "validation": metrics,
+                }
+                history.append(record)
+                print(json.dumps(record))
+                if metrics["mIoU"] > best_score:
+                    best_score = metrics["mIoU"]
+                    best_iteration = global_step
+                    torch.save(
+                        {"model": model.state_dict(), "epoch": epoch, "iteration": global_step},
+                        best_path,
+                    )
+                interval_losses = []
+                interval_started = time.perf_counter()
+                model.train()
+
+        if args.max_iterations is None:
+            metrics = evaluate(
+                model, val_loader, device,
+                ISAIDSemanticDataset.NUM_CLASSES, ISAIDSemanticDataset.IGNORE_INDEX,
+            )
+            record = {
+                "epoch": epoch,
+                "iteration": global_step,
+                "mean_loss": sum(epoch_losses) / len(epoch_losses),
+                "seconds": time.perf_counter() - interval_started,
+                "validation": metrics,
+            }
+            history.append(record)
+            print(json.dumps(record))
+            if metrics["mIoU"] > best_score:
+                best_score = metrics["mIoU"]
+                best_iteration = global_step
+                torch.save(
+                    {"model": model.state_dict(), "epoch": epoch, "iteration": global_step},
+                    best_path,
+                )
+            interval_losses = []
+            interval_started = time.perf_counter()
+
+        if global_step >= target_iterations:
+            break
     best = torch.load(best_path, map_location=device, weights_only=False); model.load_state_dict(best["model"])
     test = evaluate(model, test_loader, device, ISAIDSemanticDataset.NUM_CLASSES, ISAIDSemanticDataset.IGNORE_INDEX)
     from tools.train_loveda import collect_routing_statistics
@@ -114,6 +217,8 @@ def main() -> None:
     metrics = {"dataset": "iSAID", "model": args.model, "label_ratio": args.label_ratio, "seed": args.seed,
                "train_samples": len(train_idx), "validation_samples": len(val_idx), "test_samples": len(test_dataset),
                "parameters": model.parameter_counts(), "history": history, "best_epoch": best["epoch"],
+               "best_iteration": best.get("iteration", best_iteration), "trained_iterations": global_step,
+               "target_iterations": target_iterations,
                "test": test, "args": vars(args), "routing_statistics": routing_statistics}
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     torch.save({"model": model.state_dict(), "metrics": metrics}, out / "last_model.pt")
