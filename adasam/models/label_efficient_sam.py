@@ -40,6 +40,7 @@ class LabelEfficientSAM(nn.Module):
         feature_scales: str = "p3_p4_embedding",
         adapter_placement: str = "pre_fusion",
         fusion_version: str = "hierarchical",
+        representation_budget: int = 3,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -107,6 +108,7 @@ class LabelEfficientSAM(nn.Module):
             spatial_prompt_mode=prompt_fusion_mode,
             feature_scales=feature_scales,
             fusion_version=fusion_version,
+            representation_budget=representation_budget,
             post_fusion_adapter=use_cat_adapter and adapter_placement == "post_fusion",
             adapter_ratio=adapter_ratio,
             **decoder_kwargs,
@@ -139,6 +141,7 @@ class LabelEfficientSAM(nn.Module):
         feature_scales: str = "p3_p4_embedding",
         adapter_placement: str = "pre_fusion",
         fusion_version: str = "hierarchical",
+        representation_budget: int = 3,
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -155,6 +158,7 @@ class LabelEfficientSAM(nn.Module):
             feature_scales=feature_scales,
             adapter_placement=adapter_placement,
             fusion_version=fusion_version,
+            representation_budget=representation_budget,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":

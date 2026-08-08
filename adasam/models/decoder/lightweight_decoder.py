@@ -31,6 +31,7 @@ class LightweightSemanticDecoder(nn.Module):
         spatial_prompt_mode: str = "both",
         feature_scales: str = "p3_p4_embedding",
         fusion_version: str = "hierarchical",
+        representation_budget: int = 3,
         post_fusion_adapter: bool = False,
         adapter_ratio: float = 0.25,
     ) -> None:
@@ -49,13 +50,18 @@ class LightweightSemanticDecoder(nn.Module):
             raise ValueError(
                 "feature_scales must be one of: p3, p4, embedding, p3_p4, p3_embedding, p4_embedding, p3_p4_embedding"
             )
-        if fusion_version not in {"hierarchical", "concat", "global", "image_conditioned", "scsr"}:
-            raise ValueError("fusion_version must be hierarchical, concat, global, image_conditioned, or scsr")
+        if fusion_version not in {"hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"}:
+            raise ValueError("fusion_version must be hierarchical, concat, global, image_conditioned, scsr, or semantic_budget")
         if fusion_version == "scsr" and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
+        if fusion_version == "semantic_budget" and feature_scales != "p3_p4_embedding":
+            raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
+        if representation_budget not in {1, 2, 3}:
+            raise ValueError("representation_budget must be 1, 2, or 3")
         self.feature_scales = feature_scales
         self.feature_names = scale_names[feature_scales]
         self.fusion_version = fusion_version
+        self.representation_budget = representation_budget
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
         self.lateral = nn.ModuleDict(
             {
@@ -78,6 +84,18 @@ class LightweightSemanticDecoder(nn.Module):
         if self.scsr_confidence is not None:
             nn.init.zeros_(self.scsr_confidence.weight)
             nn.init.zeros_(self.scsr_confidence.bias)
+        self.semantic_budget_controller = (
+            nn.Linear(decoder_dim, 2) if fusion_version == "semantic_budget" else None
+        )
+        self.semantic_budget_gate = (
+            nn.Conv2d(decoder_dim, 1, 1, bias=True) if fusion_version == "semantic_budget" else None
+        )
+        self.semantic_budget_residual = (
+            nn.Parameter(torch.zeros(2)) if fusion_version == "semantic_budget" else None
+        )
+        if self.semantic_budget_gate is not None:
+            nn.init.zeros_(self.semantic_budget_gate.weight)
+            nn.init.zeros_(self.semantic_budget_gate.bias)
         self.last_routing = None
         self.post_fusion_adapter = (
             CATAdapter(
@@ -133,28 +151,80 @@ class LightweightSemanticDecoder(nn.Module):
                 block = self.p3_fuse if name == "P3" else self.p4_fuse
                 fused = block(current + fused)
         else:
-            aligned = [self.lateral[name](features[name]) for name in self.feature_names]
-            target_size = max((x.shape[-2:] for x in aligned), key=lambda s: s[0] * s[1])
-            aligned = [F.interpolate(x, size=target_size, mode="bilinear", align_corners=False) if x.shape[-2:] != target_size else x for x in aligned]
-            if self.fusion_version == "concat":
-                fused = self.concat_projection(torch.cat(aligned, dim=1))
+            if self.fusion_version == "semantic_budget":
+                # Embedding is the semantic anchor. P3/P4 are injected only when
+                # their content is compatible with the anchor and the image-level
+                # budget controller selects the corresponding scale.
+                anchor = self.lateral["embedding"](features["embedding"])
+                target_size = max(
+                    (features[name].shape[-2:] for name in ("P3", "P4", "embedding")),
+                    key=lambda s: s[0] * s[1],
+                )
+                if anchor.shape[-2:] != target_size:
+                    anchor = F.interpolate(anchor, size=target_size, mode="bilinear", align_corners=False)
+                detail_logits = self.semantic_budget_controller(anchor.mean(dim=(-2, -1)))
+                detail_probs = torch.softmax(detail_logits, dim=1)
+                k = min(self.representation_budget - 1, 2)
+                hard_mask = torch.zeros_like(detail_probs)
+                if k:
+                    hard_mask.scatter_(1, detail_probs.topk(k, dim=1).indices, 1.0)
+                # Straight-through selection: hard routing in the forward pass,
+                # soft probabilities in the backward pass.
+                route_mask = hard_mask + detail_probs - detail_probs.detach()
+                detail_values = []
+                detail_effective = []
+                for index, name in enumerate(("P3", "P4")):
+                    selected = self.training or bool(hard_mask[:, index].any())
+                    if not selected:
+                        detail_values.append(None)
+                        detail_effective.append(torch.zeros_like(anchor[:, :1]))
+                        continue
+                    value = self.lateral[name](features[name])
+                    if value.shape[-2:] != target_size:
+                        value = F.interpolate(value, size=target_size, mode="bilinear", align_corners=False)
+                    compatibility = F.cosine_similarity(anchor, value, dim=1, eps=1e-6)
+                    evidence = (1.0 - compatibility).unsqueeze(1)
+                    local_gate = torch.sigmoid(self.semantic_budget_gate(anchor) + evidence)
+                    effective = route_mask[:, index].view(-1, 1, 1, 1) * local_gate
+                    detail_values.append(value)
+                    detail_effective.append(effective)
+                fused = anchor
+                for index, value in enumerate(detail_values):
+                    if value is not None:
+                        fused = fused + self.semantic_budget_residual[index] * detail_effective[index] * (value - anchor)
+                embedding_weight = torch.ones_like(anchor[:, :1])
+                raw_weights = torch.cat([detail_effective[0], detail_effective[1], embedding_weight], dim=1)
+                weights = raw_weights / raw_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                self.last_routing = {
+                    "weights": weights.detach(),
+                    "entropy": (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)).detach(),
+                    "budget_mask": hard_mask.detach(),
+                    "budget": self.representation_budget,
+                    "selected_scales": hard_mask.detach().sum(1),
+                }
             else:
-                if self.fusion_version == "global":
-                    logits = self.global_logits.view(1, -1, 1, 1).expand(aligned[0].shape[0], -1, *target_size)
-                elif self.fusion_version == "image_conditioned":
-                    logits = self.image_router(aligned[-1].mean(dim=(-2, -1))).view(aligned[0].shape[0], -1, 1, 1).expand(-1, -1, *target_size)
+                aligned = [self.lateral[name](features[name]) for name in self.feature_names]
+                target_size = max((x.shape[-2:] for x in aligned), key=lambda s: s[0] * s[1])
+                aligned = [F.interpolate(x, size=target_size, mode="bilinear", align_corners=False) if x.shape[-2:] != target_size else x for x in aligned]
+                if self.fusion_version == "concat":
+                    fused = self.concat_projection(torch.cat(aligned, dim=1))
                 else:
-                    anchor = aligned[-1]
-                    scores = []
-                    for x in aligned[:2]:
-                        scores.append(F.cosine_similarity(anchor, x, dim=1, eps=1e-6))
-                    scores.append(self.scsr_confidence(anchor).squeeze(1))
-                    logits = torch.stack(scores, dim=1)
-                    scales = torch.cat([self.scsr_gamma, torch.ones(1, device=logits.device)])
-                    logits = logits * scales.view(1, 3, 1, 1) + self.scsr_beta.view(1, 3, 1, 1)
-                weights = torch.softmax(logits, dim=1)
-                fused = sum(w.unsqueeze(1) * x for w, x in zip(weights.unbind(1), aligned))
-                self.last_routing = {"weights": weights.detach(), "entropy": (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)).detach()}
+                    if self.fusion_version == "global":
+                        logits = self.global_logits.view(1, -1, 1, 1).expand(aligned[0].shape[0], -1, *target_size)
+                    elif self.fusion_version == "image_conditioned":
+                        logits = self.image_router(aligned[-1].mean(dim=(-2, -1))).view(aligned[0].shape[0], -1, 1, 1).expand(-1, -1, *target_size)
+                    else:
+                        anchor = aligned[-1]
+                        scores = []
+                        for x in aligned[:2]:
+                            scores.append(F.cosine_similarity(anchor, x, dim=1, eps=1e-6))
+                        scores.append(self.scsr_confidence(anchor).squeeze(1))
+                        logits = torch.stack(scores, dim=1)
+                        scales = torch.cat([self.scsr_gamma, torch.ones(1, device=logits.device)])
+                        logits = logits * scales.view(1, 3, 1, 1) + self.scsr_beta.view(1, 3, 1, 1)
+                    weights = torch.softmax(logits, dim=1)
+                    fused = sum(w.unsqueeze(1) * x for w, x in zip(weights.unbind(1), aligned))
+                    self.last_routing = {"weights": weights.detach(), "entropy": (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)).detach()}
         if self.post_fusion_adapter is not None:
             fused = self.post_fusion_adapter(fused)
         fused = self.refine(fused)

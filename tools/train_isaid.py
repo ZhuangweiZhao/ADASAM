@@ -40,7 +40,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-channels", type=int, default=32)
     p.add_argument("--adapter", choices=["cat", "none"], default="none")
     p.add_argument("--feature-scales", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    p.add_argument("--fusion-version", choices=["hierarchical", "global", "image_conditioned", "scsr"], default="hierarchical")
+    p.add_argument("--fusion-version", choices=["hierarchical", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
+    p.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     p.add_argument("--augmentation", choices=["none", "basic"], default="basic")
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--validation-seed", type=int, default=42)
@@ -82,6 +83,7 @@ def main() -> None:
             prompt_version="v2" if args.model == "ours" else "none", num_prompt=8,
             use_cat_adapter=args.adapter == "cat", feature_scales=args.feature_scales,
             fusion_version=args.fusion_version,
+            representation_budget=args.representation_budget,
         )
     criterion = LabelEfficientSegmentationLoss(ignore_index=ISAIDSemanticDataset.IGNORE_INDEX)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=args.weight_decay)
@@ -104,10 +106,15 @@ def main() -> None:
             best_score = metrics["mIoU"]; torch.save({"model": model.state_dict(), "epoch": epoch}, best_path)
     best = torch.load(best_path, map_location=device, weights_only=False); model.load_state_dict(best["model"])
     test = evaluate(model, test_loader, device, ISAIDSemanticDataset.NUM_CLASSES, ISAIDSemanticDataset.IGNORE_INDEX)
+    from tools.train_loveda import collect_routing_statistics
+    routing_statistics = collect_routing_statistics(
+        model, test_loader, device, ISAIDSemanticDataset.NUM_CLASSES,
+        ISAIDSemanticDataset.IGNORE_INDEX,
+    )
     metrics = {"dataset": "iSAID", "model": args.model, "label_ratio": args.label_ratio, "seed": args.seed,
                "train_samples": len(train_idx), "validation_samples": len(val_idx), "test_samples": len(test_dataset),
                "parameters": model.parameter_counts(), "history": history, "best_epoch": best["epoch"],
-               "test": test, "args": vars(args)}
+               "test": test, "args": vars(args), "routing_statistics": routing_statistics}
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     torch.save({"model": model.state_dict(), "metrics": metrics}, out / "last_model.pt")
     print(f"test={json.dumps(test)}\nsaved={out}")

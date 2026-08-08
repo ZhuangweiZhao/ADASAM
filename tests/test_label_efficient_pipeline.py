@@ -105,6 +105,33 @@ def test_controlled_fusion_variants(fusion_version: str) -> None:
     assert all(parameter.grad is None for parameter in model.backbone.parameters())
 
 
+@pytest.mark.parametrize("budget", [1, 2, 3])
+def test_semantic_budget_forward_backward_and_routing(budget: int) -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_budget",
+        representation_budget=budget,
+    )
+    logits = model(torch.rand(2, 3, 128, 128))
+    assert logits.shape == (2, 4, 128, 128)
+    logits.mean().backward()
+    routing = model.decoder.last_routing
+    assert routing is not None
+    assert routing["budget"] == budget
+    assert routing["weights"].shape[1] == 3
+    assert torch.isfinite(routing["entropy"]).all()
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
+def test_semantic_budget_rejects_incomplete_feature_set() -> None:
+    with pytest.raises(ValueError, match="semantic_budget requires"):
+        LabelEfficientSAM(
+            FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+            use_cat_adapter=False, feature_scales="p4_embedding",
+            fusion_version="semantic_budget",
+        )
+
+
 def test_scsr_starts_uniform_and_records_finite_routing() -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,

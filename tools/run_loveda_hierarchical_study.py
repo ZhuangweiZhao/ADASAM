@@ -25,7 +25,7 @@ FUSIONS = tuple(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LoveDA frozen-feature hierarchy study")
-    parser.add_argument("--study", choices=["probe", "fusion", "all"], default="all")
+    parser.add_argument("--study", choices=["probe", "fusion", "budget", "all"], default="all")
     parser.add_argument("--ratios", nargs="+", type=int, default=[5, 10, 20])
     parser.add_argument("--seeds", nargs="+", type=int, default=[42])
     parser.add_argument("--epochs", type=int, default=100)
@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", default="runs/loveda_hierarchical_study")
     parser.add_argument("--rerun-completed", action="store_true")
+    parser.add_argument("--budgets", nargs="+", type=int, choices=[1, 2, 3], default=[1, 2, 3])
     return parser.parse_args()
 
 
@@ -50,6 +51,8 @@ def main() -> None:
         variants.extend((f"probe_{name}", scales, fusion) for name, scales, fusion in PROBES)
     if args.study in {"fusion", "all"}:
         variants.extend((f"fusion_{name}", scales, fusion) for name, scales, fusion in FUSIONS)
+    if args.study in {"budget", "all"}:
+        variants.extend((f"budget_{budget}", "p3_p4_embedding", "semantic_budget", budget) for budget in args.budgets)
     output_root = Path(args.output_dir)
     if not output_root.is_absolute():
         output_root = ROOT / output_root
@@ -58,7 +61,9 @@ def main() -> None:
     current = 0
     for seed in args.seeds:
         for ratio in args.ratios:
-            for variant, scales, fusion in variants:
+            for item in variants:
+                variant, scales, fusion = item[:3]
+                budget = item[3] if len(item) > 3 else 3
                 current += 1
                 variant_root = output_root / variant
                 metrics_path = variant_root / f"loveda_ratio{ratio}_seed{seed}" / "metrics.json"
@@ -75,6 +80,7 @@ def main() -> None:
                         "--model", "mobilesam", "--adapter", "none",
                         "--decoder-version", "lightweight",
                         "--feature-scales", scales, "--fusion-version", fusion,
+                        "--representation-budget", str(budget),
                         "--label-ratio", str(ratio), "--seed", str(seed),
                         "--epochs", str(args.epochs), "--batch-size", str(args.batch_size),
                         "--num-workers", str(args.num_workers),
@@ -90,6 +96,7 @@ def main() -> None:
                 test = saved["test"]
                 rows.append({
                     "variant": variant, "feature_scales": scales, "fusion_version": fusion,
+                    "representation_budget": budget,
                     "ratio": ratio, "seed": seed,
                     "labeled_images": saved["label_pool_samples"],
                     "trainable_params": saved["parameters"]["trainable"],

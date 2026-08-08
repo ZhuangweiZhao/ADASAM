@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Profile segmentation inference efficiency")
-    p.add_argument("--dataset", choices=["loveda", "neu_seg"], required=True)
+    p.add_argument("--dataset", choices=["loveda", "neu_seg", "isaid"], required=True)
     p.add_argument("--models", nargs="+", choices=["unet", "mobilesam", "ours"], default=["mobilesam"])
     p.add_argument("--data-root", required=True)
     p.add_argument("--checkpoint", default="weights/mobile_sam.pt")
@@ -33,7 +33,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--decoder-dim", type=int, default=96)
     p.add_argument("--adapter", choices=["cat", "none"], default="cat")
     p.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr"], default="hierarchical")
+    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
+    p.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     p.add_argument("--device", default="cuda")
     p.add_argument("--output-csv", default="runs/efficiency_results.csv")
     p.add_argument("--merge-csv", default=None)
@@ -50,8 +51,10 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
 
     if args.dataset == "loveda":
         classes = 7
-    else:
+    elif args.dataset == "neu_seg":
         classes = 4
+    else:
+        classes = 16
     if name == "unet":
         return LabelEfficientUNet(classes, args.base_channels).to(device)
     return LabelEfficientSAM.build(
@@ -65,6 +68,7 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
         use_cat_adapter=args.adapter == "cat",
         feature_scales=args.feature_scales,
         fusion_version=args.fusion_version,
+        representation_budget=args.representation_budget,
         device=device,
     )
 
@@ -137,9 +141,12 @@ def main() -> None:
     if args.dataset == "loveda":
         from adasam.datasets.industrial import LoveDASemanticDataset
         dataset = LoveDASemanticDataset(resolve(args.data_root), "val", image_size)
-    else:
+    elif args.dataset == "neu_seg":
         from adasam.datasets.industrial import NEUSegSemanticDataset
         dataset = NEUSegSemanticDataset(resolve(args.data_root), "test")
+    else:
+        from adasam.datasets.industrial import ISAIDSemanticDataset
+        dataset = ISAIDSemanticDataset(resolve(args.data_root), "val", image_size)
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=device.type == "cuda")
     rows = []
     checkpoints = {name: resolve(path) for name, path in zip(args.models, args.model_checkpoints)}

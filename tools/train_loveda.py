@@ -41,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr"], default="hierarchical")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
+    parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -63,19 +64,24 @@ def resolve(value: str) -> Path:
 
 @torch.no_grad()
 def collect_routing_statistics(model, loader, device, num_classes: int, ignore_index: int):
-    if getattr(model.decoder, "fusion_version", None) != "scsr":
+    if getattr(model.decoder, "fusion_version", None) not in {"scsr", "semantic_budget"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
     dominant = torch.zeros(3, dtype=torch.float64)
     class_sum = torch.zeros(num_classes, 3, dtype=torch.float64)
     class_pixels = torch.zeros(num_classes, dtype=torch.float64)
     entropy_sum = 0.0
+    selected_sum = torch.zeros(2, dtype=torch.float64)
+    selected_samples = 0
     pixels = 0
     model.eval()
     for batch in loader:
         target = batch["mask"].to(device, non_blocking=True)
         model(batch["image"].to(device, non_blocking=True))
         routing = model.decoder.last_routing
+        if "budget_mask" in routing:
+            selected_sum += routing["budget_mask"].sum(0).cpu().double()
+            selected_samples += routing["budget_mask"].shape[0]
         weights = routing["weights"]
         routed_target = F.interpolate(target[:, None].float(), weights.shape[-2:], mode="nearest")[:, 0].long()
         valid = routed_target != ignore_index
@@ -103,6 +109,11 @@ def collect_routing_statistics(model, loader, device, num_classes: int, ignore_i
             for c in range(num_classes) if class_pixels[c] > 0
         },
         "pixels": pixels,
+        "representation_budget": getattr(model.decoder, "representation_budget", None),
+        "selected_scale_fraction": (
+            {name: float(selected_sum[i] / max(1, selected_samples)) for i, name in enumerate(("P3", "P4"))}
+            if selected_samples else None
+        ),
     }
 
 
@@ -150,6 +161,7 @@ def main() -> None:
             feature_scales=args.feature_scales,
             adapter_placement=args.adapter_placement,
             fusion_version=args.fusion_version,
+            representation_budget=args.representation_budget,
         )
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
