@@ -18,6 +18,8 @@ thirdparty/MobileSAM/weights/*.pt
 
 # ── Datasets (external, not tracked) ──
 data/
+!tools/data/
+!tools/data/*.py
 
 # ── Experiment outputs ──
 runs/
