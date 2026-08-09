@@ -208,6 +208,22 @@ def test_scsr_task_exposes_scale_logits_and_utility_loss() -> None:
     assert all(parameter.grad is None for parameter in model.backbone.parameters())
 
 
+def test_scsr_task_hard_routing_uses_straight_through_one_hot_weights() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="scsr_task",
+    )
+    model.decoder.task_routing_hard = True
+    with torch.no_grad():
+        model.decoder.scsr_v2_bias.copy_(torch.tensor([10.0, 0.0, 0.0]))
+    model(torch.rand(1, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert routing is not None
+    assert torch.allclose(routing["weights"][:, 0], torch.ones_like(routing["weights"][:, 0]))
+    assert torch.allclose(routing["weights"][:, 1:], torch.zeros_like(routing["weights"][:, 1:]))
+    assert not torch.allclose(routing["route_weights"], routing["weights"])
+
+
 def test_scsr_rejects_incomplete_feature_set() -> None:
     for fusion_version in ("scsr", "scsr_v2", "scsr_task"):
         with pytest.raises(ValueError, match="SCSR requires"):

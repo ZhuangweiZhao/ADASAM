@@ -46,6 +46,8 @@ def test_neuseg_accepts_task_supervised_scsr(monkeypatch) -> None:
             "--label_ratio", "5",
             "--fusion-version", "scsr_task",
             "--routing-loss-weight", "0.2",
+            "--routing-warmup-epochs", "10",
+            "--routing-hard",
         ],
     )
 
@@ -53,6 +55,8 @@ def test_neuseg_accepts_task_supervised_scsr(monkeypatch) -> None:
 
     assert args.fusion_version == "scsr_task"
     assert args.routing_loss_weight == 0.2
+    assert args.routing_warmup_epochs == 10
+    assert args.routing_hard is True
 
 
 def test_neuseg_preserves_existing_fusion_defaults(monkeypatch) -> None:

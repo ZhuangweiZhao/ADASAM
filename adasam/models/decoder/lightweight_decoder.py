@@ -116,6 +116,7 @@ class LightweightSemanticDecoder(nn.Module):
             for head in self.scsr_task_heads:
                 nn.init.zeros_(head.weight)
                 nn.init.zeros_(head.bias)
+        self.task_routing_hard = False
         self.semantic_budget_controller = (
             nn.Linear(decoder_dim, 2) if fusion_version == "semantic_budget" else None
         )
@@ -296,7 +297,14 @@ class LightweightSemanticDecoder(nn.Module):
                         logits = (
                             logits + self.scsr_v2_bias.view(1, 3, 1, 1)
                         ) / temperature
-                    weights = torch.softmax(logits, dim=1)
+                    soft_weights = torch.softmax(logits, dim=1)
+                    weights = soft_weights
+                    if self.fusion_version == "scsr_task" and self.task_routing_hard:
+                        hard_index = logits.argmax(dim=1)
+                        hard_weights = F.one_hot(hard_index, num_classes=3).permute(0, 3, 1, 2).to(logits.dtype)
+                        # Forward uses one-hot routing; backward follows the
+                        # calibrated soft router through a straight-through estimator.
+                        weights = hard_weights + soft_weights - soft_weights.detach()
                     if self.fusion_version in {"scsr_v2", "scsr_task"}:
                         # Residual form keeps the semantic anchor while allowing
                         # P3/P4 to add complementary detail independently.
@@ -312,7 +320,7 @@ class LightweightSemanticDecoder(nn.Module):
                     if self.fusion_version in {"scsr_v2", "scsr_task"}:
                         self.last_routing["temperature"] = temperature.detach()
                     if self.fusion_version == "scsr_task":
-                        self.last_routing["route_weights"] = weights
+                        self.last_routing["route_weights"] = soft_weights
                         self.last_routing["scale_logits"] = tuple(scale_logits)
         if self.post_fusion_adapter is not None:
             fused = self.post_fusion_adapter(fused)

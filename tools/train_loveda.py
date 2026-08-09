@@ -45,7 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--routing-loss-weight", type=float, default=0.1)
     parser.add_argument("--routing-aux-weight", type=float, default=0.05)
-    parser.add_argument("--routing-target-temperature", type=float, default=0.5)
+    parser.add_argument("--routing-target-temperature", type=float, default=0.25)
+    parser.add_argument("--routing-warmup-epochs", type=int, default=10)
+    parser.add_argument("--routing-hard", action="store_true")
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -249,6 +251,10 @@ def main() -> None:
     )
     for epoch in range(1, args.epochs + 1):
         model.train()
+        if hasattr(model, "decoder"):
+            model.decoder.task_routing_hard = (
+                args.routing_hard and epoch > args.routing_warmup_epochs
+            )
         started = time.perf_counter()
         losses = []
         routing_losses = []
@@ -274,7 +280,11 @@ def main() -> None:
             if routing is not None:
                 loss = (
                     loss
-                    + args.routing_loss_weight * routing["route_loss"]
+                    + (
+                        args.routing_loss_weight * routing["route_loss"]
+                        if epoch > args.routing_warmup_epochs
+                        else 0.0 * routing["route_loss"]
+                    )
                     + args.routing_aux_weight * routing["aux_loss"]
                 )
                 routing_losses.append(float(routing["route_loss"].detach()))
@@ -313,6 +323,10 @@ def main() -> None:
 
     best = torch.load(best_path, map_location=device, weights_only=False)
     model.load_state_dict(best["model"])
+    if hasattr(model, "decoder"):
+        model.decoder.task_routing_hard = (
+            args.routing_hard and args.epochs > args.routing_warmup_epochs
+        )
     test_metrics = evaluate(
         model,
         test_loader,
