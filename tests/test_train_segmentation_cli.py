@@ -25,6 +25,18 @@ def test_neuseg_accepts_hierarchical_fusion_options(monkeypatch) -> None:
     assert args.representation_budget == 2
 
 
+def test_neuseg_accepts_scsr_v2(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["train_segmentation.py", "--label_ratio", "5", "--fusion-version", "scsr_v2"],
+    )
+
+    args = parse_args()
+
+    assert args.fusion_version == "scsr_v2"
+
+
 def test_neuseg_preserves_existing_fusion_defaults(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["train_segmentation.py", "--label_ratio", "5"])
 

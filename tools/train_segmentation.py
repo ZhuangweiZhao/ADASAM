@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fusion-version",
-        choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"],
+        choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "semantic_budget"],
         default="hierarchical",
     )
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)

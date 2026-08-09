@@ -50,9 +50,15 @@ class LightweightSemanticDecoder(nn.Module):
             raise ValueError(
                 "feature_scales must be one of: p3, p4, embedding, p3_p4, p3_embedding, p4_embedding, p3_p4_embedding"
             )
-        if fusion_version not in {"hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"}:
-            raise ValueError("fusion_version must be hierarchical, concat, global, image_conditioned, scsr, or semantic_budget")
-        if fusion_version == "scsr" and feature_scales != "p3_p4_embedding":
+        if fusion_version not in {
+            "hierarchical", "concat", "global", "image_conditioned",
+            "scsr", "scsr_v2", "semantic_budget",
+        }:
+            raise ValueError(
+                "fusion_version must be hierarchical, concat, global, "
+                "image_conditioned, scsr, scsr_v2, or semantic_budget"
+            )
+        if fusion_version in {"scsr", "scsr_v2"} and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
         if fusion_version == "semantic_budget" and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
@@ -84,6 +90,22 @@ class LightweightSemanticDecoder(nn.Module):
         if self.scsr_confidence is not None:
             nn.init.zeros_(self.scsr_confidence.weight)
             nn.init.zeros_(self.scsr_confidence.bias)
+        # SCSR-v2 scores all scales with one symmetric local router. Its input
+        # contains the aligned feature, semantic anchor, complementarity map,
+        # cosine compatibility, and mean absolute feature difference.
+        self.scsr_v2_router = (
+            nn.Conv2d(decoder_dim * 3 + 2, 1, 1)
+            if fusion_version == "scsr_v2" else None
+        )
+        self.scsr_v2_bias = (
+            nn.Parameter(torch.zeros(3)) if fusion_version == "scsr_v2" else None
+        )
+        self.scsr_v2_log_temperature = (
+            nn.Parameter(torch.zeros(())) if fusion_version == "scsr_v2" else None
+        )
+        if self.scsr_v2_router is not None:
+            nn.init.zeros_(self.scsr_v2_router.weight)
+            nn.init.zeros_(self.scsr_v2_router.bias)
         self.semantic_budget_controller = (
             nn.Linear(decoder_dim, 2) if fusion_version == "semantic_budget" else None
         )
@@ -213,7 +235,7 @@ class LightweightSemanticDecoder(nn.Module):
                         logits = self.global_logits.view(1, -1, 1, 1).expand(aligned[0].shape[0], -1, *target_size)
                     elif self.fusion_version == "image_conditioned":
                         logits = self.image_router(aligned[-1].mean(dim=(-2, -1))).view(aligned[0].shape[0], -1, 1, 1).expand(-1, -1, *target_size)
-                    else:
+                    elif self.fusion_version == "scsr":
                         anchor = aligned[-1]
                         scores = []
                         for x in aligned[:2]:
@@ -222,9 +244,41 @@ class LightweightSemanticDecoder(nn.Module):
                         logits = torch.stack(scores, dim=1)
                         scales = torch.cat([self.scsr_gamma, torch.ones(1, device=logits.device)])
                         logits = logits * scales.view(1, 3, 1, 1) + self.scsr_beta.view(1, 3, 1, 1)
+                    else:
+                        anchor = aligned[-1]
+                        anchor_norm = F.normalize(anchor, dim=1, eps=1e-6)
+                        scores = []
+                        for x in aligned:
+                            difference = (x - anchor).abs()
+                            compatibility = (
+                                F.normalize(x, dim=1, eps=1e-6) * anchor_norm
+                            ).sum(dim=1, keepdim=True)
+                            detail_magnitude = difference.mean(dim=1, keepdim=True)
+                            router_input = torch.cat(
+                                (x, anchor, difference, compatibility, detail_magnitude),
+                                dim=1,
+                            )
+                            scores.append(self.scsr_v2_router(router_input))
+                        logits = torch.cat(scores, dim=1)
+                        temperature = F.softplus(self.scsr_v2_log_temperature) + 0.25
+                        logits = (
+                            logits + self.scsr_v2_bias.view(1, 3, 1, 1)
+                        ) / temperature
                     weights = torch.softmax(logits, dim=1)
-                    fused = sum(w.unsqueeze(1) * x for w, x in zip(weights.unbind(1), aligned))
-                    self.last_routing = {"weights": weights.detach(), "entropy": (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)).detach()}
+                    if self.fusion_version == "scsr_v2":
+                        # Residual form keeps the semantic anchor while allowing
+                        # P3/P4 to add complementary detail independently.
+                        fused = anchor
+                        fused = fused + weights[:, 0:1] * (aligned[0] - anchor)
+                        fused = fused + weights[:, 1:2] * (aligned[1] - anchor)
+                    else:
+                        fused = sum(w.unsqueeze(1) * x for w, x in zip(weights.unbind(1), aligned))
+                    self.last_routing = {
+                        "weights": weights.detach(),
+                        "entropy": (-(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)).detach(),
+                    }
+                    if self.fusion_version == "scsr_v2":
+                        self.last_routing["temperature"] = temperature.detach()
         if self.post_fusion_adapter is not None:
             fused = self.post_fusion_adapter(fused)
         fused = self.refine(fused)

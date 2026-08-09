@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "semantic_budget"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
@@ -66,7 +66,7 @@ def resolve(value: str) -> Path:
 def collect_routing_statistics(
     model, loader, device, num_classes: int, ignore_index: int | None
 ):
-    if getattr(model.decoder, "fusion_version", None) not in {"scsr", "semantic_budget"}:
+    if getattr(model.decoder, "fusion_version", None) not in {"scsr", "scsr_v2", "semantic_budget"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
     dominant = torch.zeros(3, dtype=torch.float64)

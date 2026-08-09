@@ -93,7 +93,7 @@ def test_hierarchical_feature_probes_forward_backward(feature_scales: str) -> No
     assert any(parameter.grad is not None for parameter in model.decoder.parameters())
 
 
-@pytest.mark.parametrize("fusion_version", ["concat", "global", "image_conditioned", "scsr"])
+@pytest.mark.parametrize("fusion_version", ["concat", "global", "image_conditioned", "scsr", "scsr_v2"])
 def test_controlled_fusion_variants(fusion_version: str) -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
@@ -158,12 +158,43 @@ def test_scsr_is_under_ten_thousand_additional_parameters() -> None:
     assert scsr.parameter_counts()["trainable"] - fixed.parameter_counts()["trainable"] < 10_000
 
 
+def test_scsr_v2_starts_symmetric_and_records_temperature() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="scsr_v2",
+    )
+    logits = model(torch.rand(2, 3, 128, 128))
+    assert logits.shape == (2, 4, 128, 128)
+    routing = model.decoder.last_routing
+    assert routing is not None
+    weights = routing["weights"]
+    assert torch.allclose(weights, torch.full_like(weights, 1.0 / 3.0))
+    assert torch.allclose(weights.sum(1), torch.ones_like(weights[:, 0]))
+    assert torch.isfinite(routing["entropy"]).all()
+    assert torch.isfinite(routing["temperature"])
+    logits.mean().backward()
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
+def test_scsr_v2_is_under_ten_thousand_additional_parameters() -> None:
+    fixed = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="global",
+    )
+    scsr_v2 = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="scsr_v2",
+    )
+    assert scsr_v2.parameter_counts()["trainable"] - fixed.parameter_counts()["trainable"] < 10_000
+
+
 def test_scsr_rejects_incomplete_feature_set() -> None:
-    with pytest.raises(ValueError, match="SCSR requires"):
-        LabelEfficientSAM(
-            FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
-            use_cat_adapter=False, feature_scales="p4_embedding", fusion_version="scsr",
-        )
+    for fusion_version in ("scsr", "scsr_v2"):
+        with pytest.raises(ValueError, match="SCSR requires"):
+            LabelEfficientSAM(
+                FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+                use_cat_adapter=False, feature_scales="p4_embedding", fusion_version=fusion_version,
+            )
 
 
 def test_post_fusion_adapter_forward_and_scope() -> None:
