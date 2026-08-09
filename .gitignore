@@ -24,6 +24,7 @@ data/
 # ── Experiment outputs ──
 runs/
 output/
+/outputs/
 *.jsonl
 !tests/**/*.jsonl
 

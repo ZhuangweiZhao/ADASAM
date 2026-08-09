@@ -45,6 +45,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--decoder-dim", type=int, default=96)
+    parser.add_argument(
+        "--feature-scales",
+        choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"],
+        default="p3_p4_embedding",
+    )
+    parser.add_argument(
+        "--fusion-version",
+        choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"],
+        default="hierarchical",
+    )
+    parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
@@ -214,6 +225,9 @@ def main() -> None:
         prototype_version=prototype_version,
         prototype_momentum=args.prototype_momentum,
         decoder_version=args.decoder_version,
+        feature_scales=args.feature_scales,
+        fusion_version=args.fusion_version,
+        representation_budget=args.representation_budget,
     )
     criterion = LabelEfficientSegmentationLoss()
     prompt_criterion = DefectPromptAlignmentLoss()
@@ -244,7 +258,9 @@ def main() -> None:
     print(
         f"variant={variant} adapter={adapter_name} "
         f"num_prompt={num_prompt if prompt_version != 'none' else 0} "
-        f"prototype={prototype_version} augmentation={args.augmentation}"
+        f"prototype={prototype_version} augmentation={args.augmentation} "
+        f"features={args.feature_scales} fusion={args.fusion_version} "
+        f"budget={args.representation_budget}"
     )
     history = []
     best_score = -1.0
@@ -314,6 +330,11 @@ def main() -> None:
     best = torch.load(best_path, map_location=device, weights_only=False)
     model.load_state_dict(best["model"])
     test_metrics = evaluate(model, test_loader, device, base_dataset.NUM_CLASSES)
+    from tools.train_loveda import collect_routing_statistics
+
+    routing_statistics = collect_routing_statistics(
+        model, test_loader, device, base_dataset.NUM_CLASSES, ignore_index=None
+    )
     checkpoint = {
         "model": model.state_dict(),
         "args": vars(args),
@@ -330,6 +351,7 @@ def main() -> None:
         "augmentation": args.augmentation,
         "decoder_version": args.decoder_version,
         "boundary_loss_weight": args.boundary_loss_weight,
+        "routing_statistics": routing_statistics,
     }
     torch.save(checkpoint, output_dir / "last_model.pt")
     (output_dir / "metrics.json").write_text(
@@ -352,6 +374,8 @@ def main() -> None:
                 "augmentation": args.augmentation,
                 "decoder_version": args.decoder_version,
                 "boundary_loss_weight": args.boundary_loss_weight,
+                "args": vars(args),
+                "routing_statistics": routing_statistics,
             },
             indent=2,
         ),
