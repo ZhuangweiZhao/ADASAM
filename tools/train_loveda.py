@@ -23,7 +23,7 @@ from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_s
 from adasam.losses import BoundaryLoss, LabelEfficientSegmentationLoss  # noqa: E402
 from adasam.models import LabelEfficientSAM, LabelEfficientUNet  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
-from tools.train_segmentation import evaluate  # noqa: E402
+from tools.train_segmentation import evaluate, task_utility_routing_loss  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,8 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "semantic_budget"], default="hierarchical")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--routing-loss-weight", type=float, default=0.1)
+    parser.add_argument("--routing-aux-weight", type=float, default=0.05)
+    parser.add_argument("--routing-target-temperature", type=float, default=0.5)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -64,9 +67,14 @@ def resolve(value: str) -> Path:
 
 @torch.no_grad()
 def collect_routing_statistics(
-    model, loader, device, num_classes: int, ignore_index: int | None
+    model,
+    loader,
+    device,
+    num_classes: int,
+    ignore_index: int | None,
+    target_temperature: float = 0.5,
 ):
-    if getattr(model.decoder, "fusion_version", None) not in {"scsr", "scsr_v2", "semantic_budget"}:
+    if getattr(model.decoder, "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
     dominant = torch.zeros(3, dtype=torch.float64)
@@ -75,6 +83,10 @@ def collect_routing_statistics(
     entropy_sum = 0.0
     selected_sum = torch.zeros(2, dtype=torch.float64)
     selected_samples = 0
+    oracle_agreement = 0
+    oracle_pixels = 0
+    oracle_scale_sum = torch.zeros(3, dtype=torch.float64)
+    oracle_entropy_sum = 0.0
     pixels = 0
     model.eval()
     for batch in loader:
@@ -94,6 +106,36 @@ def collect_routing_statistics(
         count = int(valid.sum())
         if not count:
             continue
+        if getattr(model.decoder, "fusion_version", None) == "scsr_task":
+            ignore_value = ignore_index if ignore_index is not None else -100
+            scale_losses = torch.stack(
+                [
+                    F.cross_entropy(
+                        logits,
+                        routed_target,
+                        reduction="none",
+                        ignore_index=ignore_value,
+                    )
+                    for logits in routing["scale_logits"]
+                ],
+                dim=1,
+            )
+            utility_target = torch.softmax(
+                -scale_losses / target_temperature, dim=1
+            )
+            oracle = utility_target.argmax(1)
+            predicted = weights.argmax(1)
+            oracle_agreement += int(((predicted == oracle) & valid).sum())
+            oracle_pixels += count
+            oracle_scale_sum += torch.stack(
+                [(oracle == index)[valid].sum() for index in range(3)]
+            ).cpu().double()
+            oracle_entropy_sum += float(
+                (
+                    -utility_target.clamp_min(1e-8)
+                    * utility_target.clamp_min(1e-8).log()
+                ).sum(1)[valid].sum().cpu()
+            )
         weight_sum += weights.permute(1, 0, 2, 3)[:, valid].sum(1).cpu().double()
         dominant += torch.stack([((weights.argmax(1) == i) & valid).sum() for i in range(3)]).cpu().double()
         entropy_sum += float(routing["entropy"][valid].sum().cpu())
@@ -105,7 +147,7 @@ def collect_routing_statistics(
                 class_sum[class_id] += weights.permute(1, 0, 2, 3)[:, selected].sum(1).cpu().double()
                 class_pixels[class_id] += class_count
     names = ("P3", "P4", "embedding")
-    return {
+    result = {
         "scale_names": names,
         "mean_weights": {name: float(weight_sum[i] / pixels) for i, name in enumerate(names)},
         "mean_entropy": entropy_sum / pixels,
@@ -121,6 +163,18 @@ def collect_routing_statistics(
             if selected_samples else None
         ),
     }
+    if oracle_pixels:
+        result.update(
+            {
+                "oracle_route_agreement": oracle_agreement / oracle_pixels,
+                "oracle_scale_fraction": {
+                    name: float(oracle_scale_sum[i] / oracle_pixels)
+                    for i, name in enumerate(names)
+                },
+                "oracle_target_entropy": oracle_entropy_sum / oracle_pixels,
+            }
+        )
+    return result
 
 
 def main() -> None:
@@ -197,6 +251,9 @@ def main() -> None:
         model.train()
         started = time.perf_counter()
         losses = []
+        routing_losses = []
+        routing_aux_losses = []
+        routing_target_entropies = []
         for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
@@ -208,6 +265,21 @@ def main() -> None:
                 prediction, _, auxiliary = model.forward_with_auxiliary(image, target)
                 boundary_logits = auxiliary["boundary_logits"] if auxiliary is not None else None
             loss = criterion(prediction, target)
+            routing = task_utility_routing_loss(
+                model,
+                target,
+                ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+                target_temperature=args.routing_target_temperature,
+            )
+            if routing is not None:
+                loss = (
+                    loss
+                    + args.routing_loss_weight * routing["route_loss"]
+                    + args.routing_aux_weight * routing["aux_loss"]
+                )
+                routing_losses.append(float(routing["route_loss"].detach()))
+                routing_aux_losses.append(float(routing["aux_loss"].detach()))
+                routing_target_entropies.append(float(routing["target_entropy"]))
             if boundary_logits is not None and args.boundary_loss_weight > 0.0:
                 loss = loss + args.boundary_loss_weight * boundary_criterion(boundary_logits, target)
             loss.backward()
@@ -229,6 +301,10 @@ def main() -> None:
             "seconds": elapsed,
             "validation": validation_metrics,
         }
+        if routing_losses:
+            record["mean_routing_loss"] = sum(routing_losses) / len(routing_losses)
+            record["mean_routing_aux_loss"] = sum(routing_aux_losses) / len(routing_aux_losses)
+            record["mean_routing_target_entropy"] = sum(routing_target_entropies) / len(routing_target_entropies)
         history.append(record)
         print(json.dumps(record))
         if validation_metrics["mIoU"] > best_score:
@@ -247,6 +323,7 @@ def main() -> None:
     routing_statistics = collect_routing_statistics(
         model, test_loader, device, LoveDASemanticDataset.NUM_CLASSES,
         LoveDASemanticDataset.IGNORE_INDEX,
+        target_temperature=args.routing_target_temperature,
     )
     metrics = {
         "dataset": "LoveDA",

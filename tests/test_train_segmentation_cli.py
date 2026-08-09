@@ -37,6 +37,24 @@ def test_neuseg_accepts_scsr_v2(monkeypatch) -> None:
     assert args.fusion_version == "scsr_v2"
 
 
+def test_neuseg_accepts_task_supervised_scsr(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_segmentation.py",
+            "--label_ratio", "5",
+            "--fusion-version", "scsr_task",
+            "--routing-loss-weight", "0.2",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.fusion_version == "scsr_task"
+    assert args.routing_loss_weight == 0.2
+
+
 def test_neuseg_preserves_existing_fusion_defaults(monkeypatch) -> None:
     monkeypatch.setattr(sys, "argv", ["train_segmentation.py", "--label_ratio", "5"])
 

@@ -10,6 +10,7 @@ import pytest
 from adasam.datasets.industrial import LabelRatioSubset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
 from adasam.models import LabelEfficientSAM
+from tools.train_segmentation import task_utility_routing_loss
 
 
 class FakeFrozenBackbone(nn.Module):
@@ -93,7 +94,7 @@ def test_hierarchical_feature_probes_forward_backward(feature_scales: str) -> No
     assert any(parameter.grad is not None for parameter in model.decoder.parameters())
 
 
-@pytest.mark.parametrize("fusion_version", ["concat", "global", "image_conditioned", "scsr", "scsr_v2"])
+@pytest.mark.parametrize("fusion_version", ["concat", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task"])
 def test_controlled_fusion_variants(fusion_version: str) -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
@@ -188,8 +189,27 @@ def test_scsr_v2_is_under_ten_thousand_additional_parameters() -> None:
     assert scsr_v2.parameter_counts()["trainable"] - fixed.parameter_counts()["trainable"] < 10_000
 
 
+def test_scsr_task_exposes_scale_logits_and_utility_loss() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="scsr_task",
+    )
+    prediction = model(torch.rand(2, 3, 128, 128))
+    target = torch.randint(0, 4, (2, 128, 128))
+    routing = model.decoder.last_routing
+    assert routing is not None
+    assert len(routing["scale_logits"]) == 3
+    losses = task_utility_routing_loss(model, target)
+    assert losses is not None
+    assert torch.isfinite(losses["route_loss"])
+    assert torch.isfinite(losses["aux_loss"])
+    assert torch.isfinite(losses["target_entropy"])
+    (prediction.mean() + losses["route_loss"] + losses["aux_loss"]).backward()
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
 def test_scsr_rejects_incomplete_feature_set() -> None:
-    for fusion_version in ("scsr", "scsr_v2"):
+    for fusion_version in ("scsr", "scsr_v2", "scsr_task"):
         with pytest.raises(ValueError, match="SCSR requires"):
             LabelEfficientSAM(
                 FakeFrozenBackbone(), num_classes=4, decoder_dim=32,

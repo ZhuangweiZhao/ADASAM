@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
@@ -52,10 +53,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fusion-version",
-        choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "semantic_budget"],
+        choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"],
         default="hierarchical",
     )
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--routing-loss-weight", type=float, default=0.1)
+    parser.add_argument("--routing-aux-weight", type=float, default=0.05)
+    parser.add_argument("--routing-target-temperature", type=float, default=0.5)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
@@ -88,6 +92,57 @@ def resolve_path(value: str) -> Path:
 def synchronize(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
+
+
+def task_utility_routing_loss(
+    model: LabelEfficientSAM,
+    target: torch.Tensor,
+    ignore_index: int | None = None,
+    target_temperature: float = 0.5,
+) -> dict[str, torch.Tensor] | None:
+    """Supervise routing with detached per-scale pixel-wise task utility."""
+    if getattr(model.decoder, "fusion_version", None) != "scsr_task":
+        return None
+    routing = model.decoder.last_routing
+    if routing is None or "scale_logits" not in routing or "route_weights" not in routing:
+        raise RuntimeError("scsr_task requires routing outputs from the decoder")
+    if target_temperature <= 0.0:
+        raise ValueError("target_temperature must be positive")
+    weights = routing["route_weights"]
+    target_small = F.interpolate(
+        target[:, None].float(), size=weights.shape[-2:], mode="nearest"
+    )[:, 0].long()
+    ignore_value = ignore_index if ignore_index is not None else -100
+    pixel_losses = torch.stack(
+        [
+            F.cross_entropy(
+                logits, target_small, reduction="none", ignore_index=ignore_value
+            )
+            for logits in routing["scale_logits"]
+        ],
+        dim=1,
+    )
+    valid = target_small != ignore_value
+    if not bool(valid.any()):
+        zero = weights.sum() * 0.0
+        return {"route_loss": zero, "aux_loss": zero, "target_entropy": zero}
+    utility_target = torch.softmax(
+        -pixel_losses.detach() / target_temperature, dim=1
+    )
+    route_loss_map = -(
+        utility_target * weights.clamp_min(1e-8).log()
+    ).sum(dim=1)
+    route_loss = route_loss_map[valid].mean()
+    aux_loss = pixel_losses.permute(0, 2, 3, 1)[valid].mean()
+    target_entropy = (
+        -utility_target.clamp_min(1e-8)
+        * utility_target.clamp_min(1e-8).log()
+    ).sum(dim=1)[valid].mean()
+    return {
+        "route_loss": route_loss,
+        "aux_loss": aux_loss,
+        "target_entropy": target_entropy.detach(),
+    }
 
 
 @torch.no_grad()
@@ -271,12 +326,29 @@ def main() -> None:
         losses = []
         prompt_losses = []
         prototype_losses = []
+        routing_losses = []
+        routing_aux_losses = []
+        routing_target_entropies = []
         for batch in tqdm(loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
             prediction, prompts, prototype_aux = model.forward_with_auxiliary(image, target)
             loss = criterion(prediction, target)
+            routing = task_utility_routing_loss(
+                model,
+                target,
+                target_temperature=args.routing_target_temperature,
+            )
+            if routing is not None:
+                loss = (
+                    loss
+                    + args.routing_loss_weight * routing["route_loss"]
+                    + args.routing_aux_weight * routing["aux_loss"]
+                )
+                routing_losses.append(float(routing["route_loss"].detach()))
+                routing_aux_losses.append(float(routing["aux_loss"].detach()))
+                routing_target_entropies.append(float(routing["target_entropy"]))
             if args.prompt_align_weight > 0.0 and prompts is not None and "dense_prompt" in prompts:
                 align_loss = prompt_criterion(prompts["dense_prompt"], target)
                 loss = loss + args.prompt_align_weight * align_loss
@@ -317,6 +389,10 @@ def main() -> None:
             record["mean_prompt_align_loss"] = sum(prompt_losses) / len(prompt_losses)
         if prototype_losses:
             record["mean_prototype_loss"] = sum(prototype_losses) / len(prototype_losses)
+        if routing_losses:
+            record["mean_routing_loss"] = sum(routing_losses) / len(routing_losses)
+            record["mean_routing_aux_loss"] = sum(routing_aux_losses) / len(routing_aux_losses)
+            record["mean_routing_target_entropy"] = sum(routing_target_entropies) / len(routing_target_entropies)
         record["validation"] = evaluate(
             model, validation_loader, device, base_dataset.NUM_CLASSES
         )
@@ -333,7 +409,12 @@ def main() -> None:
     from tools.train_loveda import collect_routing_statistics
 
     routing_statistics = collect_routing_statistics(
-        model, test_loader, device, base_dataset.NUM_CLASSES, ignore_index=None
+        model,
+        test_loader,
+        device,
+        base_dataset.NUM_CLASSES,
+        ignore_index=None,
+        target_temperature=args.routing_target_temperature,
     )
     checkpoint = {
         "model": model.state_dict(),

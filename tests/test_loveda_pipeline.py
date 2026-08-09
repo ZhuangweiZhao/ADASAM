@@ -90,3 +90,40 @@ def test_routing_statistics_accepts_no_ignore_index() -> None:
     assert statistics is not None
     assert statistics["pixels"] == 4
     assert set(statistics["class_mean_weights"]) == {"0", "1"}
+
+
+def test_task_routing_statistics_reports_oracle_agreement() -> None:
+    class Decoder:
+        fusion_version = "scsr_task"
+        representation_budget = 3
+        last_routing = None
+
+    class Model:
+        decoder = Decoder()
+
+        def eval(self):
+            return self
+
+        def __call__(self, image):
+            self.decoder.last_routing = {
+                "weights": torch.full((1, 3, 2, 2), 1.0 / 3.0),
+                "entropy": torch.zeros(1, 2, 2),
+                "scale_logits": (
+                    torch.zeros(1, 2, 2, 2),
+                    torch.zeros(1, 2, 2, 2),
+                    torch.zeros(1, 2, 2, 2),
+                ),
+            }
+            return image
+
+    statistics = collect_routing_statistics(
+        Model(),
+        [{"image": torch.zeros(1, 3, 4, 4), "mask": torch.zeros(1, 4, 4, dtype=torch.long)}],
+        torch.device("cpu"),
+        num_classes=2,
+        ignore_index=None,
+    )
+
+    assert statistics is not None
+    assert statistics["oracle_route_agreement"] == 1.0
+    assert sum(statistics["oracle_scale_fraction"].values()) == 1.0
