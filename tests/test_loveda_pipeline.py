@@ -8,6 +8,7 @@ import torch
 
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
+from tools.train_loveda import collect_routing_statistics
 
 
 def make_loveda_sample(root: Path, split: str = "Train") -> None:
@@ -53,3 +54,39 @@ def test_loveda_fixed_split_is_nested() -> None:
     assert len(train_10) == 202
     assert validation_5 == validation_10
     assert set(train_5).issubset(train_10)
+
+
+def test_routing_statistics_accepts_no_ignore_index() -> None:
+    class Decoder:
+        fusion_version = "scsr"
+        representation_budget = 3
+        last_routing = {
+            "weights": torch.full((1, 3, 2, 2), 1.0 / 3.0),
+            "entropy": torch.zeros(1, 2, 2),
+        }
+
+    class Model:
+        decoder = Decoder()
+
+        def eval(self):
+            return self
+
+        def __call__(self, image):
+            return image
+
+    loader = [
+        {
+            "image": torch.zeros(1, 3, 4, 4),
+            "mask": torch.tensor(
+                [[[0, 0, 1, 1], [0, 0, 1, 1], [1, 1, 0, 0], [1, 1, 0, 0]]]
+            ),
+        }
+    ]
+
+    statistics = collect_routing_statistics(
+        Model(), loader, torch.device("cpu"), num_classes=2, ignore_index=None
+    )
+
+    assert statistics is not None
+    assert statistics["pixels"] == 4
+    assert set(statistics["class_mean_weights"]) == {"0", "1"}

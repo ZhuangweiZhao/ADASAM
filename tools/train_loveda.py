@@ -63,7 +63,9 @@ def resolve(value: str) -> Path:
 
 
 @torch.no_grad()
-def collect_routing_statistics(model, loader, device, num_classes: int, ignore_index: int):
+def collect_routing_statistics(
+    model, loader, device, num_classes: int, ignore_index: int | None
+):
     if getattr(model.decoder, "fusion_version", None) not in {"scsr", "semantic_budget"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
@@ -84,7 +86,11 @@ def collect_routing_statistics(model, loader, device, num_classes: int, ignore_i
             selected_samples += routing["budget_mask"].shape[0]
         weights = routing["weights"]
         routed_target = F.interpolate(target[:, None].float(), weights.shape[-2:], mode="nearest")[:, 0].long()
-        valid = routed_target != ignore_index
+        valid = (
+            torch.ones_like(routed_target, dtype=torch.bool)
+            if ignore_index is None
+            else routed_target != ignore_index
+        )
         count = int(valid.sum())
         if not count:
             continue
