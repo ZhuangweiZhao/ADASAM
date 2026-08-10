@@ -18,6 +18,12 @@ from adasam.metrics.semantic_metrics import (
     compute_fb_iou_from_accum,
     compute_pixel_accuracy,
 )
+from .conditional_analysis import (
+    SIZE_NAMES,
+    component_iou_sums,
+    component_size_map,
+    summarize_component_iou,
+)
 
 __all__ = [
     "pairwise_iou",
@@ -25,4 +31,8 @@ __all__ = [
     "compute_fb_iou",
     "compute_fb_iou_from_accum",
     "compute_pixel_accuracy",
+    "SIZE_NAMES",
+    "component_iou_sums",
+    "component_size_map",
+    "summarize_component_iou",
 ]

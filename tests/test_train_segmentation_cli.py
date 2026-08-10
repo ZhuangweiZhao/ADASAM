@@ -15,6 +15,8 @@ def test_neuseg_accepts_hierarchical_fusion_options(monkeypatch) -> None:
             "--feature-scales", "p3_p4_embedding",
             "--fusion-version", "semantic_budget",
             "--representation-budget", "2",
+            "--spatial-policy", "magnitude",
+            "--feature-retention-ratio", "0.5",
         ],
     )
 
@@ -23,6 +25,8 @@ def test_neuseg_accepts_hierarchical_fusion_options(monkeypatch) -> None:
     assert args.feature_scales == "p3_p4_embedding"
     assert args.fusion_version == "semantic_budget"
     assert args.representation_budget == 2
+    assert args.spatial_policy == "magnitude"
+    assert args.feature_retention_ratio == 0.5
 
 
 def test_neuseg_accepts_scsr_v2(monkeypatch) -> None:
@@ -67,3 +71,5 @@ def test_neuseg_preserves_existing_fusion_defaults(monkeypatch) -> None:
     assert args.feature_scales == "p3_p4_embedding"
     assert args.fusion_version == "hierarchical"
     assert args.representation_budget == 3
+    assert args.spatial_policy == "adaptive"
+    assert args.feature_retention_ratio == 1.0

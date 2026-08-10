@@ -23,7 +23,7 @@ from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.datasets.industrial import ISAIDSemanticDataset, fixed_validation_split_indices  # noqa: E402
 from adasam.losses import LabelEfficientSegmentationLoss  # noqa: E402
 from adasam.models import LabelEfficientSAM, LabelEfficientUNet  # noqa: E402
-from adasam.utils import set_seed  # noqa: E402
+from adasam.utils import load_static_importance_map, set_seed  # noqa: E402
 from tools.train_segmentation import evaluate  # noqa: E402
 
 
@@ -54,8 +54,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-channels", type=int, default=32)
     p.add_argument("--adapter", choices=["cat", "none"], default="none")
     p.add_argument("--feature-scales", choices=["embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    p.add_argument("--fusion-version", choices=["hierarchical", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
+    p.add_argument("--fusion-version", choices=["hierarchical", "sum", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
     p.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
+    p.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "random"], default="adaptive")
+    p.add_argument("--feature-retention-ratio", type=float, default=1.0)
+    p.add_argument("--spatial-budget-temperature", type=float, default=1.0)
+    p.add_argument("--static-importance-map", default=None)
     p.add_argument("--augmentation", choices=["none", "basic"], default="basic")
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--validation-seed", type=int, default=42)
@@ -112,6 +116,12 @@ def main() -> None:
             use_cat_adapter=args.adapter == "cat", feature_scales=args.feature_scales,
             fusion_version=args.fusion_version,
             representation_budget=args.representation_budget,
+            spatial_policy=args.spatial_policy,
+            feature_retention_ratio=args.feature_retention_ratio,
+            spatial_budget_temperature=args.spatial_budget_temperature,
+            static_importance_map=load_static_importance_map(
+                resolve(args.static_importance_map) if args.static_importance_map else None
+            ),
         )
     criterion = LabelEfficientSegmentationLoss(ignore_index=ISAIDSemanticDataset.IGNORE_INDEX)
     optimizer = AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=args.weight_decay)
@@ -208,7 +218,10 @@ def main() -> None:
         if global_step >= target_iterations:
             break
     best = torch.load(best_path, map_location=device, weights_only=False); model.load_state_dict(best["model"])
-    test = evaluate(model, test_loader, device, ISAIDSemanticDataset.NUM_CLASSES, ISAIDSemanticDataset.IGNORE_INDEX)
+    test = evaluate(
+        model, test_loader, device, ISAIDSemanticDataset.NUM_CLASSES,
+        ISAIDSemanticDataset.IGNORE_INDEX, conditioned=True,
+    )
     from tools.train_loveda import collect_routing_statistics
     routing_statistics = collect_routing_statistics(
         model, test_loader, device, ISAIDSemanticDataset.NUM_CLASSES,

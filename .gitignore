@@ -29,7 +29,12 @@ output/
 !tests/**/*.jsonl
 
 # ── Docs & notes ──
-docs/
+docs/*
+!docs/README.md
+!docs/PROJECT_UPDATE_2026-08-10.md
+!docs/research_log.md
+!docs/TECHNICAL_DOCUMENTATION.md
+!docs/SEMANTIC_BUDGET_PROTOCOL.md
 
 # ── OS / editor ──
 .DS_Store

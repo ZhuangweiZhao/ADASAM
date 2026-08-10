@@ -33,8 +33,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--decoder-dim", type=int, default=96)
     p.add_argument("--adapter", choices=["cat", "none"], default="cat")
     p.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "semantic_budget"], default="hierarchical")
+    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"], default="hierarchical")
     p.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
+    p.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "random"], default="adaptive")
+    p.add_argument("--feature-retention-ratio", type=float, default=1.0)
+    p.add_argument("--spatial-budget-temperature", type=float, default=1.0)
+    p.add_argument("--static-importance-map", default=None)
     p.add_argument("--device", default="cuda")
     p.add_argument("--output-csv", default="runs/efficiency_results.csv")
     p.add_argument("--merge-csv", default=None)
@@ -48,6 +52,7 @@ def resolve(value: str) -> Path:
 
 def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: torch.device):
     from adasam.models import LabelEfficientSAM, LabelEfficientUNet
+    from adasam.utils import load_static_importance_map
 
     if args.dataset == "loveda":
         classes = 7
@@ -69,6 +74,12 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
         feature_scales=args.feature_scales,
         fusion_version=args.fusion_version,
         representation_budget=args.representation_budget,
+        spatial_policy=args.spatial_policy,
+        feature_retention_ratio=args.feature_retention_ratio,
+        spatial_budget_temperature=args.spatial_budget_temperature,
+        static_importance_map=load_static_importance_map(
+            resolve(args.static_importance_map) if args.static_importance_map else None
+        ),
         device=device,
     )
 
@@ -95,6 +106,8 @@ def measure(model: torch.nn.Module, loader: DataLoader, device: torch.device, du
         torch.cuda.reset_peak_memory_stats(device)
     total_images = 0
     elapsed = 0.0
+    projected_positions = torch.zeros(2, dtype=torch.float64)
+    sparse_projection_observed = False
     with torch.no_grad():
         for batch in loader:
             image = batch["image"].to(device, non_blocking=True)
@@ -106,17 +119,36 @@ def measure(model: torch.nn.Module, loader: DataLoader, device: torch.device, du
                 torch.cuda.synchronize(device)
             elapsed += time.perf_counter() - started
             total_images += image.shape[0]
+            routing = getattr(getattr(model, "decoder", None), "last_routing", None)
+            if routing is not None and "lateral_projected_positions" in routing:
+                projected_positions += routing["lateral_projected_positions"].sum(0).cpu().double()
+                sparse_projection_observed |= bool(routing.get("sparse_lateral_projection", False))
     allocated = reserved = 0.0
     if device.type == "cuda":
         allocated = torch.cuda.max_memory_allocated(device) / 1024**2
         reserved = torch.cuda.max_memory_reserved(device) / 1024**2
-    return {
+    result = {
         "images": total_images,
         "inference_seconds": elapsed,
         "FPS": total_images / max(elapsed, 1e-12),
         "peak_memory_allocated_MB": allocated,
         "peak_memory_reserved_MB": reserved,
     }
+    if projected_positions.sum() > 0 and hasattr(model, "decoder"):
+        names = ("P3", "P4")
+        projection_flops = 0.0
+        for index, name in enumerate(names):
+            layer = model.decoder.lateral[name]
+            projection_flops += float(
+                projected_positions[index] * 2 * layer.in_channels * layer.out_channels
+            )
+        result["executed_detail_projection_FLOPs_per_image"] = projection_flops / max(total_images, 1)
+        result["mean_projected_positions"] = {
+            name: float(projected_positions[index] / max(total_images, 1))
+            for index, name in enumerate(names)
+        }
+        result["sparse_lateral_projection_observed"] = sparse_projection_observed
+    return result
 
 
 def measure_flops(model: torch.nn.Module, dummy: torch.Tensor) -> float | None:
@@ -158,6 +190,12 @@ def main() -> None:
         dummy = torch.randn(1, 3, image_size, image_size, device=device)
         flops = measure_flops(model, dummy)
         timing = measure(model, loader, device, dummy)
+        adjusted_flops = flops
+        if (
+            adjusted_flops is not None
+            and timing.get("sparse_lateral_projection_observed")
+        ):
+            adjusted_flops += timing.get("executed_detail_projection_FLOPs_per_image", 0.0)
         row = {
             "dataset": args.dataset,
             "model": name,
@@ -168,7 +206,14 @@ def main() -> None:
             "adapter": args.adapter if name != "unet" else "n/a",
             "feature_scales": args.feature_scales if name != "unet" else "n/a",
             "fusion_version": args.fusion_version if name != "unet" else "n/a",
-            "FLOPs": flops,
+            "spatial_policy": args.spatial_policy if name != "unet" else "n/a",
+            "feature_retention_ratio": args.feature_retention_ratio if name != "unet" else "n/a",
+            "active_detail_representation_fraction": (
+                ((args.representation_budget - 1) / 2.0) * args.feature_retention_ratio
+                if name != "unet" and args.fusion_version == "semantic_budget" else 1.0
+            ),
+            "FLOPs": adjusted_flops,
+            "FLOPs_protocol": "THOP executed module graph plus explicit sparse 1x1 detail projections",
             **timing,
             "device": str(device),
             "protocol": "batch1,eval,no_grad,warmup10,forward_only",

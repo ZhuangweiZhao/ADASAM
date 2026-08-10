@@ -32,7 +32,8 @@ from adasam.losses import (  # noqa: E402
     PrototypeCompactnessLoss,
 )
 from adasam.models import LabelEfficientSAM  # noqa: E402
-from adasam.utils import set_seed  # noqa: E402
+from adasam.metrics import component_iou_sums, summarize_component_iou  # noqa: E402
+from adasam.utils import load_static_importance_map, set_seed  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,10 +54,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--fusion-version",
-        choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"],
+        choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"],
         default="hierarchical",
     )
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "random"], default="adaptive")
+    parser.add_argument("--feature-retention-ratio", type=float, default=1.0)
+    parser.add_argument("--spatial-budget-temperature", type=float, default=1.0)
+    parser.add_argument("--static-importance-map", default=None)
     parser.add_argument("--routing-loss-weight", type=float, default=0.1)
     parser.add_argument("--routing-aux-weight", type=float, default=0.05)
     parser.add_argument("--routing-target-temperature", type=float, default=0.25)
@@ -154,6 +159,7 @@ def evaluate(
     device: torch.device,
     num_classes: int,
     ignore_index: int | None = None,
+    conditioned: bool = False,
 ) -> dict:
     model.eval()
     intersection = torch.zeros(num_classes, dtype=torch.float64)
@@ -166,6 +172,9 @@ def evaluate(
     boundary_matched_pred = boundary_predicted = 0
     boundary_matched_target = boundary_target = 0
     boundary_metric_seconds = 0.0
+    conditioned_metric_seconds = 0.0
+    component_sums = torch.zeros(3, dtype=torch.float64)
+    component_counts = torch.zeros(3, dtype=torch.int64)
     synchronize(device)
     started = time.perf_counter()
     for batch in loader:
@@ -173,6 +182,14 @@ def evaluate(
         target = batch["mask"].to(device, non_blocking=True)
         prediction = model(image).argmax(dim=1)
         synchronize(device)
+        if conditioned:
+            conditioned_started = time.perf_counter()
+            batch_sums, batch_counts = component_iou_sums(
+                prediction, target, num_classes, ignore_index
+            )
+            component_sums += batch_sums
+            component_counts += batch_counts
+            conditioned_metric_seconds += time.perf_counter() - conditioned_started
         boundary_started = time.perf_counter()
         tolerance = max(1, round(2 * max(target.shape[-2:]) / 1024))
         mp, npred, mt, ntarget = boundary_f1_counts(
@@ -199,7 +216,9 @@ def evaluate(
             pred_area[class_id] += pred_class.sum().cpu()
             target_area[class_id] += target_class.sum().cpu()
     synchronize(device)
-    elapsed = time.perf_counter() - started - boundary_metric_seconds
+    elapsed = (
+        time.perf_counter() - started - boundary_metric_seconds - conditioned_metric_seconds
+    )
     iou = intersection / union.clamp_min(1.0)
     dice = 2.0 * intersection / (pred_area + target_area).clamp_min(1.0)
     boundary_precision = boundary_matched_pred / max(boundary_predicted, 1)
@@ -208,7 +227,7 @@ def evaluate(
         2.0 * boundary_precision * boundary_recall
         / max(boundary_precision + boundary_recall, 1e-12)
     )
-    return {
+    result = {
         "mIoU": float(iou.mean()),
         "mIoU_fg": float(iou[1:].mean()),
         "Dice": float(dice.mean()),
@@ -223,6 +242,17 @@ def evaluate(
         "seconds": elapsed,
         "FPS": samples / max(elapsed, 1e-9),
     }
+    if conditioned:
+        result["size_conditioned_region_IoU"] = summarize_component_iou(
+            component_sums, component_counts
+        )
+        result["size_conditioned_protocol"] = {
+            "unit": "8-connected foreground GT component",
+            "small_max_image_fraction": 0.001,
+            "medium_max_image_fraction": 0.01,
+            "evaluation_window_padding_pixels": 2,
+        }
+    return result
 
 
 def main() -> None:
@@ -285,6 +315,12 @@ def main() -> None:
         feature_scales=args.feature_scales,
         fusion_version=args.fusion_version,
         representation_budget=args.representation_budget,
+        spatial_policy=args.spatial_policy,
+        feature_retention_ratio=args.feature_retention_ratio,
+        spatial_budget_temperature=args.spatial_budget_temperature,
+        static_importance_map=load_static_importance_map(
+            resolve_path(args.static_importance_map) if args.static_importance_map else None
+        ),
     )
     criterion = LabelEfficientSegmentationLoss()
     prompt_criterion = DefectPromptAlignmentLoss()
@@ -419,7 +455,9 @@ def main() -> None:
         model.decoder.task_routing_hard = (
             args.routing_hard and args.epochs > args.routing_warmup_epochs
         )
-    test_metrics = evaluate(model, test_loader, device, base_dataset.NUM_CLASSES)
+    test_metrics = evaluate(
+        model, test_loader, device, base_dataset.NUM_CLASSES, conditioned=True
+    )
     from tools.train_loveda import collect_routing_statistics
 
     routing_statistics = collect_routing_statistics(

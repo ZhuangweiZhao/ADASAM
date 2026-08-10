@@ -41,6 +41,10 @@ class LabelEfficientSAM(nn.Module):
         adapter_placement: str = "pre_fusion",
         fusion_version: str = "hierarchical",
         representation_budget: int = 3,
+        spatial_policy: str = "adaptive",
+        feature_retention_ratio: float = 1.0,
+        spatial_budget_temperature: float = 1.0,
+        static_importance_map: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -109,6 +113,10 @@ class LabelEfficientSAM(nn.Module):
             feature_scales=feature_scales,
             fusion_version=fusion_version,
             representation_budget=representation_budget,
+            spatial_policy=spatial_policy,
+            feature_retention_ratio=feature_retention_ratio,
+            spatial_budget_temperature=spatial_budget_temperature,
+            static_importance_map=static_importance_map,
             post_fusion_adapter=use_cat_adapter and adapter_placement == "post_fusion",
             adapter_ratio=adapter_ratio,
             **decoder_kwargs,
@@ -142,6 +150,10 @@ class LabelEfficientSAM(nn.Module):
         adapter_placement: str = "pre_fusion",
         fusion_version: str = "hierarchical",
         representation_budget: int = 3,
+        spatial_policy: str = "adaptive",
+        feature_retention_ratio: float = 1.0,
+        spatial_budget_temperature: float = 1.0,
+        static_importance_map: torch.Tensor | None = None,
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -159,6 +171,10 @@ class LabelEfficientSAM(nn.Module):
             adapter_placement=adapter_placement,
             fusion_version=fusion_version,
             representation_budget=representation_budget,
+            spatial_policy=spatial_policy,
+            feature_retention_ratio=feature_retention_ratio,
+            spatial_budget_temperature=spatial_budget_temperature,
+            static_importance_map=static_importance_map,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":

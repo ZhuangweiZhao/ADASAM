@@ -32,6 +32,10 @@ class LightweightSemanticDecoder(nn.Module):
         feature_scales: str = "p3_p4_embedding",
         fusion_version: str = "hierarchical",
         representation_budget: int = 3,
+        spatial_policy: str = "adaptive",
+        feature_retention_ratio: float = 1.0,
+        spatial_budget_temperature: float = 1.0,
+        static_importance_map: torch.Tensor | None = None,
         post_fusion_adapter: bool = False,
         adapter_ratio: float = 0.25,
     ) -> None:
@@ -51,12 +55,12 @@ class LightweightSemanticDecoder(nn.Module):
                 "feature_scales must be one of: p3, p4, embedding, p3_p4, p3_embedding, p4_embedding, p3_p4_embedding"
             )
         if fusion_version not in {
-            "hierarchical", "concat", "global", "image_conditioned",
+            "hierarchical", "concat", "sum", "global", "image_conditioned",
             "scsr", "scsr_v2", "scsr_task", "semantic_budget",
         }:
             raise ValueError(
                 "fusion_version must be hierarchical, concat, global, "
-                "image_conditioned, scsr, scsr_v2, scsr_task, or semantic_budget"
+                "sum, image_conditioned, scsr, scsr_v2, scsr_task, or semantic_budget"
             )
         if fusion_version in {"scsr", "scsr_v2", "scsr_task"} and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
@@ -64,10 +68,19 @@ class LightweightSemanticDecoder(nn.Module):
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
         if representation_budget not in {1, 2, 3}:
             raise ValueError("representation_budget must be 1, 2, or 3")
+        if spatial_policy not in {"adaptive", "static", "magnitude", "random"}:
+            raise ValueError("spatial_policy must be adaptive, static, magnitude, or random")
+        if not 0.0 < feature_retention_ratio <= 1.0:
+            raise ValueError("feature_retention_ratio must be in (0, 1]")
+        if spatial_budget_temperature <= 0.0:
+            raise ValueError("spatial_budget_temperature must be positive")
         self.feature_scales = feature_scales
         self.feature_names = scale_names[feature_scales]
         self.fusion_version = fusion_version
         self.representation_budget = representation_budget
+        self.spatial_policy = spatial_policy
+        self.feature_retention_ratio = feature_retention_ratio
+        self.spatial_budget_temperature = spatial_budget_temperature
         dims = feature_dims or {"P3": 128, "P4": 160, "embedding": 256}
         self.lateral = nn.ModuleDict(
             {
@@ -126,6 +139,23 @@ class LightweightSemanticDecoder(nn.Module):
         self.semantic_budget_residual = (
             nn.Parameter(torch.zeros(2)) if fusion_version == "semantic_budget" else None
         )
+        if static_importance_map is not None:
+            if fusion_version != "semantic_budget" or spatial_policy != "static":
+                raise ValueError("static_importance_map requires semantic_budget with static policy")
+            if static_importance_map.ndim == 3:
+                static_importance_map = static_importance_map.unsqueeze(1)
+            if static_importance_map.ndim != 4 or static_importance_map.shape[:2] != (2, 1):
+                raise ValueError("static_importance_map must have shape [2,H,W] or [2,1,H,W]")
+            self.register_buffer(
+                "semantic_static_template", static_importance_map.detach().float().clone()
+            )
+        else:
+            self.semantic_static_template = None
+        self.semantic_static_logits = (
+            nn.Parameter(torch.zeros(2, 1, 16, 16))
+            if fusion_version == "semantic_budget" and spatial_policy == "static" and static_importance_map is None
+            else None
+        )
         if self.semantic_budget_gate is not None:
             nn.init.zeros_(self.semantic_budget_gate.weight)
             nn.init.zeros_(self.semantic_budget_gate.bias)
@@ -163,6 +193,68 @@ class LightweightSemanticDecoder(nn.Module):
         if self.dense_prompt_proj is not None:
             nn.init.zeros_(self.dense_prompt_proj.weight)
             nn.init.zeros_(self.token_output.weight)
+
+    def _retained_mask(self, importance: torch.Tensor) -> torch.Tensor:
+        """Select the exact top-ratio spatial positions independently per image."""
+        if importance.ndim != 4 or importance.shape[1] != 1:
+            raise ValueError("importance must have shape [B,1,H,W]")
+        flat = importance.flatten(1)
+        keep = max(1, min(flat.shape[1], round(flat.shape[1] * self.feature_retention_ratio)))
+        mask = torch.zeros_like(flat)
+        mask.scatter_(1, flat.topk(keep, dim=1, sorted=False).indices, 1.0)
+        return mask.view_as(importance)
+
+    def _spatial_importance(
+        self,
+        anchor: torch.Tensor,
+        value: torch.Tensor,
+        evidence: torch.Tensor,
+        scale_index: int,
+    ) -> torch.Tensor:
+        if self.spatial_policy == "adaptive":
+            return self.semantic_budget_gate(anchor) + evidence
+        if self.spatial_policy == "magnitude":
+            return (value - anchor).abs().mean(dim=1, keepdim=True)
+        if self.spatial_policy == "random":
+            return torch.rand_like(evidence)
+        template = (
+            self.semantic_static_template
+            if self.semantic_static_template is not None
+            else self.semantic_static_logits
+        )
+        return F.interpolate(
+            template[scale_index : scale_index + 1],
+            size=anchor.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).expand(anchor.shape[0], -1, -1, -1)
+
+    def _project_detail(
+        self,
+        feature: torch.Tensor,
+        retained: torch.Tensor,
+        layer: nn.Conv2d,
+    ) -> tuple[torch.Tensor, bool, torch.Tensor]:
+        """Apply a 1x1 lateral projection only at retained spatial positions."""
+        if self.feature_retention_ratio >= 1.0 or self.spatial_policy == "magnitude":
+            counts = torch.full(
+                (feature.shape[0],), feature.shape[-2] * feature.shape[-1],
+                dtype=torch.long, device=feature.device,
+            )
+            return layer(feature), False, counts
+        mask = F.interpolate(retained, size=feature.shape[-2:], mode="nearest").bool()
+        projected = feature.new_zeros(
+            feature.shape[0], layer.out_channels, *feature.shape[-2:]
+        )
+        weight = layer.weight[:, :, 0, 0]
+        counts = mask.flatten(1).sum(1)
+        for batch_index in range(feature.shape[0]):
+            selected = mask[batch_index, 0]
+            if selected.any():
+                values = feature[batch_index, :, selected].transpose(0, 1)
+                projected_values = F.linear(values, weight, layer.bias)
+                projected[batch_index, :, selected] = projected_values.transpose(0, 1)
+        return projected, True, counts
 
     def forward_features(
         self,
@@ -206,21 +298,64 @@ class LightweightSemanticDecoder(nn.Module):
                 route_mask = hard_mask + detail_probs - detail_probs.detach()
                 detail_values = []
                 detail_effective = []
+                importance_maps = []
+                retained_masks = []
+                sparse_projection_used = []
+                projected_positions = []
                 for index, name in enumerate(("P3", "P4")):
                     selected = self.training or bool(hard_mask[:, index].any())
                     if not selected:
                         detail_values.append(None)
                         detail_effective.append(torch.zeros_like(anchor[:, :1]))
+                        importance_maps.append(torch.zeros_like(anchor[:, :1]))
+                        retained_masks.append(torch.zeros_like(anchor[:, :1]))
+                        sparse_projection_used.append(False)
+                        projected_positions.append(
+                            torch.zeros(anchor.shape[0], dtype=torch.long, device=anchor.device)
+                        )
                         continue
-                    value = self.lateral[name](features[name])
-                    if value.shape[-2:] != target_size:
-                        value = F.interpolate(value, size=target_size, mode="bilinear", align_corners=False)
-                    compatibility = F.cosine_similarity(anchor, value, dim=1, eps=1e-6)
-                    evidence = (1.0 - compatibility).unsqueeze(1)
-                    local_gate = torch.sigmoid(self.semantic_budget_gate(anchor) + evidence)
-                    effective = route_mask[:, index].view(-1, 1, 1, 1) * local_gate
+                    raw_energy = features[name].float().std(dim=1, keepdim=True)
+                    raw_energy = F.interpolate(
+                        raw_energy, size=target_size, mode="bilinear", align_corners=False
+                    )
+                    energy_min = raw_energy.amin(dim=(-2, -1), keepdim=True)
+                    energy_max = raw_energy.amax(dim=(-2, -1), keepdim=True)
+                    evidence = (raw_energy - energy_min) / (energy_max - energy_min).clamp_min(1e-6)
+                    if self.spatial_policy == "magnitude":
+                        value = self.lateral[name](features[name])
+                        if value.shape[-2:] != target_size:
+                            value = F.interpolate(value, size=target_size, mode="bilinear", align_corners=False)
+                        importance = self._spatial_importance(anchor, value, evidence, index)
+                        sparse_used = False
+                        positions = torch.full(
+                            (anchor.shape[0],),
+                            features[name].shape[-2] * features[name].shape[-1],
+                            dtype=torch.long,
+                            device=anchor.device,
+                        )
+                    else:
+                        importance = self._spatial_importance(anchor, anchor, evidence, index)
+                    retained = self._retained_mask(importance)
+                    if self.spatial_policy != "magnitude":
+                        value, sparse_used, positions = self._project_detail(
+                            features[name], retained, self.lateral[name]
+                        )
+                        if value.shape[-2:] != target_size:
+                            value = F.interpolate(value, size=target_size, mode="bilinear", align_corners=False)
+                    if self.spatial_policy in {"adaptive", "static"}:
+                        probability = torch.sigmoid(
+                            importance / self.spatial_budget_temperature
+                        )
+                        retained_st = retained + probability - probability.detach()
+                    else:
+                        retained_st = retained
+                    effective = route_mask[:, index].view(-1, 1, 1, 1) * retained_st
                     detail_values.append(value)
                     detail_effective.append(effective)
+                    importance_maps.append(importance)
+                    retained_masks.append(retained)
+                    sparse_projection_used.append(sparse_used)
+                    projected_positions.append(positions)
                 fused = anchor
                 for index, value in enumerate(detail_values):
                     if value is not None:
@@ -234,6 +369,13 @@ class LightweightSemanticDecoder(nn.Module):
                     "budget_mask": hard_mask.detach(),
                     "budget": self.representation_budget,
                     "selected_scales": hard_mask.detach().sum(1),
+                    "importance_maps": torch.cat(importance_maps, dim=1).detach(),
+                    "retained_masks": torch.cat(retained_masks, dim=1).detach(),
+                    "retention_ratio": torch.cat(retained_masks, dim=1).mean(dim=(-2, -1)).detach(),
+                    "spatial_policy": self.spatial_policy,
+                    "target_retention_ratio": self.feature_retention_ratio,
+                    "sparse_lateral_projection": any(sparse_projection_used),
+                    "lateral_projected_positions": torch.stack(projected_positions, dim=1).detach(),
                 }
             else:
                 aligned = [self.lateral[name](features[name]) for name in self.feature_names]
@@ -241,6 +383,8 @@ class LightweightSemanticDecoder(nn.Module):
                 aligned = [F.interpolate(x, size=target_size, mode="bilinear", align_corners=False) if x.shape[-2:] != target_size else x for x in aligned]
                 if self.fusion_version == "concat":
                     fused = self.concat_projection(torch.cat(aligned, dim=1))
+                elif self.fusion_version == "sum":
+                    fused = sum(aligned)
                 else:
                     if self.fusion_version == "global":
                         logits = self.global_logits.view(1, -1, 1, 1).expand(aligned[0].shape[0], -1, *target_size)

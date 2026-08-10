@@ -2,6 +2,12 @@
 
 ## Status: Research Repositioning (Revision 3)
 
+> **Implementation checkpoint (2026-08-10):** Revision 3 的独立语义分割路径已经覆盖
+> NEU-Seg、LoveDA 和 iSAID。当前代码实际支持多尺度特征选择、CAT adapter 前/后置、
+> DAPG v1/v2/v3、DPM、边界解码器，以及 hierarchical/global/image-conditioned/SCSR/
+> task-routed/semantic-budget 融合。它们均是待控制实验验证的候选组件，不代表已经证明
+> 下文的论文假设。可执行状态与证据缺口见 `docs/PROJECT_UPDATE_2026-08-10.md`。
+
 > **Document authority:** This revision defines the primary paper direction. The
 > earlier aerial few-shot instance-segmentation design retained below is an
 > implementation and ablation reference; its base/novel FSS framing is no longer the

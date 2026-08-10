@@ -94,7 +94,7 @@ def test_hierarchical_feature_probes_forward_backward(feature_scales: str) -> No
     assert any(parameter.grad is not None for parameter in model.decoder.parameters())
 
 
-@pytest.mark.parametrize("fusion_version", ["concat", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task"])
+@pytest.mark.parametrize("fusion_version", ["concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task"])
 def test_controlled_fusion_variants(fusion_version: str) -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
@@ -131,6 +131,55 @@ def test_semantic_budget_rejects_incomplete_feature_set() -> None:
             use_cat_adapter=False, feature_scales="p4_embedding",
             fusion_version="semantic_budget",
         )
+
+
+@pytest.mark.parametrize("policy", ["adaptive", "static", "magnitude", "random"])
+@pytest.mark.parametrize("ratio", [0.25, 0.5, 0.75, 1.0])
+def test_semantic_budget_spatial_policies_enforce_retention(policy: str, ratio: float) -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_budget",
+        representation_budget=3, spatial_policy=policy,
+        feature_retention_ratio=ratio,
+    )
+    model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert routing["importance_maps"].shape == routing["retained_masks"].shape
+    assert routing["retained_masks"].shape[1] == 2
+    spatial_positions = routing["retained_masks"].shape[-2] * routing["retained_masks"].shape[-1]
+    expected = max(1, round(spatial_positions * ratio)) / spatial_positions
+    assert torch.allclose(
+        routing["retention_ratio"],
+        torch.full_like(routing["retention_ratio"], expected),
+    )
+    assert routing["spatial_policy"] == policy
+    assert routing["lateral_projected_positions"].shape == (2, 2)
+    if ratio < 1.0 and policy != "magnitude":
+        assert routing["sparse_lateral_projection"] is True
+
+
+@pytest.mark.parametrize("ratio", [0.0, 1.1])
+def test_semantic_budget_rejects_invalid_retention_ratio(ratio: float) -> None:
+    with pytest.raises(ValueError, match="feature_retention_ratio"):
+        LabelEfficientSAM(
+            FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+            use_cat_adapter=False, fusion_version="semantic_budget",
+            feature_retention_ratio=ratio,
+        )
+
+
+def test_semantic_budget_uses_external_static_template() -> None:
+    template = torch.stack((torch.eye(8), torch.flip(torch.eye(8), dims=(0,))))
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_budget",
+        spatial_policy="static", feature_retention_ratio=0.25,
+        static_importance_map=template,
+    )
+    model(torch.rand(1, 3, 128, 128))
+    assert model.decoder.semantic_static_logits is None
+    assert torch.equal(model.decoder.semantic_static_template[:, 0], template)
+    assert model.decoder.last_routing["retained_masks"].sum() > 0
 
 
 def test_scsr_starts_uniform_and_records_finite_routing() -> None:

@@ -10,6 +10,7 @@ from adasam.utils.transforms import (
     resize_longest_side,
     resize_mask,
 )
+from .budget import load_static_importance_map
 
 __all__ = [
     "set_seed",
@@ -21,4 +22,5 @@ __all__ = [
     "preprocess_image",
     "resize_longest_side",
     "resize_mask",
+    "load_static_importance_map",
 ]

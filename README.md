@@ -1,50 +1,81 @@
 # AdaSAM
 
-**MobileSAM-based Few-shot Aerial Instance Segmentation with Adaptive Sparse Computation.**
+AdaSAM is a MobileSAM-based research codebase for label-efficient semantic
+segmentation. The current main line freezes the MobileSAM image encoder and studies
+compact adaptation on NEU-Seg, LoveDA, and iSAID.
 
-A clean-slate research codebase (rebuilt from `AdaTile-FastSAM`) where the **only backbone is
-MobileSAM**. Few-shot adaptation follows the *prototype → similarity peaks → point prompts → SAM
-MaskDecoder* paradigm (PerSAM / Matcher family), so per-instance masks come straight out of SAM's
-promptable decoder. Evaluated under the **frozen Evaluation Protocol V3** (COCO AP, one-to-one
-instance matching, no union masks).
+> Current status (2026-08-10): the implementation and experiment infrastructure are
+> under active development. Model variants are implemented and covered by tests, but
+> no unverified accuracy or efficiency claim should be treated as a paper result.
 
-## Design principles
+## Current research question
 
-Single Responsibility · Open-Closed · KISS · YAGNI. Every module has a fixed input/output contract
-and maps to exactly one paper section. **No legacy compatibility branches** (`if decoder=="..."`).
+Can a frozen MobileSAM encoder, lightweight multi-scale adaptation, and a compact
+semantic decoder improve the accuracy/annotation/compute trade-off over low-data
+supervised baselines?
 
+This is label-efficient semantic segmentation, not classical base-to-novel few-shot
+segmentation. Full-supervision results are reference upper bounds and must not be
+presented as label-budget-matched comparisons.
+
+## Implemented system
+
+```text
+image
+  -> frozen MobileSAM/TinyViT (P3, P4, embedding)
+  -> optional CAT adapter
+  -> multi-scale fusion / routing
+  -> lightweight or boundary-aware semantic decoder
+  -> semantic logits at the original image size
 ```
-adasam/
-├── backbone/    MobileSAMBackbone: image → {"image_embedding":[B,256,64,64]}   (frozen)
-├── prototype/   PrototypeBuilder / PrototypeMemory / Matcher (sim → point prompts)
-├── decoder/     PromptMaskDecoder: (embedding, prototype) → (masks, scores)
-├── datasets/    ISAIDInstanceDataset + EpisodeSampler (scene-disjoint K-shot)
-├── losses/      focal(eps=1e-4,γ=5.0) + dice + combined
-├── metrics/     V3 FROZEN core: instance_match.py + coco_eval.py (ported verbatim)
-├── trainer/     single Trainer.train()
-├── evaluator/   evaluate.py → instance_metrics.json (V3 schema)
-├── logging/     crash-safe structured logging
-├── config/      ExperimentConfig + Recorder
-└── utils/       seed, transforms (SAM 1024² preprocessing)
-```
 
-## Backbone
+Optional experimental components include:
 
-MobileSAM is vendored under `thirdparty/MobileSAM/` (source) with `weights/mobile_sam.pt` (~40 MB,
-gitignored). Built via `mobile_sam.sam_model_registry["vit_t"]`.
+- DAPG prompt generators (`v1`, spatial `v2`, frequency-aware `v3`)
+- Defect Prototype Memory (DPM)
+- basic and defect-aware synchronized augmentation
+- hierarchical, global, image-conditioned, SCSR, task-routed, and semantic-budget fusion
+- boundary auxiliary supervision and gated boundary fusion
+- pre-fusion or post-fusion CAT adapter placement
 
-## Data & evaluation
+## Datasets and entry points
 
-- Data (iSAID Instance Few-Shot Split, 896² COCO tiles) is **referenced by path** via
-  `configs/base.yaml:data_root`, not copied.
-- All paper numbers must come from `tools/evaluate.py` (the single V3 evaluator). Protocol integrity
-  is guarded by `tests/test_instance_match.py` + `tests/test_protocol_audit.py`.
+| Dataset | Primary entry point | Notes |
+|---|---|---|
+| NEU-Seg | `tools/train_segmentation.py` | 1/5/10/20/25/50/100% budgets |
+| LoveDA | `tools/train_loveda.py` | U-Net, frozen MobileSAM, and proposed variants |
+| iSAID | `tools/train_isaid.py` | epoch- or iteration-based semantic tile training |
 
-## Quick start
+Data and `weights/mobile_sam.pt` are referenced locally and are not committed.
+
+## Installation and checks
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -q                     # protocol + metric unit tests
-python tools/train.py    --fold 0 --k-shot 5 --epochs 50
-python tools/evaluate.py --checkpoint <ckpt> --seed 42   # → instance_metrics.json
+pytest tests -q
 ```
+
+Example smoke runs:
+
+```bash
+python tools/train_segmentation.py --label_ratio 5 --epochs 1 --device cuda
+python tools/train_loveda.py --model ours --label-ratio 5 --epochs 1 --device cuda
+python tools/train_isaid.py --model ours --label-ratio 5 --data-root <tiles> \
+  --output-dir runs/isaid_smoke --max-iterations 10 --eval-interval 10
+```
+
+Use `--help` on each entry point for the full variant matrix. Outputs contain the
+resolved arguments, metrics, checkpoint, timing, and parameter counts where supported.
+
+## Documentation
+
+Start at [`docs/README.md`](docs/README.md). The current project summary is
+[`docs/PROJECT_UPDATE_2026-08-10.md`](docs/PROJECT_UPDATE_2026-08-10.md), the paper
+position is in [`METHOD_DESIGN.md`](METHOD_DESIGN.md), and experiment traceability is
+maintained in [`EXPERIMENT_MANIFEST.md`](EXPERIMENT_MANIFEST.md).
+
+The frozen protocol and cloud command for the semantic-budget study are in
+[`docs/SEMANTIC_BUDGET_PROTOCOL.md`](docs/SEMANTIC_BUDGET_PROTOCOL.md).
+
+Legacy few-shot/promptable-decoder modules remain in the repository for historical
+experiments. They are not the default label-efficient training path described above.

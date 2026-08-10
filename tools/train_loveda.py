@@ -20,9 +20,14 @@ if str(ROOT) not in sys.path:
 
 from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices  # noqa: E402
-from adasam.losses import BoundaryLoss, LabelEfficientSegmentationLoss  # noqa: E402
+from adasam.losses import (  # noqa: E402
+    BoundaryLoss,
+    LabelEfficientSegmentationLoss,
+    semantic_boundary_target,
+)
+from adasam.metrics import SIZE_NAMES, component_size_map  # noqa: E402
 from adasam.models import LabelEfficientSAM, LabelEfficientUNet  # noqa: E402
-from adasam.utils import set_seed  # noqa: E402
+from adasam.utils import load_static_importance_map, set_seed  # noqa: E402
 from tools.train_segmentation import evaluate, task_utility_routing_loss  # noqa: E402
 
 
@@ -41,8 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"], default="hierarchical")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
+    parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "random"], default="adaptive")
+    parser.add_argument("--feature-retention-ratio", type=float, default=1.0)
+    parser.add_argument("--spatial-budget-temperature", type=float, default=1.0)
+    parser.add_argument("--static-importance-map", default=None)
     parser.add_argument("--routing-loss-weight", type=float, default=0.1)
     parser.add_argument("--routing-aux-weight", type=float, default=0.05)
     parser.add_argument("--routing-target-temperature", type=float, default=0.25)
@@ -89,6 +98,15 @@ def collect_routing_statistics(
     oracle_pixels = 0
     oracle_scale_sum = torch.zeros(3, dtype=torch.float64)
     oracle_entropy_sum = 0.0
+    region_names = ("background", "foreground_interior", "boundary")
+    region_retained_sum = {name: torch.zeros(2, dtype=torch.float64) for name in region_names}
+    region_importance_sum = {name: torch.zeros(2, dtype=torch.float64) for name in region_names}
+    region_pixels = {name: 0 for name in region_names}
+    size_retained_sum = {name: torch.zeros(2, dtype=torch.float64) for name in SIZE_NAMES}
+    size_importance_sum = {name: torch.zeros(2, dtype=torch.float64) for name in SIZE_NAMES}
+    size_pixels = {name: 0 for name in SIZE_NAMES}
+    domain_weight_sum: dict[str, torch.Tensor] = {}
+    domain_pixels: dict[str, int] = {}
     pixels = 0
     model.eval()
     for batch in loader:
@@ -142,6 +160,41 @@ def collect_routing_statistics(
         dominant += torch.stack([((weights.argmax(1) == i) & valid).sum() for i in range(3)]).cpu().double()
         entropy_sum += float(routing["entropy"][valid].sum().cpu())
         pixels += count
+        sample_ids = batch.get("id", [""] * target.shape[0])
+        for sample_index, sample_id in enumerate(sample_ids):
+            domain = str(sample_id).split("_", 1)[0].lower()
+            sample_valid = valid[sample_index]
+            sample_count = int(sample_valid.sum())
+            if sample_count:
+                domain_weight_sum.setdefault(domain, torch.zeros(3, dtype=torch.float64))
+                domain_pixels[domain] = domain_pixels.get(domain, 0) + sample_count
+                domain_weight_sum[domain] += (
+                    weights[sample_index, :, sample_valid].sum(1).cpu().double()
+                )
+        if "retained_masks" in routing:
+            retained = routing["retained_masks"]
+            importance = routing["importance_maps"]
+            boundary, _ = semantic_boundary_target(routed_target, ignore_index)
+            foreground = valid & (routed_target != 0)
+            region_masks = {
+                "background": valid & (routed_target == 0),
+                "foreground_interior": foreground & ~boundary,
+                "boundary": boundary & valid,
+            }
+            strata = component_size_map(routed_target, num_classes, ignore_index).to(retained.device)
+            for name, selected_region in region_masks.items():
+                selected_count = int(selected_region.sum())
+                if selected_count:
+                    region_pixels[name] += selected_count
+                    region_retained_sum[name] += retained.permute(1, 0, 2, 3)[:, selected_region].sum(1).cpu().double()
+                    region_importance_sum[name] += importance.permute(1, 0, 2, 3)[:, selected_region].sum(1).cpu().double()
+            for band, name in enumerate(SIZE_NAMES):
+                selected_region = (strata == band) & valid
+                selected_count = int(selected_region.sum())
+                if selected_count:
+                    size_pixels[name] += selected_count
+                    size_retained_sum[name] += retained.permute(1, 0, 2, 3)[:, selected_region].sum(1).cpu().double()
+                    size_importance_sum[name] += importance.permute(1, 0, 2, 3)[:, selected_region].sum(1).cpu().double()
         for class_id in range(num_classes):
             selected = valid & (routed_target == class_id)
             class_count = int(selected.sum())
@@ -164,7 +217,40 @@ def collect_routing_statistics(
             {name: float(selected_sum[i] / max(1, selected_samples)) for i, name in enumerate(("P3", "P4"))}
             if selected_samples else None
         ),
+        "domain_mean_weights": {
+            domain: {name: float(domain_weight_sum[domain][i] / domain_pixels[domain]) for i, name in enumerate(names)}
+            for domain in sorted(domain_pixels)
+        },
     }
+    if any(region_pixels.values()):
+        detail_names = ("P3", "P4")
+        result["spatial_budget"] = {
+            "policy": getattr(model.decoder, "spatial_policy", None),
+            "target_retention_ratio": getattr(model.decoder, "feature_retention_ratio", None),
+            "region_retention_ratio": {
+                region: {name: float(region_retained_sum[region][i] / max(region_pixels[region], 1)) for i, name in enumerate(detail_names)}
+                for region in region_names
+            },
+            "region_mean_importance": {
+                region: {name: float(region_importance_sum[region][i] / max(region_pixels[region], 1)) for i, name in enumerate(detail_names)}
+                for region in region_names
+            },
+            "size_retention_ratio": {
+                band: {name: float(size_retained_sum[band][i] / max(size_pixels[band], 1)) for i, name in enumerate(detail_names)}
+                for band in SIZE_NAMES
+            },
+            "size_mean_importance": {
+                band: {name: float(size_importance_sum[band][i] / max(size_pixels[band], 1)) for i, name in enumerate(detail_names)}
+                for band in SIZE_NAMES
+            },
+            "region_pixels": region_pixels,
+            "size_pixels": size_pixels,
+            "size_definition": {
+                "small_max_image_fraction": 0.001,
+                "medium_max_image_fraction": 0.01,
+                "connectivity": 8,
+            },
+        }
     if oracle_pixels:
         result.update(
             {
@@ -224,6 +310,12 @@ def main() -> None:
             adapter_placement=args.adapter_placement,
             fusion_version=args.fusion_version,
             representation_budget=args.representation_budget,
+            spatial_policy=args.spatial_policy,
+            feature_retention_ratio=args.feature_retention_ratio,
+            spatial_budget_temperature=args.spatial_budget_temperature,
+            static_importance_map=load_static_importance_map(
+                resolve(args.static_importance_map) if args.static_importance_map else None
+            ),
         )
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
@@ -333,6 +425,7 @@ def main() -> None:
         device,
         LoveDASemanticDataset.NUM_CLASSES,
         ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+        conditioned=True,
     )
     routing_statistics = collect_routing_statistics(
         model, test_loader, device, LoveDASemanticDataset.NUM_CLASSES,
