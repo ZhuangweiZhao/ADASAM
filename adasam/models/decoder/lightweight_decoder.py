@@ -68,8 +68,10 @@ class LightweightSemanticDecoder(nn.Module):
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
         if representation_budget not in {1, 2, 3}:
             raise ValueError("representation_budget must be 1, 2, or 3")
-        if spatial_policy not in {"adaptive", "static", "magnitude", "random"}:
-            raise ValueError("spatial_policy must be adaptive, static, magnitude, or random")
+        if spatial_policy not in {"adaptive", "static", "magnitude", "distilled_magnitude", "random"}:
+            raise ValueError(
+                "spatial_policy must be adaptive, static, magnitude, distilled_magnitude, or random"
+            )
         if not 0.0 < feature_retention_ratio <= 1.0:
             raise ValueError("feature_retention_ratio must be in (0, 1]")
         if spatial_budget_temperature <= 0.0:
@@ -138,6 +140,19 @@ class LightweightSemanticDecoder(nn.Module):
         )
         self.semantic_budget_residual = (
             nn.Parameter(torch.zeros(2)) if fusion_version == "semantic_budget" else None
+        )
+        self.semantic_budget_student = (
+            nn.Sequential(
+                nn.Conv2d(
+                    decoder_dim, decoder_dim, 3, padding=1,
+                    groups=decoder_dim, bias=False,
+                ),
+                nn.GroupNorm(8, decoder_dim),
+                nn.GELU(),
+                nn.Conv2d(decoder_dim, 2, 1),
+            )
+            if fusion_version == "semantic_budget" and spatial_policy == "distilled_magnitude"
+            else None
         )
         if static_importance_map is not None:
             if fusion_version != "semantic_budget" or spatial_policy != "static":
@@ -302,6 +317,13 @@ class LightweightSemanticDecoder(nn.Module):
                 retained_masks = []
                 sparse_projection_used = []
                 projected_positions = []
+                student_logits = (
+                    self.semantic_budget_student(anchor)
+                    if self.semantic_budget_student is not None
+                    else None
+                )
+                teacher_importance_maps = []
+                teacher_masks = []
                 for index, name in enumerate(("P3", "P4")):
                     selected = self.training or bool(hard_mask[:, index].any())
                     if not selected:
@@ -313,6 +335,9 @@ class LightweightSemanticDecoder(nn.Module):
                         projected_positions.append(
                             torch.zeros(anchor.shape[0], dtype=torch.long, device=anchor.device)
                         )
+                        if student_logits is not None:
+                            teacher_importance_maps.append(torch.zeros_like(anchor[:, :1]))
+                            teacher_masks.append(torch.zeros_like(anchor[:, :1]))
                         continue
                     raw_energy = features[name].float().std(dim=1, keepdim=True)
                     raw_energy = F.interpolate(
@@ -333,10 +358,33 @@ class LightweightSemanticDecoder(nn.Module):
                             dtype=torch.long,
                             device=anchor.device,
                         )
+                    elif self.spatial_policy == "distilled_magnitude":
+                        importance = student_logits[:, index : index + 1]
+                        if self.training:
+                            value = self.lateral[name](features[name])
+                            if value.shape[-2:] != target_size:
+                                value = F.interpolate(
+                                    value, size=target_size, mode="bilinear", align_corners=False
+                                )
+                            teacher_importance = (value.detach() - anchor.detach()).abs().mean(
+                                dim=1, keepdim=True
+                            )
+                            teacher_mask = self._retained_mask(teacher_importance)
+                            teacher_importance_maps.append(teacher_importance)
+                            teacher_masks.append(teacher_mask)
+                            sparse_used = False
+                            positions = torch.full(
+                                (anchor.shape[0],),
+                                features[name].shape[-2] * features[name].shape[-1],
+                                dtype=torch.long,
+                                device=anchor.device,
+                            )
                     else:
                         importance = self._spatial_importance(anchor, anchor, evidence, index)
                     retained = self._retained_mask(importance)
-                    if self.spatial_policy != "magnitude":
+                    if self.spatial_policy != "magnitude" and not (
+                        self.spatial_policy == "distilled_magnitude" and self.training
+                    ):
                         value, sparse_used, positions = self._project_detail(
                             features[name], retained, self.lateral[name]
                         )
@@ -377,6 +425,27 @@ class LightweightSemanticDecoder(nn.Module):
                     "sparse_lateral_projection": any(sparse_projection_used),
                     "lateral_projected_positions": torch.stack(projected_positions, dim=1).detach(),
                 }
+                if student_logits is not None and self.training:
+                    teacher_mask_tensor = torch.cat(teacher_masks, dim=1)
+                    student_mask_tensor = torch.cat(retained_masks, dim=1)
+                    self.last_routing.update(
+                        {
+                            "student_logits": student_logits,
+                            "teacher_importance_maps": torch.cat(
+                                teacher_importance_maps, dim=1
+                            ).detach(),
+                            "teacher_masks": teacher_mask_tensor.detach(),
+                            "teacher_student_agreement": (
+                                student_mask_tensor == teacher_mask_tensor
+                            ).float().mean().detach(),
+                            "teacher_student_mask_iou": (
+                                (student_mask_tensor * teacher_mask_tensor).sum()
+                                / (
+                                    ((student_mask_tensor + teacher_mask_tensor) > 0).sum()
+                                ).clamp_min(1)
+                            ).detach(),
+                        }
+                    )
             else:
                 aligned = [self.lateral[name](features[name]) for name in self.feature_names]
                 target_size = max((x.shape[-2:] for x in aligned), key=lambda s: s[0] * s[1])

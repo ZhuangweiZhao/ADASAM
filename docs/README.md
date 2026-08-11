@@ -17,6 +17,8 @@ This index distinguishes current specifications from historical research materia
 - `BOUNDARY_AWARE_DECODER.md`: boundary decoder variants and screening protocol.
 - `SEMANTIC_BUDGET_PROTOCOL.md`: frozen five-group protocol, cloud command, metrics,
   visualizations, and claim gate for semantic-conditioned representation budgets.
+- `MAGNITUDE_TEACHER_SURVIVAL.md`: the single 25%-budget seed-42 survival experiment
+  and its pre-registered stop/go gates.
 - `controlled_protocols.md`: controlled-comparison rules.
 - `not_yet_proven.md`: claims that still require evidence.
 - `research_log.md`: dated decisions and observations.

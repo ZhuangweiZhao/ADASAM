@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import cv2
 import numpy as np
@@ -8,7 +9,7 @@ import torch
 
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
-from tools.train_loveda import collect_routing_statistics
+from tools.train_loveda import collect_routing_statistics, parse_args
 
 
 def make_loveda_sample(root: Path, split: str = "Train") -> None:
@@ -54,6 +55,24 @@ def test_loveda_fixed_split_is_nested() -> None:
     assert len(train_10) == 202
     assert validation_5 == validation_10
     assert set(train_5).issubset(train_10)
+
+
+def test_loveda_accepts_magnitude_teacher_survival_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam", "--label-ratio", "10",
+            "--fusion-version", "semantic_budget",
+            "--spatial-policy", "distilled_magnitude",
+            "--feature-retention-ratio", "0.25",
+            "--magnitude-distill-weight", "1.0",
+        ],
+    )
+    args = parse_args()
+    assert args.spatial_policy == "distilled_magnitude"
+    assert args.feature_retention_ratio == 0.25
+    assert args.magnitude_distill_weight == 1.0
 
 
 def test_routing_statistics_accepts_no_ignore_index() -> None:

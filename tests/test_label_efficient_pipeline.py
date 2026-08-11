@@ -10,6 +10,7 @@ import pytest
 from adasam.datasets.industrial import LabelRatioSubset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
 from adasam.models import LabelEfficientSAM
+from adasam.losses import MagnitudeTeacherDistillationLoss
 from tools.train_segmentation import task_utility_routing_loss
 
 
@@ -180,6 +181,38 @@ def test_semantic_budget_uses_external_static_template() -> None:
     assert model.decoder.semantic_static_logits is None
     assert torch.equal(model.decoder.semantic_static_template[:, 0], template)
     assert model.decoder.last_routing["retained_masks"].sum() > 0
+
+
+def test_distilled_magnitude_uses_teacher_only_during_training() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_budget",
+        spatial_policy="distilled_magnitude", feature_retention_ratio=0.25,
+    )
+    model.train()
+    logits = model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert routing["student_logits"].shape == routing["teacher_masks"].shape
+    assert routing["teacher_masks"].shape[1] == 2
+    assert routing["sparse_lateral_projection"] is False
+    assert 0.0 <= float(routing["teacher_student_mask_iou"]) <= 1.0
+    loss = logits.mean() + MagnitudeTeacherDistillationLoss()(
+        routing["student_logits"], routing["teacher_masks"]
+    )
+    loss.backward()
+    assert any(
+        parameter.grad is not None
+        for parameter in model.decoder.semantic_budget_student.parameters()
+    )
+
+    model.eval()
+    with torch.no_grad():
+        model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert "teacher_masks" not in routing
+    assert "teacher_importance_maps" not in routing
+    assert routing["sparse_lateral_projection"] is True
+    assert torch.all(routing["retention_ratio"] == 0.25)
 
 
 def test_scsr_starts_uniform_and_records_finite_routing() -> None:

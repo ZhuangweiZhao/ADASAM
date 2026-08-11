@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder-dim", type=int, default=96)
     parser.add_argument("--adapter", choices=["cat", "none"], default="none")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
-    parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "random"], default="adaptive")
+    parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "distilled_magnitude", "random"], default="adaptive")
     parser.add_argument("--feature-retention-ratio", type=float, default=0.5)
     parser.add_argument("--static-importance-map", default=None)
     parser.add_argument("--device", default="cuda")

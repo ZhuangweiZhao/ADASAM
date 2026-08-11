@@ -23,6 +23,7 @@ from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_s
 from adasam.losses import (  # noqa: E402
     BoundaryLoss,
     LabelEfficientSegmentationLoss,
+    MagnitudeTeacherDistillationLoss,
     semantic_boundary_target,
 )
 from adasam.metrics import SIZE_NAMES, component_size_map  # noqa: E402
@@ -48,10 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
     parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
-    parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "random"], default="adaptive")
+    parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "distilled_magnitude", "random"], default="adaptive")
     parser.add_argument("--feature-retention-ratio", type=float, default=1.0)
     parser.add_argument("--spatial-budget-temperature", type=float, default=1.0)
     parser.add_argument("--static-importance-map", default=None)
+    parser.add_argument("--magnitude-distill-weight", type=float, default=1.0)
     parser.add_argument("--routing-loss-weight", type=float, default=0.1)
     parser.add_argument("--routing-aux-weight", type=float, default=0.05)
     parser.add_argument("--routing-target-temperature", type=float, default=0.25)
@@ -321,6 +323,7 @@ def main() -> None:
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
     criterion = LabelEfficientSegmentationLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     boundary_criterion = BoundaryLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
+    magnitude_distillation_criterion = MagnitudeTeacherDistillationLoss()
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
         lr=args.lr,
@@ -352,6 +355,9 @@ def main() -> None:
         routing_losses = []
         routing_aux_losses = []
         routing_target_entropies = []
+        magnitude_distillation_losses = []
+        magnitude_teacher_agreements = []
+        magnitude_teacher_mask_ious = []
         for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
@@ -363,6 +369,19 @@ def main() -> None:
                 prediction, _, auxiliary = model.forward_with_auxiliary(image, target)
                 boundary_logits = auxiliary["boundary_logits"] if auxiliary is not None else None
             loss = criterion(prediction, target)
+            budget_routing = getattr(getattr(model, "decoder", None), "last_routing", None)
+            if budget_routing is not None and "teacher_masks" in budget_routing:
+                distillation_loss = magnitude_distillation_criterion(
+                    budget_routing["student_logits"], budget_routing["teacher_masks"]
+                )
+                loss = loss + args.magnitude_distill_weight * distillation_loss
+                magnitude_distillation_losses.append(float(distillation_loss.detach()))
+                magnitude_teacher_agreements.append(
+                    float(budget_routing["teacher_student_agreement"])
+                )
+                magnitude_teacher_mask_ious.append(
+                    float(budget_routing["teacher_student_mask_iou"])
+                )
             routing = task_utility_routing_loss(
                 model,
                 target,
@@ -407,6 +426,16 @@ def main() -> None:
             record["mean_routing_loss"] = sum(routing_losses) / len(routing_losses)
             record["mean_routing_aux_loss"] = sum(routing_aux_losses) / len(routing_aux_losses)
             record["mean_routing_target_entropy"] = sum(routing_target_entropies) / len(routing_target_entropies)
+        if magnitude_distillation_losses:
+            record["mean_magnitude_distillation_loss"] = sum(
+                magnitude_distillation_losses
+            ) / len(magnitude_distillation_losses)
+            record["mean_teacher_student_mask_agreement"] = sum(
+                magnitude_teacher_agreements
+            ) / len(magnitude_teacher_agreements)
+            record["mean_teacher_student_mask_iou"] = sum(
+                magnitude_teacher_mask_ious
+            ) / len(magnitude_teacher_mask_ious)
         history.append(record)
         print(json.dumps(record))
         if validation_metrics["mIoU"] > best_score:

@@ -14,6 +14,7 @@ from adasam.losses.label_efficient_loss import (
     PrototypeCompactnessLoss,
 )
 from adasam.losses.boundary_loss import BoundaryLoss, boundary_f1_counts, semantic_boundary_target
+from adasam.losses.budget_distillation_loss import MagnitudeTeacherDistillationLoss
 
 __all__ = [
     "focal_loss",
@@ -28,4 +29,5 @@ __all__ = [
     "BoundaryLoss",
     "boundary_f1_counts",
     "semantic_boundary_target",
+    "MagnitudeTeacherDistillationLoss",
 ]
