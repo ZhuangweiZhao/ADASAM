@@ -16,6 +16,7 @@ class LabelEfficientSegmentationLoss(nn.Module):
         dice_weight: float = 1.0,
         include_background: bool = True,
         ignore_index: int | None = None,
+        class_weights: torch.Tensor | None = None,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -23,6 +24,7 @@ class LabelEfficientSegmentationLoss(nn.Module):
         self.dice_weight = dice_weight
         self.include_background = include_background
         self.ignore_index = ignore_index
+        self.register_buffer("class_weights", class_weights)
         self.eps = eps
 
     def forward(self, prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -33,6 +35,7 @@ class LabelEfficientSegmentationLoss(nn.Module):
         ce = F.cross_entropy(
             prediction,
             target.long(),
+            weight=self.class_weights,
             ignore_index=self.ignore_index if self.ignore_index is not None else -100,
         )
         probabilities = prediction.softmax(dim=1)

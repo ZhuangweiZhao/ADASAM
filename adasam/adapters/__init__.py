@@ -13,3 +13,4 @@ natural images and remote sensing imagery.
 from adasam.adapters.cat_adapter import CATAdapter, MultiScaleCATAdapter
 
 __all__ = ["CATAdapter", "MultiScaleCATAdapter"]
+from adasam.adapters.lora import LoRALinear, inject_tinyvit_lora

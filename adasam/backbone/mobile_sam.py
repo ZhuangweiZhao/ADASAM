@@ -173,7 +173,6 @@ class MobileSAMBackbone(nn.Module):
         self.image_encoder.eval()
         return self
 
-    @torch.no_grad()
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
         """图像 → 图像嵌入 | Image → image embedding.
 
@@ -294,7 +293,6 @@ class LabelEfficientMobileSAMBackbone(nn.Module):
         self.image_encoder.eval()
         return self
 
-    @torch.no_grad()
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError(f"expected [B, 3, H, W], got {tuple(image.shape)}")

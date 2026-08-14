@@ -11,6 +11,15 @@ Decision:
 Evidence Link:
 ```
 
+## 2026-08-14 — Evidence registration + Vaihingen survival completion
+
+Date: 2026-08-14  
+Question: 已有云端/本地运行结果中，哪些具备可登记的证据包？  
+Experiment: 汇总 `runs/云服务器`（150 runs + 36 aggregates，`analysis/export_cloud_results_summary.py`）；核对 NEU-Seg 108-run 3 种子矩阵、LoveDA 语义预算/保留率/layer 组、Vaihingen 自适应保留 3 种子、iSAID 单 run；更新 `EXPERIMENT_MANIFEST.md`。  
+Observation: NEU-Seg 矩阵完备（basic 增强是最大单因素，@1% +4.8~12.9pt）；LoveDA 语义预算 K=3>2>1 单调但单种子；magnitude 保留率 0.25–1.00 精度与 FPS 均无差异（零结果）；Vaihingen adaptive 3 种子在 mIoU（+0.9~1.2pt）与 Small IoU（+0.020~0.029）一致占优，seed42 仅因 0.08pt 未过 1pt 闸门而判 REDESIGN。  
+Decision: 全部登记为 screening（缺存档 checkpoint / 多种子 / 效率协议记录，不得作为论文结果引用）；提交 Vaihingen/LoRA/自适应代码；移除 `thirdparty/SAM-RSP` gitlink 并加入 gitignore。  
+Evidence Link: `EXPERIMENT_MANIFEST.md`, `runs/云服务器/云服务器结果汇总.csv`, `runs/vaihingen_adaptive_survival*/survival_summary.json`
+
 ## 2026-08-10 — Documentation consolidation
 
 Date: 2026-08-10  

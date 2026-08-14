@@ -48,3 +48,8 @@ docs/*
 # ── Third-party vendored code (kept as-is) ──
 thirdparty/cat-sam/
 thirdparty/Mask2Former/
+thirdparty/SAM-RSP/
+
+# ── Local tooling caches / generated figures ──
+.playwright-cli/
+reports/

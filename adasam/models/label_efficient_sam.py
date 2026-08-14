@@ -45,9 +45,17 @@ class LabelEfficientSAM(nn.Module):
         feature_retention_ratio: float = 1.0,
         spatial_budget_temperature: float = 1.0,
         static_importance_map: torch.Tensor | None = None,
+        use_input_adapter: bool = False,
     ) -> None:
         super().__init__()
         self.backbone = backbone
+        self.use_input_adapter = use_input_adapter
+        self.encoder_requires_grad = False
+        self.input_adapter = nn.Conv2d(3, 3, 1, bias=True) if use_input_adapter else nn.Identity()
+        if use_input_adapter:
+            with torch.no_grad():
+                self.input_adapter.weight.copy_(torch.eye(3).view(3, 3, 1, 1))
+                self.input_adapter.bias.zero_()
         scale_names = {
             "p3": ("P3",), "p4": ("P4",), "embedding": ("embedding",),
             "p3_p4": ("P3", "P4"), "p3_embedding": ("P3", "embedding"),
@@ -154,6 +162,7 @@ class LabelEfficientSAM(nn.Module):
         feature_retention_ratio: float = 1.0,
         spatial_budget_temperature: float = 1.0,
         static_importance_map: torch.Tensor | None = None,
+        use_input_adapter: bool = False,
     ) -> "LabelEfficientSAM":
         backbone = LabelEfficientMobileSAMBackbone.build(
             checkpoint, model_type=model_type, device=device, img_size=img_size
@@ -175,6 +184,7 @@ class LabelEfficientSAM(nn.Module):
             feature_retention_ratio=feature_retention_ratio,
             spatial_budget_temperature=spatial_budget_temperature,
             static_importance_map=static_importance_map,
+            use_input_adapter=use_input_adapter,
         ).to(device)
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
@@ -185,6 +195,7 @@ class LabelEfficientSAM(nn.Module):
     def _preprocess(self, image: torch.Tensor) -> torch.Tensor:
         size = (self.backbone.img_size, self.backbone.img_size)
         image = F.interpolate(image, size=size, mode="bilinear", align_corners=False)
+        image = self.input_adapter(image)
         return (image * 255.0 - self.pixel_mean) / self.pixel_std
 
     def _adapt_features(
@@ -197,8 +208,15 @@ class LabelEfficientSAM(nn.Module):
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError(f"expected image [B,3,H,W], got {tuple(image.shape)}")
         output_size = tuple(image.shape[-2:])
-        with torch.no_grad():
-            features = self.backbone(self._preprocess(image))
+        # Keep the encoder frozen while allowing the small input adapter to learn.
+        preprocessed = self._preprocess(image)
+        # Parameters remain frozen, but the adapter needs a gradient through
+        # the encoder with respect to its input.
+        if self.use_input_adapter or self.encoder_requires_grad:
+            features = self.backbone(preprocessed)
+        else:
+            with torch.no_grad():
+                features = self.backbone(preprocessed)
         adapted = self._adapt_features(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
         decoder_features = adapted

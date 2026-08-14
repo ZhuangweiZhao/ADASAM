@@ -12,6 +12,7 @@ from adasam.losses import LabelEfficientSegmentationLoss
 from adasam.models import LabelEfficientSAM
 from adasam.losses import MagnitudeTeacherDistillationLoss
 from tools.train_segmentation import task_utility_routing_loss
+from adasam.backbone.mobile_sam import LabelEfficientMobileSAMBackbone
 
 
 class FakeFrozenBackbone(nn.Module):
@@ -53,6 +54,35 @@ def test_parameter_counts_partition_total() -> None:
     assert counts["total"] == counts["trainable"] + counts["frozen"]
     assert counts["trainable"] > 0
     assert counts["frozen"] > 0
+
+
+def test_input_adapter_starts_as_identity_and_receives_gradients() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_input_adapter=True,
+    )
+    image = torch.rand(1, 3, 64, 64)
+    expected = F.interpolate(image, (224, 224), mode="bilinear", align_corners=False)
+    adapted = model.input_adapter(expected)
+    assert torch.allclose(adapted, expected)
+    model(image).mean().backward()
+    assert model.input_adapter.weight.grad is not None
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
+def test_real_label_efficient_backbone_forward_allows_input_gradients() -> None:
+    class Encoder(nn.Module):
+        def forward_multi_scale(self, image):
+            return {
+                "stage1": image,
+                "stage2": F.avg_pool2d(image, 2),
+                "stage3": F.avg_pool2d(image, 4),
+            }
+
+    backbone = LabelEfficientMobileSAMBackbone(Encoder(), img_size=32)
+    image = torch.randn(1, 3, 32, 32, requires_grad=True)
+    sum(value.mean() for value in backbone(image).values()).backward()
+    assert image.grad is not None
 
 
 def test_feature_scale_ablation_has_clean_parameter_and_gradient_scope() -> None:

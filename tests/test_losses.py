@@ -10,7 +10,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from adasam.losses import focal_loss, dice_loss, combined_loss, mask_iou
+from adasam.losses import (
+    boundary_f1_counts,
+    combined_loss,
+    dice_loss,
+    focal_loss,
+    mask_iou,
+    semantic_boundary_target,
+)
 
 
 def test_focal_low_for_correct_high_for_wrong():
@@ -66,3 +73,22 @@ def test_mask_iou_known_values():
     assert mask_iou(a, c).item() == pytest.approx(0.0)
     d = torch.zeros(1, 10, 10); d[0, 3:8, :] = 1          # 与 a 交 2 行, 并 8 行 → 0.25
     assert mask_iou(a, d).item() == pytest.approx(0.25, abs=1e-5)
+
+
+def test_boundary_target_preserves_eroded_ignore_band_edges():
+    target = torch.tensor([[[0, 0, 255, 1, 1]]])
+    boundary, valid = semantic_boundary_target(target, ignore_index=255)
+    assert boundary.tolist() == [[[False, True, False, True, False]]]
+    assert not boundary[~valid].any()
+
+
+def test_boundary_f1_matches_prediction_across_eroded_band():
+    target = torch.tensor([[[0, 0, 255, 1, 1]]])
+    prediction = torch.tensor([[[0, 0, 0, 1, 1]]])
+    matched_pred, predicted, matched_target, target_count = boundary_f1_counts(
+        prediction, target, ignore_index=255, tolerance=1
+    )
+    assert matched_pred == predicted
+    assert matched_target == target_count
+    assert predicted > 0
+    assert target_count == 2

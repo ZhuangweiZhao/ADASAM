@@ -7,16 +7,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _boundaries(labels: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
+def _boundaries(
+    labels: torch.Tensor,
+    valid: torch.Tensor,
+    *,
+    include_invalid_edges: bool = False,
+) -> torch.Tensor:
     boundary = torch.zeros_like(valid)
     horizontal_valid = valid[:, :, 1:] & valid[:, :, :-1]
     horizontal = (labels[:, :, 1:] != labels[:, :, :-1]) & horizontal_valid
+    if include_invalid_edges:
+        horizontal |= valid[:, :, 1:] ^ valid[:, :, :-1]
     boundary[:, :, 1:] |= horizontal
     boundary[:, :, :-1] |= horizontal
     vertical_valid = valid[:, 1:, :] & valid[:, :-1, :]
     vertical = (labels[:, 1:, :] != labels[:, :-1, :]) & vertical_valid
+    if include_invalid_edges:
+        vertical |= valid[:, 1:, :] ^ valid[:, :-1, :]
     boundary[:, 1:, :] |= vertical
     boundary[:, :-1, :] |= vertical
+    # Boundary supervision stays on the labelled side of an ignored boundary
+    # band. This is required for Vaihingen's eroded label (raw value 6).
     return boundary & valid, valid
 
 
@@ -29,7 +40,7 @@ def semantic_boundary_target(
     valid = torch.ones_like(target, dtype=torch.bool)
     if ignore_index is not None:
         valid = target != ignore_index
-    return _boundaries(target, valid)
+    return _boundaries(target, valid, include_invalid_edges=True)
 
 
 class BoundaryLoss(nn.Module):
@@ -75,8 +86,12 @@ def boundary_f1_counts(
     valid = torch.ones_like(target, dtype=torch.bool)
     if ignore_index is not None:
         valid = target != ignore_index
-    pred_boundary, _ = _boundaries(prediction, valid)
-    target_boundary, _ = _boundaries(target, valid)
+    # Predictions have labels in ignored GT bands too, so extract their natural
+    # semantic transitions from the complete prediction. Ground truth instead
+    # places boundaries on the labelled edge of each ignored/eroded band.
+    pred_valid = torch.ones_like(valid)
+    pred_boundary, _ = _boundaries(prediction, pred_valid)
+    target_boundary, _ = _boundaries(target, valid, include_invalid_edges=True)
     kernel = 2 * max(tolerance, 0) + 1
     pred_f = pred_boundary.unsqueeze(1).float()
     target_f = target_boundary.unsqueeze(1).float()
