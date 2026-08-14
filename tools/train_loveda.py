@@ -27,15 +27,19 @@ from adasam.losses import (  # noqa: E402
     semantic_boundary_target,
 )
 from adasam.metrics import SIZE_NAMES, component_size_map  # noqa: E402
-from adasam.models import LabelEfficientSAM, LabelEfficientUNet  # noqa: E402
+from adasam.models import LabelEfficientSAM, LabelEfficientUNet, build_baseline  # noqa: E402
 from adasam.utils import load_static_importance_map, set_seed  # noqa: E402
 from tools.train_segmentation import evaluate, task_utility_routing_loss  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Label-efficient LoveDA segmentation")
-    parser.add_argument("--model", choices=["unet", "mobilesam", "ours"], required=True)
+    parser.add_argument("--model", choices=["unet", "mobilesam", "ours", "deeplabv3plus", "segformer"], required=True)
     parser.add_argument("--label-ratio", type=int, choices=[1, 5, 10, 20, 25, 50, 100], required=True)
+    parser.add_argument("--baseline-encoder", choices=["resnet50", "resnet101", "mobilenet_v2"], default="resnet50")
+    parser.add_argument("--segformer-variant", choices=["b0", "b1", "b2"], default="b0")
+    parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True,
+                        help="use ImageNet-1k pretrained backbones for the baseline models")
     parser.add_argument("--data-root", default="data/LoveDA")
     parser.add_argument("--checkpoint", default="weights/mobile_sam.pt")
     parser.add_argument("--epochs", type=int, default=100)
@@ -87,7 +91,7 @@ def collect_routing_statistics(
     ignore_index: int | None,
     target_temperature: float = 0.5,
 ):
-    if getattr(model.decoder, "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget"}:
+    if getattr(getattr(model, "decoder", None), "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
     dominant = torch.zeros(3, dtype=torch.float64)
@@ -288,7 +292,12 @@ def main() -> None:
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
     }
-    train_loader = DataLoader(train_dataset, shuffle=True, **loader_options)
+    train_loader = DataLoader(
+        train_dataset,
+        shuffle=True,
+        drop_last=args.model in {"deeplabv3plus", "segformer"} and args.batch_size > 1,
+        **loader_options,
+    )
     validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
     test_loader = DataLoader(official_validation, shuffle=False, **loader_options)
 
@@ -296,6 +305,16 @@ def main() -> None:
         model = LabelEfficientUNet(
             LoveDASemanticDataset.NUM_CLASSES, args.base_channels
         ).to(device)
+    elif args.model in {"deeplabv3plus", "segformer"}:
+        model = build_baseline(
+            args.model,
+            num_classes=LoveDASemanticDataset.NUM_CLASSES,
+            pretrained=args.pretrained,
+            encoder_name=args.baseline_encoder,
+            segformer_variant=args.segformer_variant,
+            weights_root=ROOT / "weights",
+            device=device,
+        )
     else:
         model = LabelEfficientSAM.build(
             resolve(args.checkpoint),
@@ -320,6 +339,8 @@ def main() -> None:
             ),
         )
     if args.model == "unet" and args.decoder_version != "lightweight":
+        raise ValueError("boundary decoder variants are only available for MobileSAM models")
+    if args.model in {"deeplabv3plus", "segformer"} and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
     criterion = LabelEfficientSegmentationLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     boundary_criterion = BoundaryLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)

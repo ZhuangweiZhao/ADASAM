@@ -73,3 +73,43 @@ def test_neuseg_preserves_existing_fusion_defaults(monkeypatch) -> None:
     assert args.representation_budget == 3
     assert args.spatial_policy == "adaptive"
     assert args.feature_retention_ratio == 1.0
+
+
+def test_neuseg_accepts_baseline_models(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_segmentation.py",
+            "--label_ratio", "5",
+            "--model", "deeplabv3plus",
+            "--baseline-encoder", "resnet101",
+            "--pretrained",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.model == "deeplabv3plus"
+    assert args.baseline_encoder == "resnet101"
+    assert args.pretrained is True
+
+
+def test_neuseg_accepts_segformer_variant(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_segmentation.py",
+            "--label_ratio", "5",
+            "--model", "segformer",
+            "--segformer-variant", "b2",
+            "--no-pretrained",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.model == "segformer"
+    assert args.segformer_variant == "b2"
+    assert args.pretrained is False

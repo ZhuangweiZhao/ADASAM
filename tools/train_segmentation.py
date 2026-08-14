@@ -31,7 +31,7 @@ from adasam.losses import (  # noqa: E402
     LabelEfficientSegmentationLoss,
     PrototypeCompactnessLoss,
 )
-from adasam.models import LabelEfficientSAM  # noqa: E402
+from adasam.models import LabelEfficientSAM, LabelEfficientUNet, build_baseline  # noqa: E402
 from adasam.metrics import component_iou_sums, summarize_component_iou  # noqa: E402
 from adasam.utils import load_static_importance_map, set_seed  # noqa: E402
 
@@ -39,7 +39,12 @@ from adasam.utils import load_static_importance_map, set_seed  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Label-efficient semantic segmentation")
     parser.add_argument("--dataset", choices=["neu_seg"], default="neu_seg")
+    parser.add_argument("--model", choices=["mobilesam", "dapg", "unet", "deeplabv3plus", "segformer"], default="mobilesam")
     parser.add_argument("--label_ratio", type=int, choices=[1, 5, 10, 20, 25, 50, 100], required=True)
+    parser.add_argument("--baseline-encoder", choices=["resnet50", "resnet101", "mobilenet_v2"], default="resnet50")
+    parser.add_argument("--segformer-variant", choices=["b0", "b1", "b2"], default="b0")
+    parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True,
+                        help="use ImageNet-1k pretrained backbones for the baseline models")
     parser.add_argument("--data-root", default="data/NEU_Seg")
     parser.add_argument("--checkpoint", default="weights/mobile_sam.pt")
     parser.add_argument("--epochs", type=int, default=1)
@@ -108,7 +113,7 @@ def task_utility_routing_loss(
     target_temperature: float = 0.5,
 ) -> dict[str, torch.Tensor] | None:
     """Supervise routing with detached per-scale pixel-wise task utility."""
-    if getattr(model.decoder, "fusion_version", None) != "scsr_task":
+    if getattr(getattr(model, "decoder", None), "fusion_version", None) != "scsr_task":
         return None
     routing = model.decoder.last_routing
     if routing is None or "scale_logits" not in routing or "route_weights" not in routing:
@@ -290,6 +295,7 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
+        drop_last=args.model in {"deeplabv3plus", "segformer"} and args.batch_size > 1,
     )
     validation_loader = DataLoader(
         validation, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
@@ -300,28 +306,41 @@ def main() -> None:
     prompt_version = args.prompt_version or ("v1" if args.use_dapg else "none")
     prototype_version = args.prototype_version or ("dpm" if args.use_prototype else "none")
     num_prompt = args.num_prompt if args.num_prompt is not None else (8 if prompt_version in {"v2", "v3"} else 16)
-    model = LabelEfficientSAM.build(
-        resolve_path(args.checkpoint),
-        num_classes=base_dataset.NUM_CLASSES,
-        img_size=args.img_size,
-        device=device,
-        decoder_dim=args.decoder_dim,
-        use_dapg=args.use_dapg, num_prompt=num_prompt, prompt_version=prompt_version,
-        prompt_fusion_mode=args.prompt_fusion_mode,
-        use_cat_adapter=args.adapter == "cat",
-        prototype_version=prototype_version,
-        prototype_momentum=args.prototype_momentum,
-        decoder_version=args.decoder_version,
-        feature_scales=args.feature_scales,
-        fusion_version=args.fusion_version,
-        representation_budget=args.representation_budget,
-        spatial_policy=args.spatial_policy,
-        feature_retention_ratio=args.feature_retention_ratio,
-        spatial_budget_temperature=args.spatial_budget_temperature,
-        static_importance_map=load_static_importance_map(
-            resolve_path(args.static_importance_map) if args.static_importance_map else None
-        ),
-    )
+    if args.model == "unet":
+        model = LabelEfficientUNet(base_dataset.NUM_CLASSES, base_channels=32).to(device)
+    elif args.model in {"deeplabv3plus", "segformer"}:
+        model = build_baseline(
+            args.model,
+            num_classes=base_dataset.NUM_CLASSES,
+            pretrained=args.pretrained,
+            encoder_name=args.baseline_encoder,
+            segformer_variant=args.segformer_variant,
+            weights_root=_REPO_ROOT / "weights",
+            device=device,
+        )
+    else:
+        model = LabelEfficientSAM.build(
+            resolve_path(args.checkpoint),
+            num_classes=base_dataset.NUM_CLASSES,
+            img_size=args.img_size,
+            device=device,
+            decoder_dim=args.decoder_dim,
+            use_dapg=args.use_dapg, num_prompt=num_prompt, prompt_version=prompt_version,
+            prompt_fusion_mode=args.prompt_fusion_mode,
+            use_cat_adapter=args.adapter == "cat",
+            prototype_version=prototype_version,
+            prototype_momentum=args.prototype_momentum,
+            decoder_version=args.decoder_version,
+            feature_scales=args.feature_scales,
+            fusion_version=args.fusion_version,
+            representation_budget=args.representation_budget,
+            spatial_policy=args.spatial_policy,
+            feature_retention_ratio=args.feature_retention_ratio,
+            spatial_budget_temperature=args.spatial_budget_temperature,
+            static_importance_map=load_static_importance_map(
+                resolve_path(args.static_importance_map) if args.static_importance_map else None
+            ),
+        )
     criterion = LabelEfficientSegmentationLoss()
     prompt_criterion = DefectPromptAlignmentLoss()
     prototype_criterion = PrototypeCompactnessLoss()

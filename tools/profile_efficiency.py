@@ -23,7 +23,9 @@ if str(ROOT) not in sys.path:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Profile segmentation inference efficiency")
     p.add_argument("--dataset", choices=["loveda", "neu_seg", "isaid"], required=True)
-    p.add_argument("--models", nargs="+", choices=["unet", "mobilesam", "ours"], default=["mobilesam"])
+    p.add_argument("--models", nargs="+", choices=["unet", "mobilesam", "ours", "deeplabv3plus", "segformer"], default=["mobilesam"])
+    p.add_argument("--baseline-encoder", choices=["resnet50", "resnet101", "mobilenet_v2"], default="resnet50")
+    p.add_argument("--segformer-variant", choices=["b0", "b1", "b2"], default="b0")
     p.add_argument("--data-root", required=True)
     p.add_argument("--checkpoint", default="weights/mobile_sam.pt")
     p.add_argument("--model-checkpoints", nargs="*", default=[])
@@ -62,6 +64,18 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
         classes = 16
     if name == "unet":
         return LabelEfficientUNet(classes, args.base_channels).to(device)
+    if name in {"deeplabv3plus", "segformer"}:
+        from adasam.models import build_baseline
+
+        return build_baseline(
+            name,
+            num_classes=classes,
+            pretrained=False,
+            encoder_name=args.baseline_encoder,
+            segformer_variant=args.segformer_variant,
+            weights_root=ROOT / "weights",
+            device=device,
+        )
     return LabelEfficientSAM.build(
         checkpoint,
         num_classes=classes,
