@@ -19,6 +19,19 @@ pytest tests/test_model_forward.py -q
 ruff check adasam/ tools/ tests/
 black adasam/ tools/ tests/
 
+# Standard baselines for the label-efficient protocol (DeepLabV3+ / SegFormer)
+pip install segmentation_models_pytorch                  # DeepLabV3+ dependency
+python tools/setup_segformer_weights.py --all            # ImageNet-1k MIT weights -> weights/mit_b{0,1,2}.pth
+python tools/train_loveda.py --model deeplabv3plus --label-ratio 5 --epochs 100 \
+    --pretrained --baseline-encoder resnet50
+python tools/train_loveda.py --model segformer --label-ratio 5 --epochs 100 \
+    --pretrained --segformer-variant b0
+python tools/train_segmentation.py --model segformer --label_ratio 5 --epochs 100 \
+    --pretrained --segformer-variant b0 --split-protocol fixed
+python tools/profile_efficiency.py --dataset loveda --models deeplabv3plus segformer \
+    --data-root <root> --pretrained 2>/dev/null || true
+# Note: BN-based baselines drop the last incomplete training batch (drop_last).
+
 # AdaSAM Two-Stage Training Protocol (iSAID-5i)
 # Stage 1: Domain Adaptation (standard semantic segmentation, no few-shot)
 python tools/adasam/train_stage1.py --fold 0 --epochs 50
