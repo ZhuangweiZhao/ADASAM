@@ -36,7 +36,11 @@ from tools.train_segmentation import evaluate, task_utility_routing_loss  # noqa
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Label-efficient LoveDA segmentation")
-    parser.add_argument("--model", choices=["unet", "mobilesam", "ours", "deeplabv3plus", "segformer"], required=True)
+    parser.add_argument(
+        "--model",
+        choices=["unet", "mobilesam", "mobilesam_finetune", "ours", "deeplabv3plus", "segformer"],
+        required=True,
+    )
     parser.add_argument("--label-ratio", type=int, choices=[1, 5, 10, 20, 25, 50, 100], required=True)
     parser.add_argument("--baseline-encoder", choices=["resnet50", "resnet101", "mobilenet_v2"], default="resnet50")
     parser.add_argument("--segformer-variant", choices=["b0", "b1", "b2"], default="b0")
@@ -368,6 +372,8 @@ def main() -> None:
                 resolve(args.static_importance_map) if args.static_importance_map else None
             ),
         )
+        if args.model == "mobilesam_finetune":
+            model.set_encoder_trainable(True)
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
     if args.model in {"deeplabv3plus", "segformer"} and args.decoder_version != "lightweight":
@@ -391,6 +397,8 @@ def main() -> None:
     if args.model == "deeplabv3plus":
         backbone = model.model.encoder
     elif args.model == "segformer":
+        backbone = model.backbone
+    elif args.model == "mobilesam_finetune":
         backbone = model.backbone
     if backbone is not None and args.backbone_lr_multiplier != 1.0:
         backbone_ids = {id(parameter) for parameter in backbone.parameters() if parameter.requires_grad}
@@ -424,6 +432,8 @@ def main() -> None:
         run_name = f"deeplabv3plus_{args.baseline_encoder}_ratio{args.label_ratio}_seed{args.seed}"
     elif args.model == "segformer":
         run_name = f"segformer_{args.segformer_variant}_ratio{args.label_ratio}_seed{args.seed}"
+    elif args.model == "mobilesam_finetune":
+        run_name = f"mobilesam_finetune_ratio{args.label_ratio}_seed{args.seed}"
     else:
         run_name = f"loveda_ratio{args.label_ratio}_seed{args.seed}"
     output_dir = resolve(args.output_dir) / run_name

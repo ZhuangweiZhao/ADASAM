@@ -20,6 +20,7 @@ class FakeFrozenBackbone(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
+        self.encoder_trainable = False
         self.stem = nn.Conv2d(3, 256, 1)
         for parameter in self.parameters():
             parameter.requires_grad_(False)
@@ -33,7 +34,12 @@ class FakeFrozenBackbone(nn.Module):
         }
 
     def train(self, mode: bool = True):
-        return super().train(False)
+        return super().train(mode if self.encoder_trainable else False)
+
+    def set_encoder_trainable(self, trainable: bool = True) -> None:
+        self.encoder_trainable = bool(trainable)
+        for parameter in self.parameters():
+            parameter.requires_grad_(self.encoder_trainable)
 
 
 def test_forward_512_and_batch_four_backward() -> None:
@@ -54,6 +60,25 @@ def test_parameter_counts_partition_total() -> None:
     assert counts["total"] == counts["trainable"] + counts["frozen"]
     assert counts["trainable"] > 0
     assert counts["frozen"] > 0
+
+
+def test_full_encoder_finetuning_receives_gradients_and_can_refreeze() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="sum",
+    )
+    frozen_count = model.parameter_counts()["trainable"]
+    model.set_encoder_trainable(True)
+    model.train()
+    assert model.backbone.training
+    assert model.parameter_counts()["trainable"] > frozen_count
+    model(torch.rand(2, 3, 64, 64)).mean().backward()
+    assert all(parameter.grad is not None for parameter in model.backbone.parameters())
+
+    model.set_encoder_trainable(False)
+    model.train()
+    assert not model.backbone.training
+    assert all(not parameter.requires_grad for parameter in model.backbone.parameters())
 
 
 def test_input_adapter_starts_as_identity_and_receives_gradients() -> None:

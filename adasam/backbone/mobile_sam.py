@@ -269,6 +269,7 @@ class LabelEfficientMobileSAMBackbone(nn.Module):
         super().__init__()
         self.image_encoder = image_encoder
         self.img_size = int(img_size)
+        self.encoder_trainable = False
         for parameter in self.image_encoder.parameters():
             parameter.requires_grad_(False)
         self.image_encoder.eval()
@@ -289,9 +290,16 @@ class LabelEfficientMobileSAMBackbone(nn.Module):
         return cls(encoder, img_size=img_size)
 
     def train(self, mode: bool = True) -> "LabelEfficientMobileSAMBackbone":
-        super().train(False)
-        self.image_encoder.eval()
+        super().train(mode if self.encoder_trainable else False)
+        self.image_encoder.train(mode) if self.encoder_trainable else self.image_encoder.eval()
         return self
+
+    def set_encoder_trainable(self, trainable: bool = True) -> None:
+        """Enable full TinyViT fine-tuning or restore the frozen feature extractor."""
+        self.encoder_trainable = bool(trainable)
+        for parameter in self.image_encoder.parameters():
+            parameter.requires_grad_(self.encoder_trainable)
+        self.image_encoder.train(self.training) if self.encoder_trainable else self.image_encoder.eval()
 
     def forward(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
         if image.ndim != 4 or image.shape[1] != 3:

@@ -189,8 +189,17 @@ class LabelEfficientSAM(nn.Module):
 
     def train(self, mode: bool = True) -> "LabelEfficientSAM":
         super().train(mode)
-        self.backbone.eval()
+        if self.encoder_requires_grad:
+            self.backbone.train(mode)
+        else:
+            self.backbone.eval()
         return self
+
+    def set_encoder_trainable(self, trainable: bool = True) -> None:
+        """Switch between the frozen protocol and full TinyViT fine-tuning."""
+        self.encoder_requires_grad = bool(trainable)
+        self.backbone.set_encoder_trainable(self.encoder_requires_grad)
+        self.backbone.train(self.training) if self.encoder_requires_grad else self.backbone.eval()
 
     def _preprocess(self, image: torch.Tensor) -> torch.Tensor:
         size = (self.backbone.img_size, self.backbone.img_size)
@@ -247,8 +256,11 @@ class LabelEfficientSAM(nn.Module):
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError(f"expected image [B,3,H,W], got {tuple(image.shape)}")
         output_size = tuple(image.shape[-2:])
-        with torch.no_grad():
+        if self.encoder_requires_grad:
             features = self.backbone(self._preprocess(image))
+        else:
+            with torch.no_grad():
+                features = self.backbone(self._preprocess(image))
         adapted = self._adapt_features(features)
         prompts = self.prompt_generator(adapted) if self.prompt_generator is not None else None
         prototype_aux = None
