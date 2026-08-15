@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
@@ -72,6 +74,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--backbone-lr-multiplier", type=float, default=1.0)
+    parser.add_argument("--lr-scheduler", choices=["constant", "cosine"], default="constant")
+    parser.add_argument("--class-balanced-ce", action="store_true")
+    parser.add_argument("--grad-clip-norm", type=float, default=0.0)
+    parser.add_argument(
+        "--train-batch-norm", action="store_true",
+        help="update DeepLabV3+ BatchNorm statistics (requires physical batch size > 1)",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--output-dir", default="runs/loveda")
     return parser.parse_args()
@@ -80,6 +90,26 @@ def parse_args() -> argparse.Namespace:
 def resolve(value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else ROOT / path
+
+
+def estimate_class_weights(
+    dataset: LoveDASemanticDataset,
+    indices: list[int],
+) -> torch.Tensor:
+    """Estimate stable inverse-sqrt pixel-frequency weights on the labeled subset."""
+    counts = torch.zeros(dataset.NUM_CLASSES, dtype=torch.float64)
+    for index in indices:
+        target = dataset[index]["mask"]
+        valid = target != dataset.IGNORE_INDEX
+        counts += torch.bincount(
+            target[valid], minlength=dataset.NUM_CLASSES
+        ).to(torch.float64)
+    if (counts == 0).any():
+        missing = torch.where(counts == 0)[0].tolist()
+        raise ValueError(f"labeled subset contains no pixels for classes {missing}")
+    weights = counts.sum().sqrt() / counts.sqrt()
+    weights = (weights / weights.mean()).clamp(max=5.0)
+    return weights.to(torch.float32)
 
 
 @torch.no_grad()
@@ -312,6 +342,7 @@ def main() -> None:
             encoder_name=args.baseline_encoder,
             segformer_variant=args.segformer_variant,
             weights_root=ROOT / "weights",
+            freeze_batch_norm=not args.train_batch_norm,
             device=device,
         )
     else:
@@ -341,13 +372,52 @@ def main() -> None:
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
     if args.model in {"deeplabv3plus", "segformer"} and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
-    criterion = LabelEfficientSegmentationLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
+    if args.train_batch_norm and args.model != "deeplabv3plus":
+        raise ValueError("--train-batch-norm is only valid for DeepLabV3+")
+    if args.train_batch_norm and args.batch_size < 2:
+        raise ValueError("--train-batch-norm requires --batch-size of at least 2")
+    class_weights = None
+    if args.class_balanced_ce:
+        class_weights = estimate_class_weights(selection_dataset, train_indices).to(device)
+        print(f"class_weights={class_weights.detach().cpu().tolist()}")
+    criterion = LabelEfficientSegmentationLoss(
+        ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+        class_weights=class_weights,
+    )
     boundary_criterion = BoundaryLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     magnitude_distillation_criterion = MagnitudeTeacherDistillationLoss()
-    optimizer = AdamW(
-        [parameter for parameter in model.parameters() if parameter.requires_grad],
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+    trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    backbone = None
+    if args.model == "deeplabv3plus":
+        backbone = model.model.encoder
+    elif args.model == "segformer":
+        backbone = model.backbone
+    if backbone is not None and args.backbone_lr_multiplier != 1.0:
+        backbone_ids = {id(parameter) for parameter in backbone.parameters() if parameter.requires_grad}
+        parameter_groups = [
+            {
+                "params": [parameter for parameter in trainable_parameters if id(parameter) in backbone_ids],
+                "lr": args.lr * args.backbone_lr_multiplier,
+                "group_name": "backbone",
+            },
+            {
+                "params": [parameter for parameter in trainable_parameters if id(parameter) not in backbone_ids],
+                "lr": args.lr,
+                "group_name": "head",
+            },
+        ]
+    else:
+        parameter_groups = trainable_parameters
+    optimizer = AdamW(parameter_groups, lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = (
+        LambdaLR(
+            optimizer,
+            lr_lambda=lambda completed_epochs: 0.01 + 0.99 * 0.5 * (
+                1.0 + math.cos(math.pi * completed_epochs / args.epochs)
+            ),
+        )
+        if args.lr_scheduler == "cosine"
+        else None
     )
     counts = model.parameter_counts()
     if args.model == "deeplabv3plus":
@@ -430,6 +500,8 @@ def main() -> None:
             if boundary_logits is not None and args.boundary_loss_weight > 0.0:
                 loss = loss + args.boundary_loss_weight * boundary_criterion(boundary_logits, target)
             loss.backward()
+            if args.grad_clip_norm > 0.0:
+                torch.nn.utils.clip_grad_norm_(trainable_parameters, args.grad_clip_norm)
             optimizer.step()
             losses.append(float(loss.detach()))
         elapsed = time.perf_counter() - started
@@ -446,6 +518,10 @@ def main() -> None:
             "first_loss": losses[0],
             "last_loss": losses[-1],
             "seconds": elapsed,
+            "learning_rates": {
+                group.get("group_name", f"group_{index}"): group["lr"]
+                for index, group in enumerate(optimizer.param_groups)
+            },
             "validation": validation_metrics,
         }
         if routing_losses:
@@ -467,6 +543,8 @@ def main() -> None:
         if validation_metrics["mIoU"] > best_score:
             best_score = validation_metrics["mIoU"]
             torch.save({"model": model.state_dict(), "epoch": epoch}, best_path)
+        if scheduler is not None:
+            scheduler.step()
 
     best = torch.load(best_path, map_location=device, weights_only=False)
     model.load_state_dict(best["model"])

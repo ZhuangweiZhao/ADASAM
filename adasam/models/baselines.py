@@ -625,6 +625,7 @@ def build_baseline(
     encoder_name: str = "resnet50",
     segformer_variant: str = "b0",
     weights_root: str | Path = "weights",
+    freeze_batch_norm: bool = True,
     device: str | torch.device = "cpu",
 ) -> nn.Module:
     """Build a standard baseline model by name."""
@@ -632,6 +633,7 @@ def build_baseline(
         model = DeepLabV3PlusBaseline(
             num_classes=num_classes, encoder_name=encoder_name,
             pretrained=pretrained, weights_root=weights_root,
+            freeze_batch_norm=freeze_batch_norm,
         )
     elif name == "segformer":
         model = SegFormerBaseline(
