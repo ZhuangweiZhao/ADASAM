@@ -295,7 +295,6 @@ def main() -> None:
         shuffle=True,
         num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
-        drop_last=args.model in {"deeplabv3plus", "segformer"} and args.batch_size > 1,
     )
     validation_loader = DataLoader(
         validation, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
@@ -365,7 +364,13 @@ def main() -> None:
     variant = f"dapg_{prompt_version}" if prompt_version != "none" else "baseline"
     if prototype_version == "dpm":
         variant += "+dpm"
-    output_dir = resolve_path(args.output_dir) / f"neu_seg_ratio{args.label_ratio}_seed{args.seed}"
+    if args.model == "deeplabv3plus":
+        run_name = f"deeplabv3plus_{args.baseline_encoder}_ratio{args.label_ratio}_seed{args.seed}"
+    elif args.model == "segformer":
+        run_name = f"segformer_{args.segformer_variant}_ratio{args.label_ratio}_seed{args.seed}"
+    else:
+        run_name = f"neu_seg_ratio{args.label_ratio}_seed{args.seed}"
+    output_dir = resolve_path(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     print(
         f"variant={variant} adapter={adapter_name} "

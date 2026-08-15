@@ -17,7 +17,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", required=True)
     parser.add_argument("--checkpoint", default="weights/mobile_sam.pt")
-    parser.add_argument("--output-dir", default="runs/vaihingen_adaptive_survival")
+    parser.add_argument(
+        "--output-dir", default="runs/current/vaihingen/adaptive_survival/seed42"
+    )
     parser.add_argument("--epochs", type=int, default=32)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation", type=int, default=2)

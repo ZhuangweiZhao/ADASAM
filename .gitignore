@@ -12,6 +12,8 @@ dist/
 # ── Model weights (large binaries, fetched via tools/setup_mobilesam.py) ──
 *.pt
 *.pth
+*.safetensors
+*.safetensors.part
 !thirdparty/**/*.pt
 weights/*.pt
 thirdparty/MobileSAM/weights/*.pt
@@ -44,6 +46,7 @@ docs/*
 *.swp
 *.swo
 *~
+.weights/
 
 # ── Third-party vendored code (kept as-is) ──
 thirdparty/cat-sam/

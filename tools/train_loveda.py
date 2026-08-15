@@ -295,7 +295,6 @@ def main() -> None:
     train_loader = DataLoader(
         train_dataset,
         shuffle=True,
-        drop_last=args.model in {"deeplabv3plus", "segformer"} and args.batch_size > 1,
         **loader_options,
     )
     validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
@@ -351,7 +350,13 @@ def main() -> None:
         weight_decay=args.weight_decay,
     )
     counts = model.parameter_counts()
-    output_dir = resolve(args.output_dir) / f"loveda_ratio{args.label_ratio}_seed{args.seed}"
+    if args.model == "deeplabv3plus":
+        run_name = f"deeplabv3plus_{args.baseline_encoder}_ratio{args.label_ratio}_seed{args.seed}"
+    elif args.model == "segformer":
+        run_name = f"segformer_{args.segformer_variant}_ratio{args.label_ratio}_seed{args.seed}"
+    else:
+        run_name = f"loveda_ratio{args.label_ratio}_seed{args.seed}"
+    output_dir = resolve(args.output_dir) / run_name
     output_dir.mkdir(parents=True, exist_ok=True)
     best_path = output_dir / "best_model.pt"
     best_score = -1.0

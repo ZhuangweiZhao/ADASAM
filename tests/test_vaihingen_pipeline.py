@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from adasam.datasets.industrial import VaihingenSemanticDataset
-from tools.train_vaihingen import add_official_metrics, class_weights
+from tools.train_vaihingen import add_official_metrics, build_model, class_weights
 
 
 def _make_sample(root: Path, split: str = "train") -> None:
@@ -66,3 +66,29 @@ def test_official_metrics_exclude_clutter() -> None:
     assert result["mIoU_5"] == pytest.approx(0.7)
     assert result["mean_F1_5"] == pytest.approx(0.8)
     assert len(result["official_classes"]) == 5
+
+
+def test_vaihingen_builds_segformer_baseline() -> None:
+    args = type("Args", (), {
+        "model": "segformer",
+        "lora_rank": 0,
+        "pretrained": False,
+        "baseline_encoder": "resnet50",
+        "segformer_variant": "b0",
+    })()
+    model = build_model(args, torch.device("cpu"))
+    with torch.no_grad():
+        output = model(torch.rand(1, 3, 64, 96))
+    assert output.shape == (1, VaihingenSemanticDataset.NUM_CLASSES, 64, 96)
+
+
+def test_vaihingen_rejects_lora_for_standard_baseline() -> None:
+    args = type("Args", (), {
+        "model": "segformer",
+        "lora_rank": 4,
+        "pretrained": False,
+        "baseline_encoder": "resnet50",
+        "segformer_variant": "b0",
+    })()
+    with pytest.raises(ValueError, match="LoRA"):
+        build_model(args, torch.device("cpu"))

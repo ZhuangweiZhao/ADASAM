@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import urllib.request
@@ -29,11 +30,20 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-HF_URLS = {
-    "b0": "https://huggingface.co/nvidia/mit-b0/resolve/main/pytorch_model.bin",
-    "b1": "https://huggingface.co/nvidia/mit-b1/resolve/main/pytorch_model.bin",
-    "b2": "https://huggingface.co/nvidia/mit-b2/resolve/main/pytorch_model.bin",
+DEFAULT_ENDPOINT = "https://huggingface.co"
+HF_REPOS = {
+    "b0": "nvidia/mit-b0",
+    "b1": "nvidia/mit-b1",
+    "b2": "nvidia/mit-b2",
 }
+
+
+def resolve_endpoint(explicit: str | None) -> str:
+    """Endpoint order: --hf-endpoint > HF_ENDPOINT env > huggingface.co."""
+    if explicit:
+        return explicit.rstrip("/")
+    env = os.environ.get("HF_ENDPOINT", "").strip()
+    return env.rstrip("/") if env else DEFAULT_ENDPOINT
 
 
 def convert_state_dict(hf_state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -125,19 +135,26 @@ def convert_state_dict(hf_state: dict[str, torch.Tensor]) -> dict[str, torch.Ten
     return converted
 
 
-def convert_one(variant: str, weights_root: Path, force: bool = False) -> Path:
+def convert_one(variant: str, weights_root: Path, force: bool = False,
+                endpoint: str | None = None) -> Path:
     out = weights_root / f"mit_{variant}.pth"
     if out.exists() and not force:
         print(f"[skip] {out} already exists (use --force to re-download)")
         return out
-    url = HF_URLS[variant]
+    url = f"{resolve_endpoint(endpoint)}/{HF_REPOS[variant]}/resolve/main/pytorch_model.bin"
     tmp = weights_root / f"mit_{variant}.hf.bin"
     if tmp.exists():
-        print(f"[reuse] cached {tmp}")
-    else:
+        # cached download may be truncated from an interrupted run; validate it
+        try:
+            torch.load(tmp, map_location="cpu", weights_only=False)
+            print(f"[reuse] cached {tmp}")
+        except Exception:  # noqa: BLE001 - truncated/invalid cache
+            print(f"[reuse] cached {tmp} is invalid, re-downloading")
+            tmp.unlink(missing_ok=True)
+    if not tmp.exists():
         print(f"[download] {url}")
         urllib.request.urlretrieve(url, tmp)
-    hf_state = torch.load(tmp, map_location="cpu")
+    hf_state = torch.load(tmp, map_location="cpu", weights_only=False)
     if isinstance(hf_state, dict) and "state_dict" in hf_state:
         hf_state = hf_state["state_dict"]
     print(f"[convert] {len(hf_state)} HF keys -> official mit.py naming")
@@ -154,12 +171,17 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="convert b0, b1 and b2")
     parser.add_argument("--weights-root", type=Path, default=ROOT / "weights")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--hf-endpoint", default=None,
+        help="HuggingFace endpoint override (e.g. https://hf-mirror.com); "
+             "falls back to the HF_ENDPOINT env var, then huggingface.co",
+    )
     args = parser.parse_args()
 
     args.weights_root.mkdir(parents=True, exist_ok=True)
     variants = ["b0", "b1", "b2"] if args.all else [args.variant]
     for variant in variants:
-        convert_one(variant, args.weights_root, force=args.force)
+        convert_one(variant, args.weights_root, force=args.force, endpoint=args.hf_endpoint)
 
     # validate against the model definition
     from adasam.models.baselines import MixVisionTransformer  # noqa: PLC0415

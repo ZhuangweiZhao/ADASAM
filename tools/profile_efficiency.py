@@ -217,14 +217,18 @@ def main() -> None:
             "sam_image_size": sam_size,
             "total_params": counts["total"],
             "trainable_params": counts["trainable"],
-            "adapter": args.adapter if name != "unet" else "n/a",
-            "feature_scales": args.feature_scales if name != "unet" else "n/a",
-            "fusion_version": args.fusion_version if name != "unet" else "n/a",
-            "spatial_policy": args.spatial_policy if name != "unet" else "n/a",
-            "feature_retention_ratio": args.feature_retention_ratio if name != "unet" else "n/a",
+            "model_variant": (
+                args.baseline_encoder if name == "deeplabv3plus"
+                else args.segformer_variant if name == "segformer" else "n/a"
+            ),
+            "adapter": args.adapter if name in {"mobilesam", "ours"} else "n/a",
+            "feature_scales": args.feature_scales if name in {"mobilesam", "ours"} else "n/a",
+            "fusion_version": args.fusion_version if name in {"mobilesam", "ours"} else "n/a",
+            "spatial_policy": args.spatial_policy if name in {"mobilesam", "ours"} else "n/a",
+            "feature_retention_ratio": args.feature_retention_ratio if name in {"mobilesam", "ours"} else "n/a",
             "active_detail_representation_fraction": (
                 ((args.representation_budget - 1) / 2.0) * args.feature_retention_ratio
-                if name != "unet" and args.fusion_version == "semantic_budget" else 1.0
+                if name in {"mobilesam", "ours"} and args.fusion_version == "semantic_budget" else 1.0
             ),
             "FLOPs": adjusted_flops,
             "FLOPs_protocol": "THOP executed module graph plus explicit sparse 1x1 detail projections",
@@ -240,8 +244,14 @@ def main() -> None:
     if args.merge_csv and resolve(args.merge_csv).exists():
         with resolve(args.merge_csv).open(newline="", encoding="utf-8") as handle:
             old = list(csv.DictReader(handle))
-    merged = {(r.get("dataset"), r.get("model"), r.get("image_size")): r for r in old}
-    merged.update({(r["dataset"], r["model"], r["image_size"]): r for r in rows})
+    merged = {
+        (r.get("dataset"), r.get("model"), r.get("model_variant", "n/a"), r.get("image_size")): r
+        for r in old
+    }
+    merged.update({
+        (r["dataset"], r["model"], r["model_variant"], r["image_size"]): r
+        for r in rows
+    })
     all_rows = list(merged.values())
     fields = sorted({key for row in all_rows for key in row})
     with output.open("w", newline="", encoding="utf-8") as handle:

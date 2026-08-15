@@ -23,16 +23,26 @@ from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.adapters import inject_tinyvit_lora  # noqa: E402
 from adasam.datasets.industrial import VaihingenSemanticDataset  # noqa: E402
 from adasam.losses import LabelEfficientSegmentationLoss  # noqa: E402
-from adasam.models import LabelEfficientSAM  # noqa: E402
+from adasam.models import LabelEfficientSAM, build_baseline  # noqa: E402
 from adasam.utils import set_seed  # noqa: E402
 from tools.train_segmentation import evaluate  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train frozen MobileSAM on Vaihingen")
+    p = argparse.ArgumentParser(description="Train semantic segmentation models on Vaihingen")
+    p.add_argument(
+        "--model", choices=["mobilesam", "deeplabv3plus", "segformer"],
+        default="mobilesam",
+    )
+    p.add_argument(
+        "--baseline-encoder", choices=["resnet50", "resnet101", "mobilenet_v2"],
+        default="resnet50",
+    )
+    p.add_argument("--segformer-variant", choices=["b0", "b1", "b2"], default="b0")
+    p.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--data-root", required=True)
     p.add_argument("--checkpoint", default="weights/mobile_sam.pt")
-    p.add_argument("--output-dir", default="runs/vaihingen")
+    p.add_argument("--output-dir", default="runs/development/vaihingen")
     p.add_argument("--run-name", default=None, help="Explicit leaf directory; prevents configuration collisions")
     p.add_argument(
         "--protocol", choices=["development", "official_full_train"],
@@ -94,7 +104,20 @@ def area_split(dataset: VaihingenSemanticDataset, val_fraction: float, val_seed:
     return sorted(train_pool[:selected_count]), validation, sorted(validation_areas), len(train_pool)
 
 
-def build_model(args: argparse.Namespace, device: torch.device) -> LabelEfficientSAM:
+def build_model(args: argparse.Namespace, device: torch.device) -> torch.nn.Module:
+    model_name = getattr(args, "model", "mobilesam")
+    if model_name in {"deeplabv3plus", "segformer"}:
+        if getattr(args, "lora_rank", 0) > 0:
+            raise ValueError("LoRA is only available for MobileSAM")
+        return build_baseline(
+            model_name,
+            num_classes=VaihingenSemanticDataset.NUM_CLASSES,
+            pretrained=args.pretrained,
+            encoder_name=args.baseline_encoder,
+            segformer_variant=args.segformer_variant,
+            weights_root=ROOT / "weights",
+            device=device,
+        )
     model = LabelEfficientSAM.build(
         resolve(args.checkpoint), num_classes=VaihingenSemanticDataset.NUM_CLASSES,
         img_size=args.sam_image_size, device=device, decoder_dim=args.decoder_dim,
@@ -180,13 +203,18 @@ def main() -> None:
     optimizer = AdamW((p for p in model.parameters() if p.requires_grad), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.lr * 0.01)
     scaler = torch.amp.GradScaler("cuda", enabled=args.amp and device.type == "cuda")
-    default_name = (
-        f"{args.fusion_version}_dense_ratio{args.label_ratio}_seed{args.seed}"
-        if args.fusion_version != "semantic_budget"
-        else f"semantic_budget_{args.spatial_policy}_r{args.feature_retention_ratio:g}_ratio{args.label_ratio}_seed{args.seed}"
-    )
-    if args.lora_rank > 0:
-        default_name = f"{default_name}_lora_r{args.lora_rank}"
+    if args.model == "deeplabv3plus":
+        default_name = f"deeplabv3plus_{args.baseline_encoder}_ratio{args.label_ratio}_seed{args.seed}"
+    elif args.model == "segformer":
+        default_name = f"segformer_{args.segformer_variant}_ratio{args.label_ratio}_seed{args.seed}"
+    else:
+        default_name = (
+            f"{args.fusion_version}_dense_ratio{args.label_ratio}_seed{args.seed}"
+            if args.fusion_version != "semantic_budget"
+            else f"semantic_budget_{args.spatial_policy}_r{args.feature_retention_ratio:g}_ratio{args.label_ratio}_seed{args.seed}"
+        )
+        if args.lora_rank > 0:
+            default_name = f"{default_name}_lora_r{args.lora_rank}"
     output = resolve(args.output_dir) / (args.run_name or default_name)
     output.mkdir(parents=True, exist_ok=True)
     best_path = output / "best_model.pt"
@@ -238,7 +266,8 @@ def main() -> None:
         add_official_metrics(evaluate(model, test_loader, device, 6, 255, conditioned=True))
         if test_loader is not None else None
     )
-    metrics = {"dataset": "ISPRS Vaihingen", "classes": VaihingenSemanticDataset.CLASS_NAMES,
+    metrics = {"dataset": "ISPRS Vaihingen", "model": args.model,
+               "classes": VaihingenSemanticDataset.CLASS_NAMES,
                "best_epoch": payload["epoch"], "validation_areas": val_areas,
                "train_samples": len(train_indices), "validation_samples": len(val_indices),
                "test_samples": test_samples, "split_protocol": args.protocol,

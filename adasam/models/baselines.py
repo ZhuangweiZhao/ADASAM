@@ -18,8 +18,10 @@ internally apply ImageNet normalization, so the training loop is unchanged.
 
 from __future__ import annotations
 
-import math
+import os
+import ssl
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import torch
 import torch.nn as nn
@@ -57,6 +59,17 @@ SEGFORMER_WEIGHTS = {
     "b2": "mit_b2.pth",
 }
 
+DEEPLAB_ENCODER_WEIGHTS = {
+    "resnet50": "resnet50_imagenet.safetensors",
+    "resnet101": "resnet101_imagenet.safetensors",
+    "mobilenet_v2": "mobilenet_v2_imagenet.safetensors",
+}
+
+DEEPLAB_ENCODER_REPOS = {
+    name: f"smp-hub/{name}.imagenet" for name in DEEPLAB_ENCODER_WEIGHTS
+}
+DEFAULT_HF_ENDPOINT = "https://hf-mirror.com"
+
 
 # ───────────────────────── DeepLabV3+ ─────────────────────────
 
@@ -65,7 +78,9 @@ class DeepLabV3PlusBaseline(nn.Module):
     """DeepLabV3+ (ResNet encoder) via segmentation-models-pytorch."""
 
     def __init__(self, num_classes: int, encoder_name: str = "resnet50",
-                 pretrained: bool = True) -> None:
+                 pretrained: bool = True, freeze_batch_norm: bool = True,
+                 weights_root: str | Path = "weights",
+                 allow_download: bool = True) -> None:
         super().__init__()
         try:
             import segmentation_models_pytorch as smp  # noqa: PLC0415
@@ -76,13 +91,133 @@ class DeepLabV3PlusBaseline(nn.Module):
             ) from exc
         self.encoder_name = encoder_name
         self.pretrained = pretrained
+        self.freeze_batch_norm = freeze_batch_norm
         self.num_classes = num_classes
+        if encoder_name not in DEEPLAB_ENCODER_WEIGHTS:
+            supported = "|".join(DEEPLAB_ENCODER_WEIGHTS)
+            raise ValueError(
+                f"unsupported DeepLabV3+ encoder {encoder_name!r}; expected {supported}"
+            )
+        # Construct without remote weights. Project-local checkpoints make
+        # baseline runs reproducible and avoid an implicit Hugging Face request.
         self.model = smp.DeepLabV3Plus(
             encoder_name=encoder_name,
-            encoder_weights="imagenet" if pretrained else None,
+            encoder_weights=None,
             in_channels=3,
             classes=num_classes,
         )
+        if pretrained:
+            path = Path(weights_root) / DEEPLAB_ENCODER_WEIGHTS[encoder_name]
+            if path.exists():
+                try:
+                    self._load_encoder_weights(path)
+                    return
+                except Exception:
+                    if not allow_download:
+                        raise
+                    partial_path = path.with_suffix(path.suffix + ".part")
+                    if not partial_path.exists() or path.stat().st_size > partial_path.stat().st_size:
+                        path.replace(partial_path)
+                    else:
+                        path.unlink()
+                    print(f"Incomplete local weights detected; resuming {partial_path}")
+            elif not allow_download:
+                raise FileNotFoundError(
+                    f"DeepLabV3+ {encoder_name} ImageNet weights not found at "
+                    f"project-local path {path}."
+                )
+            self._download_encoder_weights(path)
+            self._load_encoder_weights(path)
+
+    def _download_encoder_weights(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        endpoint = os.environ.get("HF_ENDPOINT", DEFAULT_HF_ENDPOINT).rstrip("/")
+        repo_id = DEEPLAB_ENCODER_REPOS[self.encoder_name]
+        url = f"{endpoint}/{repo_id}/resolve/main/model.safetensors?download=true"
+        partial_path = path.with_suffix(path.suffix + ".part")
+        print(
+            f"Downloading {url}\nDestination: {path}"
+        )
+        try:
+            try:
+                import certifi  # noqa: PLC0415
+            except ImportError as exc:
+                raise ImportError(
+                    "HTTPS download requires certifi; install it with: pip install certifi"
+                ) from exc
+            # Some Windows Conda installations contain malformed certificates
+            # in the system store. Use certifi directly instead of loading it.
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            ssl_context.check_hostname = True
+            ssl_context.load_verify_locations(cafile=certifi.where())
+            total = 0
+            for _attempt in range(20):
+                offset = partial_path.stat().st_size if partial_path.exists() else 0
+                headers = {"User-Agent": "AdaSAM/1.0"}
+                if offset:
+                    headers["Range"] = f"bytes={offset}-"
+                request = Request(url, headers=headers)
+                with urlopen(request, timeout=60, context=ssl_context) as response:
+                    is_partial = response.status == 206
+                    content_range = response.headers.get("Content-Range", "")
+                    if "/" in content_range:
+                        total = int(content_range.rsplit("/", 1)[1])
+                    elif not is_partial:
+                        total = int(response.headers.get("Content-Length", 0))
+                    mode = "ab" if offset and is_partial else "wb"
+                    if mode == "wb":
+                        offset = 0
+                    before = offset
+                    with partial_path.open(mode) as output:
+                        while chunk := response.read(1024 * 1024):
+                            output.write(chunk)
+                    current = partial_path.stat().st_size
+                if current <= before:
+                    raise RuntimeError("download made no progress")
+                if total:
+                    print(f"  {min(100, current * 100 // total)}% ({current}/{total} bytes)")
+                    if current >= total:
+                        break
+                else:
+                    print(f"  downloaded {current} bytes")
+                    break
+            else:
+                raise RuntimeError("download remained incomplete after 20 attempts")
+            self._validate_safetensors(partial_path)
+            partial_path.replace(path)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to download {url}; partial data was kept at {partial_path} "
+                "for the next retry"
+            ) from exc
+
+    @staticmethod
+    def _validate_safetensors(path: Path) -> None:
+        from safetensors import safe_open  # noqa: PLC0415
+
+        with safe_open(str(path), framework="pt", device="cpu") as handle:
+            if not list(handle.keys()):
+                raise RuntimeError(f"no tensors found in {path}")
+
+    def _load_encoder_weights(self, path: Path) -> None:
+        try:
+            from safetensors.torch import load_file  # noqa: PLC0415
+        except ImportError as exc:  # pragma: no cover - installed with SMP
+            raise ImportError(
+                "Loading local DeepLabV3+ weights requires safetensors; "
+                "install it with: pip install safetensors"
+            ) from exc
+        state = load_file(str(path), device="cpu")
+        self.model.encoder.load_state_dict(state, strict=True)
+
+    def train(self, mode: bool = True) -> "DeepLabV3PlusBaseline":
+        super().train(mode)
+        if mode and self.freeze_batch_norm:
+            for module in self.modules():
+                if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                    module.eval()
+        return self
 
     def _preprocess(self, image: torch.Tensor) -> torch.Tensor:
         mean = torch.tensor(PIXEL_MEAN, device=image.device, dtype=image.dtype).view(1, 3, 1, 1)
@@ -148,16 +283,19 @@ class DropPath(nn.Module):
 
 
 class DWConv(nn.Module):
-    """Official SegFormer MixFFN depthwise conv over the flattened sequence."""
+    """Official SegFormer MixFFN depthwise conv over the 2D feature map."""
 
     def __init__(self, dim: int = 768) -> None:
         super().__init__()
         self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, bias=True, groups=dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, N, C] -> [B, C, N, 1] -> conv over N -> back
-        x = x.permute(0, 2, 1).contiguous().unsqueeze(-1)
-        x = self.dwconv(x).squeeze(-1).permute(0, 2, 1).contiguous()
+    def forward(self, x: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        batch, tokens, channels = x.shape
+        if tokens != height * width:
+            raise ValueError(f"token count {tokens} does not match {height}x{width}")
+        x = x.transpose(1, 2).reshape(batch, channels, height, width)
+        x = self.dwconv(x)
+        x = x.flatten(2).transpose(1, 2).contiguous()
         return x
 
 
@@ -176,9 +314,9 @@ class Mlp(nn.Module):
         self.fc2 = nn.Linear(hidden_features, out_features)
         self.drop = nn.Dropout(drop)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, height: int, width: int) -> torch.Tensor:
         x = self.fc1(x)
-        x = self.dwconv(x)
+        x = self.dwconv(x, height, width)
         x = self.act(x)
         x = self.drop(x)
         x = self.fc2(x)
@@ -208,13 +346,12 @@ class Attention(nn.Module):
             self.sr = nn.Conv2d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
             self.norm = nn.LayerNorm(dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, height: int, width: int) -> torch.Tensor:
         batch, num_tokens, dim = x.shape
         heads = self.num_heads
         head_dim = dim // heads
         q = self.q(x).reshape(batch, num_tokens, heads, head_dim).permute(0, 2, 1, 3)
         if self.sr_ratio > 1:
-            height = width = int(math.sqrt(num_tokens))
             x_ = x.permute(0, 2, 1).reshape(batch, dim, height, width)
             x_ = self.sr(x_).reshape(batch, dim, -1).permute(0, 2, 1)
             x_ = self.norm(x_)
@@ -248,9 +385,9 @@ class Block(nn.Module):
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.drop_path(self.attn(self.norm1(x)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+    def forward(self, x: torch.Tensor, height: int, width: int) -> torch.Tensor:
+        x = x + self.drop_path(self.attn(self.norm1(x), height, width))
+        x = x + self.drop_path(self.mlp(self.norm2(x), height, width))
         return x
 
 
@@ -306,28 +443,28 @@ class MixVisionTransformer(nn.Module):
 
         self.pos_drop = nn.Dropout(p=drop_rate)
         block_index = 0
-        self.block1 = nn.Sequential(*[
+        self.block1 = nn.ModuleList([
             Block(embed_dims[0], num_heads[0], mlp_ratio, qkv_bias=qkv_bias,
                   drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[block_index + i],
                   norm_layer=norm_layer, sr_ratio=sr_ratios[0])
             for i in range(depths[0])
         ])
         block_index += depths[0]
-        self.block2 = nn.Sequential(*[
+        self.block2 = nn.ModuleList([
             Block(embed_dims[1], num_heads[1], mlp_ratio, qkv_bias=qkv_bias,
                   drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[block_index + i],
                   norm_layer=norm_layer, sr_ratio=sr_ratios[1])
             for i in range(depths[1])
         ])
         block_index += depths[1]
-        self.block3 = nn.Sequential(*[
+        self.block3 = nn.ModuleList([
             Block(embed_dims[2], num_heads[2], mlp_ratio, qkv_bias=qkv_bias,
                   drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[block_index + i],
                   norm_layer=norm_layer, sr_ratio=sr_ratios[2])
             for i in range(depths[2])
         ])
         block_index += depths[2]
-        self.block4 = nn.Sequential(*[
+        self.block4 = nn.ModuleList([
             Block(embed_dims[3], num_heads[3], mlp_ratio, qkv_bias=qkv_bias,
                   drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[block_index + i],
                   norm_layer=norm_layer, sr_ratio=sr_ratios[3])
@@ -360,25 +497,29 @@ class MixVisionTransformer(nn.Module):
 
         x, (h1, w1) = self.patch_embed1(x)
         x = self.pos_drop(x)
-        x = self.block1(x)
+        for block in self.block1:
+            x = block(x, h1, w1)
         x = self.norm1(x)
         x = x.reshape(batch, h1, w1, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x)
 
         x, (h2, w2) = self.patch_embed2(x)
-        x = self.block2(x)
+        for block in self.block2:
+            x = block(x, h2, w2)
         x = self.norm2(x)
         x = x.reshape(batch, h2, w2, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x)
 
         x, (h3, w3) = self.patch_embed3(x)
-        x = self.block3(x)
+        for block in self.block3:
+            x = block(x, h3, w3)
         x = self.norm3(x)
         x = x.reshape(batch, h3, w3, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x)
 
         x, (h4, w4) = self.patch_embed4(x)
-        x = self.block4(x)
+        for block in self.block4:
+            x = block(x, h4, w4)
         x = self.norm4(x)
         x = x.reshape(batch, h4, w4, -1).permute(0, 3, 1, 2).contiguous()
         outs.append(x)
@@ -443,6 +584,8 @@ class SegFormerBaseline(nn.Module):
         state = checkpoint.get("state_dict", checkpoint)
         state = {k: v for k, v in state.items() if not k.startswith("head.")}
         missing, unexpected = self.backbone.load_state_dict(state, strict=False)
+        if missing:
+            raise RuntimeError(f"missing keys in {path}: {missing[:5]} ...")
         if unexpected:
             raise RuntimeError(f"unexpected keys in {path}: {unexpected[:5]} ...")
         # Pretrained backbone loads into the frozen-partition accounting as trainable
@@ -487,7 +630,8 @@ def build_baseline(
     """Build a standard baseline model by name."""
     if name == "deeplabv3plus":
         model = DeepLabV3PlusBaseline(
-            num_classes=num_classes, encoder_name=encoder_name, pretrained=pretrained
+            num_classes=num_classes, encoder_name=encoder_name,
+            pretrained=pretrained, weights_root=weights_root,
         )
     elif name == "segformer":
         model = SegFormerBaseline(
