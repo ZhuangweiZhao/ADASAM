@@ -341,7 +341,7 @@ def test_scsr_starts_uniform_and_records_finite_routing() -> None:
     assert torch.isfinite(routing["entropy"]).all()
 
 
-def test_regional_semantic_starts_as_dense_sum_and_exposes_class_routing() -> None:
+def test_regional_semantic_starts_near_dense_sum_and_exposes_class_routing() -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
         use_cat_adapter=False, fusion_version="regional_semantic",
@@ -359,17 +359,25 @@ def test_regional_semantic_starts_as_dense_sum_and_exposes_class_routing() -> No
         if value.shape[-2:] != target_size else value
         for value in aligned
     ]
-    expected = decoder.refine(sum(aligned))
+    dense_sum = sum(aligned)
+    routing = decoder.last_routing
+    weights = routing["weights"]
+    calibrated = 3.0 * sum(
+        weights[:, index : index + 1] * value for index, value in enumerate(aligned)
+    )
+    expected = decoder.refine(
+        dense_sum + routing["residual_strength"] * (calibrated - dense_sum)
+    )
     assert torch.allclose(fused, expected, atol=1e-6)
 
-    routing = decoder.last_routing
     assert routing is not None
     assert routing["weights"].shape == (2, 3, *target_size)
     assert routing["class_scale_weights"].shape == (4, 3)
     assert torch.allclose(
         routing["class_scale_weights"].sum(1), torch.ones(4), atol=1e-6
     )
-    assert float(routing["residual_strength"]) == pytest.approx(0.0)
+    assert 0.0 < float(routing["residual_strength"]) < 0.01
+    assert 0.0 < float(routing["prototype_scale"]) < 0.01
 
 
 def test_regional_semantic_router_receives_gradients() -> None:

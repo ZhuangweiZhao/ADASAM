@@ -9,7 +9,11 @@ import torch
 
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices
 from adasam.losses import LabelEfficientSegmentationLoss
-from tools.train_loveda import collect_routing_statistics, parse_args
+from tools.train_loveda import (
+    collect_routing_statistics,
+    confusion_aware_region_prototype_loss,
+    parse_args,
+)
 
 
 def make_loveda_sample(root: Path, split: str = "Train") -> None:
@@ -127,11 +131,35 @@ def test_loveda_accepts_regional_semantic_configuration(monkeypatch) -> None:
         [
             "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
             "--fusion-version", "regional_semantic", "--progressive-aux-weight", "0.2",
+            "--regional-contrast-weight", "0.1",
+            "--regional-contrast-temperature", "0.2",
         ],
     )
     args = parse_args()
     assert args.fusion_version == "regional_semantic"
     assert args.progressive_aux_weight == 0.2
+    assert args.regional_contrast_weight == 0.1
+    assert args.regional_contrast_temperature == 0.2
+
+
+def test_confusion_aware_region_prototype_loss_rewards_correct_similarity() -> None:
+    target = torch.tensor([[[3, 0, 2], [5, 6, 255]]])
+    correct = torch.full((1, 7, 2, 3), -2.0)
+    for row, column, class_id in ((0, 0, 3), (0, 1, 0), (0, 2, 2), (1, 0, 5), (1, 1, 6)):
+        correct[0, class_id, row, column] = 2.0
+    correct.requires_grad_()
+    wrong = -correct
+    correct_loss = confusion_aware_region_prototype_loss(
+        {"prototype_similarity_logits": correct}, target, temperature=0.2
+    )
+    wrong_loss = confusion_aware_region_prototype_loss(
+        {"prototype_similarity_logits": wrong}, target, temperature=0.2
+    )
+    assert correct_loss is not None and wrong_loss is not None
+    assert correct_loss < wrong_loss
+    correct_loss.backward()
+    assert correct.grad is not None
+    assert torch.isfinite(correct.grad).all()
 
 
 def test_loveda_accepts_semantic_progressive_v2_configuration(monkeypatch) -> None:

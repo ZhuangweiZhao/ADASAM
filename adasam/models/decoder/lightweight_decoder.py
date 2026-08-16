@@ -216,11 +216,11 @@ class LightweightSemanticDecoder(nn.Module):
             if fusion_version == "regional_semantic" else None
         )
         self.regional_prototype_scale = (
-            nn.Parameter(torch.zeros(()))
+            nn.Parameter(torch.full((), 0.1))
             if fusion_version == "regional_semantic" else None
         )
         self.regional_residual_strength = (
-            nn.Parameter(torch.zeros(()))
+            nn.Parameter(torch.full((), 0.1))
             if fusion_version == "regional_semantic" else None
         )
         self.last_routing = None
@@ -257,6 +257,22 @@ class LightweightSemanticDecoder(nn.Module):
         if self.dense_prompt_proj is not None:
             nn.init.zeros_(self.dense_prompt_proj.weight)
             nn.init.zeros_(self.token_output.weight)
+
+    @staticmethod
+    def _bounded_nonnegative(raw: torch.Tensor) -> torch.Tensor:
+        """Map an unconstrained scalar to [0, 0.5) without sign ambiguity."""
+        squared = raw.square()
+        return 0.5 * squared / (1.0 + squared)
+
+    def regional_prototype_value(self) -> torch.Tensor:
+        if self.regional_prototype_scale is None:
+            raise RuntimeError("regional semantic fusion is disabled")
+        return self._bounded_nonnegative(self.regional_prototype_scale)
+
+    def regional_residual_value(self) -> torch.Tensor:
+        if self.regional_residual_strength is None:
+            raise RuntimeError("regional semantic fusion is disabled")
+        return self._bounded_nonnegative(self.regional_residual_strength)
 
     def _retained_mask(self, importance: torch.Tensor) -> torch.Tensor:
         """Select the exact top-ratio spatial positions independently per image."""
@@ -486,7 +502,7 @@ class LightweightSemanticDecoder(nn.Module):
             )
             regional_logits = (
                 coarse_at_target
-                + self.regional_prototype_scale * prototype_similarity
+                + self.regional_prototype_value() * prototype_similarity
             )
             regional_probability = torch.softmax(regional_logits, dim=1)
 
@@ -504,7 +520,7 @@ class LightweightSemanticDecoder(nn.Module):
                 + weights[:, 1:2] * p4
                 + weights[:, 2:3] * anchor
             )
-            residual_strength = 0.5 * torch.tanh(self.regional_residual_strength)
+            residual_strength = self.regional_residual_value()
             fused = dense_sum + residual_strength * (calibrated - dense_sum)
             self.last_routing = {
                 "weights": weights.detach(),
@@ -514,7 +530,9 @@ class LightweightSemanticDecoder(nn.Module):
                 "coarse_logits": regional_logits,
                 "coarse_probability": regional_probability.detach(),
                 "prototype_similarity": prototype_similarity.detach(),
+                "prototype_similarity_logits": prototype_similarity,
                 "class_scale_weights": class_scale_weights.detach(),
+                "prototype_scale": self.regional_prototype_value().detach(),
                 "residual_strength": residual_strength.detach(),
             }
         else:

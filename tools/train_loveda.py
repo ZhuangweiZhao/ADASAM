@@ -74,6 +74,14 @@ def parse_args() -> argparse.Namespace:
         "--progressive-aux-weight", type=float, default=0.2,
         help="coarse semantic supervision weight for semantic_progressive fusion",
     )
+    parser.add_argument(
+        "--regional-contrast-weight", type=float, default=0.0,
+        help="weight for Water/Forest confusion-aware regional prototype discrimination",
+    )
+    parser.add_argument(
+        "--regional-contrast-temperature", type=float, default=0.2,
+        help="temperature for confusion-aware regional prototype similarities",
+    )
     parser.add_argument("--utility-gate-weight", type=float, default=0.1)
     parser.add_argument("--utility-gate-temperature", type=float, default=0.25)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
@@ -337,12 +345,51 @@ def collect_routing_statistics(
                 }
                 for class_id in range(num_classes)
             },
-            "prototype_scale": float(model.decoder.regional_prototype_scale.detach().cpu()),
-            "residual_strength": float(
-                (0.5 * torch.tanh(model.decoder.regional_residual_strength.detach())).cpu()
-            ),
+            "prototype_scale": float(model.decoder.regional_prototype_value().detach().cpu()),
+            "residual_strength": float(model.decoder.regional_residual_value().detach().cpu()),
         }
     return result
+
+
+def confusion_aware_region_prototype_loss(
+    routing: dict[str, torch.Tensor] | None,
+    target: torch.Tensor,
+    ignore_index: int = 255,
+    temperature: float = 0.2,
+) -> torch.Tensor | None:
+    """Separate Water and Forest prototypes from their dominant confusions."""
+    if routing is None or "prototype_similarity_logits" not in routing:
+        return None
+    if temperature <= 0.0:
+        raise ValueError("regional contrast temperature must be positive")
+    similarity = routing["prototype_similarity_logits"]
+    if similarity.shape[1] < 7:
+        raise ValueError("LoveDA regional prototype loss requires seven classes")
+    routed_target = F.interpolate(
+        target[:, None].float(), similarity.shape[-2:], mode="nearest"
+    )[:, 0].long()
+    losses = []
+    # Water vs Background/Road; Forest vs Agriculture.
+    for group in ((3, 0, 2), (5, 6)):
+        group_logits = similarity[:, list(group)].permute(0, 2, 3, 1)
+        class_losses = []
+        for local_id, class_id in enumerate(group):
+            selected = (routed_target == class_id) & (routed_target != ignore_index)
+            if selected.any():
+                local_target = torch.full(
+                    (int(selected.sum()),), local_id,
+                    dtype=torch.long, device=target.device,
+                )
+                class_losses.append(
+                    F.cross_entropy(group_logits[selected] / temperature, local_target)
+                )
+        if class_losses:
+            losses.append(
+                torch.stack(class_losses).mean()
+            )
+    if not losses:
+        return similarity.sum() * 0.0
+    return torch.stack(losses).mean()
 
 
 def main() -> None:
@@ -443,6 +490,10 @@ def main() -> None:
     )
     if args.lovasz_weight < 0.0:
         raise ValueError("--lovasz-weight must be non-negative")
+    if args.regional_contrast_weight < 0.0:
+        raise ValueError("--regional-contrast-weight must be non-negative")
+    if args.regional_contrast_temperature <= 0.0:
+        raise ValueError("--regional-contrast-temperature must be positive")
     lovasz_criterion = LovaszSoftmaxLoss(
         ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
         class_weights=args.lovasz_class_weights,
@@ -527,6 +578,7 @@ def main() -> None:
         utility_gate_target_means = []
         utility_gate_agreements = []
         lovasz_losses = []
+        regional_contrast_losses = []
         for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
@@ -543,6 +595,16 @@ def main() -> None:
                 loss = loss + args.lovasz_weight * lovasz_loss
                 lovasz_losses.append(float(lovasz_loss.detach()))
             budget_routing = getattr(getattr(model, "decoder", None), "last_routing", None)
+            if args.regional_contrast_weight > 0.0:
+                regional_contrast_loss = confusion_aware_region_prototype_loss(
+                    budget_routing,
+                    target,
+                    ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+                    temperature=args.regional_contrast_temperature,
+                )
+                if regional_contrast_loss is not None:
+                    loss = loss + args.regional_contrast_weight * regional_contrast_loss
+                    regional_contrast_losses.append(float(regional_contrast_loss.detach()))
             if (
                 budget_routing is not None
                 and "coarse_logits" in budget_routing
@@ -658,10 +720,10 @@ def main() -> None:
                 record["regional_semantic"] = {
                     "class_scale_weights": learned.detach().cpu().tolist(),
                     "prototype_scale": float(
-                        model.decoder.regional_prototype_scale.detach().cpu()
+                        model.decoder.regional_prototype_value().detach().cpu()
                     ),
                     "residual_strength": float(
-                        (0.5 * torch.tanh(model.decoder.regional_residual_strength.detach())).cpu()
+                        model.decoder.regional_residual_value().detach().cpu()
                     ),
                 }
         if routing_losses:
@@ -694,6 +756,10 @@ def main() -> None:
             )
         if lovasz_losses:
             record["mean_lovasz_loss"] = sum(lovasz_losses) / len(lovasz_losses)
+        if regional_contrast_losses:
+            record["mean_regional_contrast_loss"] = (
+                sum(regional_contrast_losses) / len(regional_contrast_losses)
+            )
         history.append(record)
         print(json.dumps(record))
         if validation_metrics["mIoU"] > best_score:
