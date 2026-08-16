@@ -89,6 +89,21 @@ def test_loveda_accepts_rural_domain_configuration(monkeypatch) -> None:
     assert args.rural_sampling_multiplier == 1.5
 
 
+def test_loveda_accepts_semantic_progressive_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
+            "--fusion-version", "semantic_progressive",
+            "--progressive-aux-weight", "0.2",
+        ],
+    )
+    args = parse_args()
+    assert args.fusion_version == "semantic_progressive"
+    assert args.progressive_aux_weight == 0.2
+
+
 def test_routing_statistics_accepts_no_ignore_index() -> None:
     class Decoder:
         fusion_version = "scsr"

@@ -56,16 +56,19 @@ class LightweightSemanticDecoder(nn.Module):
             )
         if fusion_version not in {
             "hierarchical", "concat", "sum", "global", "image_conditioned",
-            "scsr", "scsr_v2", "scsr_task", "semantic_budget",
+            "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive",
         }:
             raise ValueError(
                 "fusion_version must be hierarchical, concat, global, "
-                "sum, image_conditioned, scsr, scsr_v2, scsr_task, or semantic_budget"
+                "sum, image_conditioned, scsr, scsr_v2, scsr_task, semantic_budget, "
+                "or semantic_progressive"
             )
         if fusion_version in {"scsr", "scsr_v2", "scsr_task"} and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
         if fusion_version == "semantic_budget" and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
+        if fusion_version == "semantic_progressive" and feature_scales != "p3_p4_embedding":
+            raise ValueError("semantic_progressive requires feature_scales=p3_p4_embedding")
         if representation_budget not in {1, 2, 3}:
             raise ValueError("representation_budget must be 1, 2, or 3")
         if spatial_policy not in {"adaptive", "static", "magnitude", "distilled_magnitude", "random"}:
@@ -174,6 +177,29 @@ class LightweightSemanticDecoder(nn.Module):
         if self.semantic_budget_gate is not None:
             nn.init.zeros_(self.semantic_budget_gate.weight)
             nn.init.zeros_(self.semantic_budget_gate.bias)
+        semantic_gate_channels = decoder_dim * 2 + num_classes + 1
+        self.semantic_coarse_head = (
+            nn.Conv2d(decoder_dim, num_classes, 1)
+            if fusion_version == "semantic_progressive" else None
+        )
+        self.semantic_p4_gate = (
+            nn.Sequential(
+                ConvNormAct(semantic_gate_channels, decoder_dim),
+                nn.Conv2d(decoder_dim, 1, 1),
+            )
+            if fusion_version == "semantic_progressive" else None
+        )
+        self.semantic_p3_gate = (
+            nn.Sequential(
+                ConvNormAct(semantic_gate_channels, decoder_dim),
+                nn.Conv2d(decoder_dim, 1, 1),
+            )
+            if fusion_version == "semantic_progressive" else None
+        )
+        for gate in (self.semantic_p4_gate, self.semantic_p3_gate):
+            if gate is not None:
+                nn.init.zeros_(gate[-1].weight)
+                nn.init.zeros_(gate[-1].bias)
         self.last_routing = None
         self.post_fusion_adapter = (
             CATAdapter(
@@ -290,6 +316,58 @@ class LightweightSemanticDecoder(nn.Module):
                 fused = F.interpolate(fused, size=current.shape[-2:], mode="bilinear", align_corners=False)
                 block = self.p3_fuse if name == "P3" else self.p4_fuse
                 fused = block(current + fused)
+        elif self.fusion_version == "semantic_progressive":
+            anchor = self.lateral["embedding"](features["embedding"])
+            coarse_logits = self.semantic_coarse_head(anchor)
+            coarse_probability = torch.softmax(coarse_logits, dim=1)
+            coarse_entropy = -(
+                coarse_probability.clamp_min(1e-8)
+                * coarse_probability.clamp_min(1e-8).log()
+            ).sum(dim=1, keepdim=True)
+            coarse_entropy = coarse_entropy / torch.log(
+                coarse_entropy.new_tensor(float(coarse_probability.shape[1]))
+            )
+            stage_gates = []
+            fused = anchor
+            for name, gate, block in (
+                ("P4", self.semantic_p4_gate, self.p4_fuse),
+                ("P3", self.semantic_p3_gate, self.p3_fuse),
+            ):
+                current = self.lateral[name](features[name])
+                fused = F.interpolate(
+                    fused, size=current.shape[-2:], mode="bilinear", align_corners=False
+                )
+                probability = F.interpolate(
+                    coarse_probability, size=current.shape[-2:], mode="bilinear",
+                    align_corners=False,
+                )
+                uncertainty = F.interpolate(
+                    coarse_entropy, size=current.shape[-2:], mode="bilinear",
+                    align_corners=False,
+                )
+                gate_logits = gate(torch.cat((fused, current, probability, uncertainty), dim=1))
+                # Zero initialization yields gate=1, exactly matching fixed progressive fusion.
+                stage_gate = 2.0 * torch.sigmoid(gate_logits)
+                fused = block(fused + stage_gate * current)
+                stage_gates.append(stage_gate)
+            p4_gate = F.interpolate(
+                stage_gates[0], size=stage_gates[1].shape[-2:], mode="bilinear",
+                align_corners=False,
+            )
+            raw_weights = torch.cat(
+                (stage_gates[1], p4_gate, torch.ones_like(stage_gates[1])), dim=1
+            )
+            weights = raw_weights / raw_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            self.last_routing = {
+                "weights": weights.detach(),
+                "entropy": (
+                    -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)
+                ).detach(),
+                "stage_gates": torch.cat((stage_gates[1], p4_gate), dim=1).detach(),
+                "coarse_logits": coarse_logits,
+                "coarse_probability": coarse_probability.detach(),
+                "coarse_uncertainty": coarse_entropy.detach(),
+            }
         else:
             if self.fusion_version == "semantic_budget":
                 # Embedding is the semantic anchor. P3/P4 are injected only when

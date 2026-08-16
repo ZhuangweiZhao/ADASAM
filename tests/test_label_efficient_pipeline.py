@@ -150,7 +150,7 @@ def test_hierarchical_feature_probes_forward_backward(feature_scales: str) -> No
     assert any(parameter.grad is not None for parameter in model.decoder.parameters())
 
 
-@pytest.mark.parametrize("fusion_version", ["concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task"])
+@pytest.mark.parametrize("fusion_version", ["concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_progressive"])
 def test_controlled_fusion_variants(fusion_version: str) -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
@@ -160,6 +160,23 @@ def test_controlled_fusion_variants(fusion_version: str) -> None:
     assert logits.shape == (2, 4, 128, 128)
     logits.mean().backward()
     assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
+def test_semantic_progressive_starts_as_fixed_progressive_and_routes() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_progressive",
+    )
+    logits = model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert logits.shape == (2, 4, 128, 128)
+    assert routing is not None
+    assert routing["weights"].shape[1] == 3
+    assert routing["stage_gates"].shape[1] == 2
+    assert torch.allclose(routing["stage_gates"], torch.ones_like(routing["stage_gates"]))
+    logits.mean().backward()
+    assert model.decoder.semantic_coarse_head.weight.grad is not None
+    assert model.decoder.semantic_p3_gate[-1].weight.grad is not None
 
 
 @pytest.mark.parametrize("budget", [1, 2, 3])
