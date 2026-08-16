@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"], default="hierarchical")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3", "regional_semantic"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "distilled_magnitude", "random"], default="adaptive")
     parser.add_argument("--feature-retention-ratio", type=float, default=1.0)
@@ -95,6 +95,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lovasz-weight", type=float, default=0.0,
         help="weight of multiclass Lovasz-Softmax region loss; 0 preserves the baseline",
+    )
+    parser.add_argument(
+        "--lovasz-class-weights",
+        type=float,
+        nargs=7,
+        default=None,
+        metavar=("BG", "BUILDING", "ROAD", "WATER", "BARREN", "FOREST", "AGRICULTURE"),
+        help="optional per-class Lovasz weights in LoveDA class order",
     )
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument(
@@ -140,7 +148,7 @@ def collect_routing_statistics(
     ignore_index: int | None,
     target_temperature: float = 0.5,
 ):
-    if getattr(getattr(model, "decoder", None), "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"}:
+    if getattr(getattr(model, "decoder", None), "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3", "regional_semantic"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
     dominant = torch.zeros(3, dtype=torch.float64)
@@ -317,6 +325,23 @@ def collect_routing_statistics(
                 "oracle_target_entropy": oracle_entropy_sum / oracle_pixels,
             }
         )
+    if getattr(model.decoder, "fusion_version", None) == "regional_semantic":
+        learned = torch.softmax(
+            model.decoder.regional_class_scale_logits.detach(), dim=1
+        ).cpu()
+        result["regional_semantic"] = {
+            "learned_class_scale_weights": {
+                str(class_id): {
+                    name: float(learned[class_id, scale_id])
+                    for scale_id, name in enumerate(names)
+                }
+                for class_id in range(num_classes)
+            },
+            "prototype_scale": float(model.decoder.regional_prototype_scale.detach().cpu()),
+            "residual_strength": float(
+                (0.5 * torch.tanh(model.decoder.regional_residual_strength.detach())).cpu()
+            ),
+        }
     return result
 
 
@@ -418,7 +443,10 @@ def main() -> None:
     )
     if args.lovasz_weight < 0.0:
         raise ValueError("--lovasz-weight must be non-negative")
-    lovasz_criterion = LovaszSoftmaxLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
+    lovasz_criterion = LovaszSoftmaxLoss(
+        ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+        class_weights=args.lovasz_class_weights,
+    )
     boundary_criterion = BoundaryLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     magnitude_distillation_criterion = MagnitudeTeacherDistillationLoss()
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -624,6 +652,18 @@ def main() -> None:
             },
             "validation": validation_metrics,
         }
+        if args.fusion_version == "regional_semantic":
+            with torch.no_grad():
+                learned = torch.softmax(model.decoder.regional_class_scale_logits, dim=1)
+                record["regional_semantic"] = {
+                    "class_scale_weights": learned.detach().cpu().tolist(),
+                    "prototype_scale": float(
+                        model.decoder.regional_prototype_scale.detach().cpu()
+                    ),
+                    "residual_strength": float(
+                        (0.5 * torch.tanh(model.decoder.regional_residual_strength.detach())).cpu()
+                    ),
+                }
         if routing_losses:
             record["mean_routing_loss"] = sum(routing_losses) / len(routing_losses)
             record["mean_routing_aux_loss"] = sum(routing_aux_losses) / len(routing_aux_losses)

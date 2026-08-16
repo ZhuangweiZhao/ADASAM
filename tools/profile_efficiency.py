@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--decoder-dim", type=int, default=96)
     p.add_argument("--adapter", choices=["cat", "none"], default="cat")
     p.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget"], default="hierarchical")
+    p.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3", "regional_semantic"], default="hierarchical")
     p.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     p.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "distilled_magnitude", "random"], default="adaptive")
     p.add_argument("--feature-retention-ratio", type=float, default=1.0)

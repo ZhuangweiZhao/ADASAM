@@ -96,11 +96,13 @@ def test_loveda_accepts_lovasz_region_loss_configuration(monkeypatch) -> None:
         [
             "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
             "--class-balanced-ce", "--lovasz-weight", "0.5",
+            "--lovasz-class-weights", "1", "1", "1", "2", "1", "2", "1",
         ],
     )
     args = parse_args()
     assert args.class_balanced_ce
     assert args.lovasz_weight == 0.5
+    assert args.lovasz_class_weights == [1.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0]
 
 
 def test_loveda_accepts_semantic_progressive_configuration(monkeypatch) -> None:
@@ -115,6 +117,20 @@ def test_loveda_accepts_semantic_progressive_configuration(monkeypatch) -> None:
     )
     args = parse_args()
     assert args.fusion_version == "semantic_progressive"
+    assert args.progressive_aux_weight == 0.2
+
+
+def test_loveda_accepts_regional_semantic_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
+            "--fusion-version", "regional_semantic", "--progressive-aux-weight", "0.2",
+        ],
+    )
+    args = parse_args()
+    assert args.fusion_version == "regional_semantic"
     assert args.progressive_aux_weight == 0.2
 
 

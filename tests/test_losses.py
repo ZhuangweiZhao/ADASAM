@@ -60,6 +60,18 @@ def test_lovasz_softmax_backward_is_finite():
     assert torch.isfinite(logits.grad).all()
 
 
+def test_lovasz_softmax_class_weights_prioritize_selected_class():
+    target = torch.tensor([[[0, 0], [1, 1]]])
+    logits = torch.zeros(1, 2, 2, 2)
+    logits[:, 0, :1] = 4.0
+    logits[:, 1, :1] = -4.0
+    logits[:, 0, 1:] = 1.0
+    logits[:, 1, 1:] = -1.0
+    class_zero_priority = LovaszSoftmaxLoss(class_weights=[4.0, 1.0])(logits, target)
+    class_one_priority = LovaszSoftmaxLoss(class_weights=[1.0, 4.0])(logits, target)
+    assert class_one_priority > class_zero_priority
+
+
 def test_focal_low_for_correct_high_for_wrong():
     """正确预测 focal 低, 错误预测 focal 高 | focal low when correct, high when wrong."""
     gt = torch.zeros(1, 8, 8)

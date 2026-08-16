@@ -57,18 +57,22 @@ class LightweightSemanticDecoder(nn.Module):
         if fusion_version not in {
             "hierarchical", "concat", "sum", "global", "image_conditioned",
             "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive",
-            "semantic_progressive_v2", "semantic_progressive_v3",
+            "semantic_progressive_v2", "semantic_progressive_v3", "regional_semantic",
         }:
             raise ValueError(
                 "fusion_version must be hierarchical, concat, global, "
                 "sum, image_conditioned, scsr, scsr_v2, scsr_task, semantic_budget, "
-                "semantic_progressive, semantic_progressive_v2, or semantic_progressive_v3"
+                "semantic_progressive, semantic_progressive_v2, semantic_progressive_v3, "
+                "or regional_semantic"
             )
         if fusion_version in {"scsr", "scsr_v2", "scsr_task"} and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
         if fusion_version == "semantic_budget" and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
-        if fusion_version in {"semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"} and feature_scales != "p3_p4_embedding":
+        if fusion_version in {
+            "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3",
+            "regional_semantic",
+        } and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic progressive fusion requires feature_scales=p3_p4_embedding")
         if representation_budget not in {1, 2, 3}:
             raise ValueError("representation_budget must be 1, 2, or 3")
@@ -201,6 +205,24 @@ class LightweightSemanticDecoder(nn.Module):
             if gate is not None:
                 nn.init.zeros_(gate[-1].weight)
                 nn.init.zeros_(gate[-1].bias)
+        # Class-conditioned regional hierarchical calibration (CRHC). The
+        # zero residual strength makes its initial forward exactly Dense Sum.
+        self.regional_coarse_head = (
+            nn.Conv2d(decoder_dim, num_classes, 1)
+            if fusion_version == "regional_semantic" else None
+        )
+        self.regional_class_scale_logits = (
+            nn.Parameter(torch.zeros(num_classes, 3))
+            if fusion_version == "regional_semantic" else None
+        )
+        self.regional_prototype_scale = (
+            nn.Parameter(torch.zeros(()))
+            if fusion_version == "regional_semantic" else None
+        )
+        self.regional_residual_strength = (
+            nn.Parameter(torch.zeros(()))
+            if fusion_version == "regional_semantic" else None
+        )
         self.last_routing = None
         self.post_fusion_adapter = (
             CATAdapter(
@@ -430,6 +452,71 @@ class LightweightSemanticDecoder(nn.Module):
                         "teacher_no_p3_features": teacher_no_p3,
                     }
                 )
+        elif self.fusion_version == "regional_semantic":
+            aligned = [self.lateral[name](features[name]) for name in self.feature_names]
+            target_size = max(
+                (value.shape[-2:] for value in aligned), key=lambda size: size[0] * size[1]
+            )
+            aligned = [
+                F.interpolate(value, size=target_size, mode="bilinear", align_corners=False)
+                if value.shape[-2:] != target_size else value
+                for value in aligned
+            ]
+            p3, p4, anchor = aligned
+            dense_sum = p3 + p4 + anchor
+
+            coarse_logits = self.regional_coarse_head(
+                self.lateral["embedding"](features["embedding"])
+            )
+            coarse_at_target = F.interpolate(
+                coarse_logits, size=target_size, mode="bilinear", align_corners=False
+            )
+            seed_probability = torch.softmax(coarse_at_target, dim=1)
+
+            # Per-image soft region prototypes summarize coherent semantic
+            # regions without using ground-truth labels at inference time.
+            denominator = seed_probability.sum(dim=(-2, -1)).clamp_min(1e-6)
+            prototypes = torch.einsum(
+                "bchw,bdhw->bcd", seed_probability, anchor
+            ) / denominator.unsqueeze(-1)
+            normalized_anchor = F.normalize(anchor, dim=1, eps=1e-6)
+            normalized_prototypes = F.normalize(prototypes, dim=-1, eps=1e-6)
+            prototype_similarity = torch.einsum(
+                "bdhw,bcd->bchw", normalized_anchor, normalized_prototypes
+            )
+            regional_logits = (
+                coarse_at_target
+                + self.regional_prototype_scale * prototype_similarity
+            )
+            regional_probability = torch.softmax(regional_logits, dim=1)
+
+            # Each semantic class learns a distribution over P3, P4 and the
+            # embedding. Pixel weights are the expectation under region class
+            # probabilities, yielding class-conditioned spatial allocation.
+            class_scale_weights = torch.softmax(
+                self.regional_class_scale_logits, dim=1
+            )
+            weights = torch.einsum(
+                "bchw,cs->bshw", regional_probability, class_scale_weights
+            )
+            calibrated = 3.0 * (
+                weights[:, 0:1] * p3
+                + weights[:, 1:2] * p4
+                + weights[:, 2:3] * anchor
+            )
+            residual_strength = 0.5 * torch.tanh(self.regional_residual_strength)
+            fused = dense_sum + residual_strength * (calibrated - dense_sum)
+            self.last_routing = {
+                "weights": weights.detach(),
+                "entropy": (
+                    -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)
+                ).detach(),
+                "coarse_logits": regional_logits,
+                "coarse_probability": regional_probability.detach(),
+                "prototype_similarity": prototype_similarity.detach(),
+                "class_scale_weights": class_scale_weights.detach(),
+                "residual_strength": residual_strength.detach(),
+            }
         else:
             if self.fusion_version == "semantic_budget":
                 # Embedding is the semantic anchor. P3/P4 are injected only when

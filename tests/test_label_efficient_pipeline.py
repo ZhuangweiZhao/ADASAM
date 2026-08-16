@@ -341,6 +341,56 @@ def test_scsr_starts_uniform_and_records_finite_routing() -> None:
     assert torch.isfinite(routing["entropy"]).all()
 
 
+def test_regional_semantic_starts_as_dense_sum_and_exposes_class_routing() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="regional_semantic",
+    )
+    features = model.backbone(torch.rand(2, 3, 128, 128))
+    decoder = model.decoder
+    fused = decoder.forward_features(features)
+
+    aligned = [decoder.lateral[name](features[name]) for name in decoder.feature_names]
+    target_size = max(
+        (value.shape[-2:] for value in aligned), key=lambda size: size[0] * size[1]
+    )
+    aligned = [
+        F.interpolate(value, size=target_size, mode="bilinear", align_corners=False)
+        if value.shape[-2:] != target_size else value
+        for value in aligned
+    ]
+    expected = decoder.refine(sum(aligned))
+    assert torch.allclose(fused, expected, atol=1e-6)
+
+    routing = decoder.last_routing
+    assert routing is not None
+    assert routing["weights"].shape == (2, 3, *target_size)
+    assert routing["class_scale_weights"].shape == (4, 3)
+    assert torch.allclose(
+        routing["class_scale_weights"].sum(1), torch.ones(4), atol=1e-6
+    )
+    assert float(routing["residual_strength"]) == pytest.approx(0.0)
+
+
+def test_regional_semantic_router_receives_gradients() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="regional_semantic",
+    )
+    prediction = model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    target = torch.randint(0, 4, (2, 128, 128))
+    coarse = F.interpolate(
+        routing["coarse_logits"], target.shape[-2:], mode="bilinear", align_corners=False
+    )
+    (LabelEfficientSegmentationLoss()(prediction, target) + 0.2 * F.cross_entropy(coarse, target)).backward()
+    assert model.decoder.regional_residual_strength.grad is not None
+    assert model.decoder.regional_class_scale_logits.grad is not None
+    assert model.decoder.regional_coarse_head.weight.grad is not None
+    assert model.decoder.regional_prototype_scale.grad is not None
+    assert all(parameter.grad is None for parameter in model.backbone.parameters())
+
+
 def test_scsr_is_under_ten_thousand_additional_parameters() -> None:
     fixed = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
