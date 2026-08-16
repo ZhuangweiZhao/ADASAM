@@ -57,18 +57,18 @@ class LightweightSemanticDecoder(nn.Module):
         if fusion_version not in {
             "hierarchical", "concat", "sum", "global", "image_conditioned",
             "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive",
-            "semantic_progressive_v2",
+            "semantic_progressive_v2", "semantic_progressive_v3",
         }:
             raise ValueError(
                 "fusion_version must be hierarchical, concat, global, "
                 "sum, image_conditioned, scsr, scsr_v2, scsr_task, semantic_budget, "
-                "semantic_progressive, or semantic_progressive_v2"
+                "semantic_progressive, semantic_progressive_v2, or semantic_progressive_v3"
             )
         if fusion_version in {"scsr", "scsr_v2", "scsr_task"} and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
         if fusion_version == "semantic_budget" and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
-        if fusion_version in {"semantic_progressive", "semantic_progressive_v2"} and feature_scales != "p3_p4_embedding":
+        if fusion_version in {"semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"} and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic progressive fusion requires feature_scales=p3_p4_embedding")
         if representation_budget not in {1, 2, 3}:
             raise ValueError("representation_budget must be 1, 2, or 3")
@@ -181,7 +181,7 @@ class LightweightSemanticDecoder(nn.Module):
         semantic_gate_channels = decoder_dim * 2 + num_classes + 1
         self.semantic_coarse_head = (
             nn.Conv2d(decoder_dim, num_classes, 1)
-            if fusion_version in {"semantic_progressive", "semantic_progressive_v2"} else None
+            if fusion_version in {"semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"} else None
         )
         self.semantic_p4_gate = (
             nn.Sequential(
@@ -195,7 +195,7 @@ class LightweightSemanticDecoder(nn.Module):
                 ConvNormAct(semantic_gate_channels, decoder_dim),
                 nn.Conv2d(decoder_dim, 1, 1),
             )
-            if fusion_version in {"semantic_progressive", "semantic_progressive_v2"} else None
+            if fusion_version in {"semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"} else None
         )
         for gate in (self.semantic_p4_gate, self.semantic_p3_gate):
             if gate is not None:
@@ -369,7 +369,7 @@ class LightweightSemanticDecoder(nn.Module):
                 "coarse_probability": coarse_probability.detach(),
                 "coarse_uncertainty": coarse_entropy.detach(),
             }
-        elif self.fusion_version == "semantic_progressive_v2":
+        elif self.fusion_version in {"semantic_progressive_v2", "semantic_progressive_v3"}:
             anchor = self.lateral["embedding"](features["embedding"])
             coarse_logits = self.semantic_coarse_head(anchor)
             coarse_probability = torch.softmax(coarse_logits, dim=1)
@@ -387,6 +387,7 @@ class LightweightSemanticDecoder(nn.Module):
 
             p3 = self.lateral["P3"](features["P3"])
             fused = F.interpolate(fused, size=p3.shape[-2:], mode="bilinear", align_corners=False)
+            pre_p3 = fused
             probability = F.interpolate(
                 coarse_probability, size=p3.shape[-2:], mode="bilinear", align_corners=False
             )
@@ -398,7 +399,13 @@ class LightweightSemanticDecoder(nn.Module):
             )
             # Bounded residual modulation preserves a corrective detail path.
             p3_gate = 1.0 + 0.5 * torch.tanh(p3_logits)
-            fused = self.p3_fuse(fused + p3_gate * p3)
+            fused = self.p3_fuse(pre_p3 + p3_gate * p3)
+
+            teacher_full = None
+            teacher_no_p3 = None
+            if self.fusion_version == "semantic_progressive_v3" and self.training:
+                teacher_full = self.p3_fuse(pre_p3 + p3)
+                teacher_no_p3 = self.p3_fuse(pre_p3)
 
             p4_gate = torch.ones_like(p3_gate)
             embedding_gate = torch.ones_like(p3_gate)
@@ -415,6 +422,14 @@ class LightweightSemanticDecoder(nn.Module):
                 "coarse_uncertainty": coarse_entropy.detach(),
                 "gate_bounds": (0.5, 1.5),
             }
+            if teacher_full is not None and teacher_no_p3 is not None:
+                self.last_routing.update(
+                    {
+                        "gate_logits": p3_logits,
+                        "teacher_full_features": teacher_full,
+                        "teacher_no_p3_features": teacher_no_p3,
+                    }
+                )
         else:
             if self.fusion_version == "semantic_budget":
                 # Embedding is the semantic anchor. P3/P4 are injected only when
@@ -663,6 +678,10 @@ class LightweightSemanticDecoder(nn.Module):
         if self.post_fusion_adapter is not None:
             fused = self.post_fusion_adapter(fused)
         fused = self.refine(fused)
+        if self.fusion_version == "semantic_progressive_v3" and self.training:
+            routing = self.last_routing
+            routing["teacher_full_features"] = self.refine(routing["teacher_full_features"])
+            routing["teacher_no_p3_features"] = self.refine(routing["teacher_no_p3_features"])
         if prompt_tokens is not None:
             if self.prompt_norm is None or self.prompt_scale is None or self.prompt_shift is None:
                 raise RuntimeError("decoder prompt fusion is disabled")
@@ -706,4 +725,14 @@ class LightweightSemanticDecoder(nn.Module):
     ) -> torch.Tensor:
         fused = self.forward_features(features, prompt_tokens=prompt_tokens, prompt=prompt)
         logits = self.classifier(fused)
+        if self.fusion_version == "semantic_progressive_v3" and self.training:
+            routing = self.last_routing
+            routing["teacher_full_logits"] = F.interpolate(
+                self.classifier(routing.pop("teacher_full_features")),
+                size=output_size, mode="bilinear", align_corners=False,
+            )
+            routing["teacher_no_p3_logits"] = F.interpolate(
+                self.classifier(routing.pop("teacher_no_p3_features")),
+                size=output_size, mode="bilinear", align_corners=False,
+            )
         return F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)

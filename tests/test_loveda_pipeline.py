@@ -119,6 +119,25 @@ def test_loveda_accepts_semantic_progressive_v2_configuration(monkeypatch) -> No
     assert args.progressive_aux_weight == 0.05
 
 
+def test_loveda_accepts_semantic_progressive_v3_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
+            "--fusion-version", "semantic_progressive_v3",
+            "--progressive-aux-weight", "0.0",
+            "--utility-gate-weight", "0.1",
+            "--utility-gate-temperature", "0.25",
+        ],
+    )
+    args = parse_args()
+    assert args.fusion_version == "semantic_progressive_v3"
+    assert args.progressive_aux_weight == 0.0
+    assert args.utility_gate_weight == 0.1
+    assert args.utility_gate_temperature == 0.25
+
+
 def test_routing_statistics_accepts_no_ignore_index() -> None:
     class Decoder:
         fusion_version = "scsr"

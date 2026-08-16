@@ -197,6 +197,28 @@ def test_semantic_progressive_v2_preserves_p4_and_bounds_p3_gate() -> None:
     assert model.decoder.semantic_p3_gate[-1].weight.grad is not None
 
 
+def test_semantic_progressive_v3_exposes_counterfactual_utility_teacher_only_in_train() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_progressive_v3",
+    )
+    model.train()
+    logits = model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert logits.shape == (2, 4, 128, 128)
+    assert routing["gate_logits"].shape[1] == 1
+    assert routing["teacher_full_logits"].shape == logits.shape
+    assert routing["teacher_no_p3_logits"].shape == logits.shape
+    logits.mean().backward()
+    assert model.decoder.semantic_p3_gate[-1].weight.grad is not None
+
+    model.eval()
+    with torch.no_grad():
+        model(torch.rand(1, 3, 128, 128))
+    assert "teacher_full_logits" not in model.decoder.last_routing
+    assert "teacher_no_p3_logits" not in model.decoder.last_routing
+
+
 @pytest.mark.parametrize("budget", [1, 2, 3])
 def test_semantic_budget_forward_backward_and_routing(budget: int) -> None:
     model = LabelEfficientSAM(

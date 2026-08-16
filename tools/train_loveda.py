@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
-    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2"], default="hierarchical")
+    parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
     parser.add_argument("--spatial-policy", choices=["adaptive", "static", "magnitude", "distilled_magnitude", "random"], default="adaptive")
     parser.add_argument("--feature-retention-ratio", type=float, default=1.0)
@@ -73,6 +73,8 @@ def parse_args() -> argparse.Namespace:
         "--progressive-aux-weight", type=float, default=0.2,
         help="coarse semantic supervision weight for semantic_progressive fusion",
     )
+    parser.add_argument("--utility-gate-weight", type=float, default=0.1)
+    parser.add_argument("--utility-gate-temperature", type=float, default=0.25)
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
@@ -133,7 +135,7 @@ def collect_routing_statistics(
     ignore_index: int | None,
     target_temperature: float = 0.5,
 ):
-    if getattr(getattr(model, "decoder", None), "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2"}:
+    if getattr(getattr(model, "decoder", None), "fusion_version", None) not in {"scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3"}:
         return None
     weight_sum = torch.zeros(3, dtype=torch.float64)
     dominant = torch.zeros(3, dtype=torch.float64)
@@ -485,6 +487,9 @@ def main() -> None:
         magnitude_teacher_agreements = []
         magnitude_teacher_mask_ious = []
         progressive_aux_losses = []
+        utility_gate_losses = []
+        utility_gate_target_means = []
+        utility_gate_agreements = []
         for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
@@ -497,7 +502,11 @@ def main() -> None:
                 boundary_logits = auxiliary["boundary_logits"] if auxiliary is not None else None
             loss = criterion(prediction, target)
             budget_routing = getattr(getattr(model, "decoder", None), "last_routing", None)
-            if budget_routing is not None and "coarse_logits" in budget_routing:
+            if (
+                budget_routing is not None
+                and "coarse_logits" in budget_routing
+                and args.progressive_aux_weight > 0.0
+            ):
                 if args.progressive_aux_weight < 0.0:
                     raise ValueError("--progressive-aux-weight must be non-negative")
                 coarse_logits = F.interpolate(
@@ -511,6 +520,39 @@ def main() -> None:
                 )
                 loss = loss + args.progressive_aux_weight * coarse_loss
                 progressive_aux_losses.append(float(coarse_loss.detach()))
+            if budget_routing is not None and "teacher_full_logits" in budget_routing:
+                if args.utility_gate_weight < 0.0:
+                    raise ValueError("--utility-gate-weight must be non-negative")
+                if args.utility_gate_temperature <= 0.0:
+                    raise ValueError("--utility-gate-temperature must be positive")
+                with torch.no_grad():
+                    full_loss_map = F.cross_entropy(
+                        budget_routing["teacher_full_logits"].detach(), target,
+                        weight=class_weights, reduction="none",
+                        ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+                    )
+                    no_p3_loss_map = F.cross_entropy(
+                        budget_routing["teacher_no_p3_logits"].detach(), target,
+                        weight=class_weights, reduction="none",
+                        ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
+                    )
+                    utility_target = torch.sigmoid(
+                        (no_p3_loss_map - full_loss_map) / args.utility_gate_temperature
+                    )
+                gate_logits = F.interpolate(
+                    budget_routing["gate_logits"], target.shape[-2:],
+                    mode="bilinear", align_corners=False,
+                )[:, 0]
+                valid = target != LoveDASemanticDataset.IGNORE_INDEX
+                utility_loss = F.binary_cross_entropy_with_logits(
+                    gate_logits[valid], utility_target[valid]
+                )
+                loss = loss + args.utility_gate_weight * utility_loss
+                utility_gate_losses.append(float(utility_loss.detach()))
+                utility_gate_target_means.append(float(utility_target[valid].mean()))
+                utility_gate_agreements.append(float(
+                    ((gate_logits[valid] > 0) == (utility_target[valid] > 0.5)).float().mean()
+                ))
             if budget_routing is not None and "teacher_masks" in budget_routing:
                 distillation_loss = magnitude_distillation_criterion(
                     budget_routing["student_logits"], budget_routing["teacher_masks"]
@@ -586,6 +628,16 @@ def main() -> None:
         if progressive_aux_losses:
             record["mean_progressive_aux_loss"] = sum(progressive_aux_losses) / len(
                 progressive_aux_losses
+            )
+        if utility_gate_losses:
+            record["mean_utility_gate_loss"] = sum(utility_gate_losses) / len(
+                utility_gate_losses
+            )
+            record["mean_utility_gate_target"] = sum(utility_gate_target_means) / len(
+                utility_gate_target_means
+            )
+            record["mean_utility_gate_agreement"] = sum(utility_gate_agreements) / len(
+                utility_gate_agreements
             )
         history.append(record)
         print(json.dumps(record))
