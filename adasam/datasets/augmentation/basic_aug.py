@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 
 class BasicAugmentation:
@@ -52,4 +53,29 @@ class BasicAugmentation:
         augmented["image"] = image.clamp(0.0, 1.0).contiguous()
         augmented["masks"] = mask.contiguous()
         augmented["image_size"] = tuple(image.shape[-2:])
+        return augmented
+
+
+class RemoteSensingStrongAugmentation(BasicAugmentation):
+    """Stronger photometric variation for rural remote-sensing domain shift."""
+
+    def __init__(self) -> None:
+        super().__init__(brightness=0.30, contrast=0.30)
+
+    def __call__(self, sample: dict) -> dict:
+        augmented = super().__call__(sample)
+        image = augmented["image"]
+        if torch.rand(()) < 0.8:
+            saturation = float(torch.empty(()).uniform_(0.65, 1.35))
+            gray = image.mean(dim=0, keepdim=True)
+            image = gray + saturation * (image - gray)
+        if torch.rand(()) < 0.5:
+            gamma = float(torch.empty(()).uniform_(0.70, 1.45))
+            image = image.clamp_min(1e-6).pow(gamma)
+        if torch.rand(()) < 0.25:
+            image = F.avg_pool2d(image.unsqueeze(0), kernel_size=3, stride=1, padding=1).squeeze(0)
+        if torch.rand(()) < 0.25:
+            sigma = float(torch.empty(()).uniform_(0.0, 0.025))
+            image = image + torch.randn_like(image) * sigma
+        augmented["image"] = image.clamp(0.0, 1.0).contiguous()
         return augmented

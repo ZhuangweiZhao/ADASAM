@@ -75,6 +75,20 @@ def test_loveda_accepts_magnitude_teacher_survival_configuration(monkeypatch) ->
     assert args.magnitude_distill_weight == 1.0
 
 
+def test_loveda_accepts_rural_domain_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
+            "--augmentation", "remote_strong", "--rural-sampling-multiplier", "1.5",
+        ],
+    )
+    args = parse_args()
+    assert args.augmentation == "remote_strong"
+    assert args.rural_sampling_multiplier == 1.5
+
+
 def test_routing_statistics_accepts_no_ignore_index() -> None:
     class Decoder:
         fusion_version = "scsr"

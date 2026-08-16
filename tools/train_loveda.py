@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,7 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder-version", choices=["lightweight", "boundary_aux", "boundary"], default="lightweight")
     parser.add_argument("--boundary-loss-weight", type=float, default=0.1)
     parser.add_argument("--base-channels", type=int, default=32)
-    parser.add_argument("--augmentation", choices=["none", "basic"], default="basic")
+    parser.add_argument("--augmentation", choices=["none", "basic", "remote_strong"], default="basic")
+    parser.add_argument(
+        "--rural-sampling-multiplier", type=float, default=1.0,
+        help="relative sampling weight for Rural training tiles; 1.0 preserves uniform sampling",
+    )
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--validation-seed", type=int, default=42)
     parser.add_argument("--seed", type=int, default=42)
@@ -326,10 +330,21 @@ def main() -> None:
         "num_workers": args.num_workers,
         "pin_memory": device.type == "cuda",
     }
+    if args.rural_sampling_multiplier <= 0:
+        raise ValueError("--rural-sampling-multiplier must be positive")
+    train_sampler = None
+    if args.rural_sampling_multiplier != 1.0:
+        weights = [
+            args.rural_sampling_multiplier
+            if train_base.samples[index][2].startswith("Rural_") else 1.0
+            for index in train_indices
+        ]
+        generator = torch.Generator().manual_seed(args.seed)
+        train_sampler = WeightedRandomSampler(
+            weights, num_samples=len(weights), replacement=True, generator=generator
+        )
     train_loader = DataLoader(
-        train_dataset,
-        shuffle=True,
-        **loader_options,
+        train_dataset, shuffle=train_sampler is None, sampler=train_sampler, **loader_options
     )
     validation_loader = DataLoader(validation_dataset, shuffle=False, **loader_options)
     test_loader = DataLoader(official_validation, shuffle=False, **loader_options)
@@ -444,7 +459,8 @@ def main() -> None:
     print(
         f"model={args.model} ratio={args.label_ratio}% train={len(train_dataset)} "
         f"validation={len(validation_dataset)} official_val={len(official_validation)} "
-        f"augmentation={args.augmentation} image_size={args.image_size}"
+        f"augmentation={args.augmentation} image_size={args.image_size} "
+        f"rural_sampling_multiplier={args.rural_sampling_multiplier}"
     )
     print(
         f"parameters total={counts['total']:,} trainable={counts['trainable']:,} "

@@ -5,6 +5,7 @@ import torch
 from adasam.datasets.augmentation import (
     BasicAugmentation,
     DefectAwareAugmentation,
+    RemoteSensingStrongAugmentation,
     build_augmentation,
 )
 
@@ -58,4 +59,15 @@ def test_defect_copy_paste_adds_bounded_pixels_without_losing_classes() -> None:
 def test_none_mode_is_safe_for_validation_and_test() -> None:
     assert build_augmentation("none") is None
     assert isinstance(build_augmentation("basic"), BasicAugmentation)
+    assert isinstance(build_augmentation("remote_strong"), RemoteSensingStrongAugmentation)
     assert isinstance(build_augmentation("defect"), DefectAwareAugmentation)
+
+
+def test_remote_strong_augmentation_preserves_mask_and_range() -> None:
+    torch.manual_seed(11)
+    original = sample()
+    augmented = RemoteSensingStrongAugmentation()(original)
+    assert augmented["image"].shape == original["image"].shape
+    assert augmented["masks"].shape == original["masks"].shape
+    assert set(torch.unique(augmented["masks"]).tolist()) == {0, 1, 2}
+    assert 0.0 <= float(augmented["image"].min()) <= float(augmented["image"].max()) <= 1.0

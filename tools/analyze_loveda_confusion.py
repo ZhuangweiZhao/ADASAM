@@ -63,36 +63,6 @@ def colorize(mask: np.ndarray) -> np.ndarray:
     return out
 
 
-def load_model(checkpoint: Path, device: torch.device) -> LabelEfficientSAM:
-    model = LabelEfficientSAM.build(
-        resolve("weights/mobile_sam.pt"),  # replaced below for explicit path
-        num_classes=7, img_size=512, device=device, decoder_dim=96,
-        prompt_version="none", use_cat_adapter=False,
-        feature_scales="p3_p4_embedding", fusion_version="sum",
-        decoder_version="lightweight",
-    )
-    payload = torch.load(checkpoint, map_location=device, weights_only=False)
-    state = payload.get("model", payload)
-    model.load_state_dict(state, strict=False)
-    model.eval()
-    return model
-
-
-def build_model(checkpoint: Path, mobile_checkpoint: Path, sam_size: int,
-                device: torch.device) -> LabelEfficientSAM:
-    model = LabelEfficientSAM.build(
-        mobile_checkpoint, num_classes=7, img_size=sam_size, device=device,
-        decoder_dim=96, prompt_version="none", use_cat_adapter=False,
-        feature_scales="p3_p4_embedding", fusion_version="sum",
-        decoder_version="lightweight",
-    )
-    payload = torch.load(checkpoint, map_location=device, weights_only=False)
-    state = payload.get("model", payload)
-    model.load_state_dict(state, strict=False)
-    model.eval()
-    return model
-
-
 def save_heatmap(matrix: np.ndarray, path: Path, title: str, normalize: bool) -> None:
     values = matrix.astype(np.float64)
     if normalize:
@@ -118,7 +88,7 @@ def save_heatmap(matrix: np.ndarray, path: Path, title: str, normalize: bool) ->
 def save_targeted(sample: dict, output: Path, label: str, pair_name: str) -> None:
     gt, pred, image = sample["gt"], sample["pred"], sample["image"]
     pairs = sample["pair_scores"]
-    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    fig, axes = plt.subplots(3, 4, figsize=(16, 12))
     axes[0, 0].imshow(image); axes[0, 0].set_title("Image")
     axes[0, 1].imshow(colorize(gt)); axes[0, 1].set_title("Ground truth")
     axes[0, 2].imshow(colorize(pred)); axes[0, 2].set_title("Prediction")
@@ -128,7 +98,8 @@ def save_targeted(sample: dict, output: Path, label: str, pair_name: str) -> Non
     error[valid & (gt != pred)] = [220, 50, 50]
     axes[0, 3].imshow(error); axes[0, 3].set_title("All errors")
     for ax in axes.flat: ax.axis("off")
-    for ax, (src, dst) in zip(axes[1], PAIRS):
+    pair_axes = [*axes[1], *axes[2]]
+    for ax, (src, dst) in zip(pair_axes, PAIRS):
         mask = (gt == src) & (pred == dst)
         overlay = image.copy()
         overlay[mask] = np.array([255, 0, 255], dtype=np.uint8)
@@ -186,11 +157,13 @@ def main() -> None:
                     flat = 7 * gt[valid].astype(np.int64) + pred[valid].astype(np.int64)
                     matrix += np.bincount(flat, minlength=49).reshape(7, 7)
                     pair_scores = {(s, d): int(((gt == s) & (pred == d)).sum()) for s, d in PAIRS}
+                    gt_counts = {s: int((gt == s).sum()) for s, _ in PAIRS}
                     sample_id = str(batch["id"][b])
                     image = (batch["image"][b].permute(1, 2, 0).numpy().clip(0, 1) * 255).astype(np.uint8)
                     for pair, count in pair_scores.items():
                         if count:
-                            top[pair].append((count, sample_id, gt.copy(), pred.copy(), image.copy(), pair_scores))
+                            rate = count / max(gt_counts[pair[0]], 1)
+                            top[pair].append((rate, count, sample_id, gt.copy(), pred.copy(), image.copy(), pair_scores))
                 offset += len(gt_batch)
         folder = output / label
         (folder / "topk").mkdir(parents=True, exist_ok=True)
@@ -207,8 +180,8 @@ def main() -> None:
                          "pixels": error_total, "gt_pixels": source_total,
                          "recall_error_percent": 100 * error_total / max(source_total, 1)})
             for rank, item in enumerate(sorted(items, reverse=True)[:a.top_k], 1):
-                save_targeted({"id": f"{rank:02d}_{item[1]}", "gt": item[2], "pred": item[3],
-                               "image": item[4], "pair_scores": item[5]}, folder / "topk", label,
+                save_targeted({"id": f"{rank:02d}_{item[2]}", "gt": item[3], "pred": item[4],
+                               "image": item[5], "pair_scores": item[6]}, folder / "topk", label,
                               f"{CLASS_NAMES[src]}_to_{CLASS_NAMES[dst]}")
         (folder / "targeted_confusions.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
         results[label] = {"matrix": matrix.tolist(), "targeted": rows}
