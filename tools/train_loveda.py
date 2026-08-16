@@ -25,6 +25,7 @@ from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_s
 from adasam.losses import (  # noqa: E402
     BoundaryLoss,
     LabelEfficientSegmentationLoss,
+    LovaszSoftmaxLoss,
     MagnitudeTeacherDistillationLoss,
     semantic_boundary_target,
 )
@@ -91,6 +92,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backbone-lr-multiplier", type=float, default=1.0)
     parser.add_argument("--lr-scheduler", choices=["constant", "cosine"], default="constant")
     parser.add_argument("--class-balanced-ce", action="store_true")
+    parser.add_argument(
+        "--lovasz-weight", type=float, default=0.0,
+        help="weight of multiclass Lovasz-Softmax region loss; 0 preserves the baseline",
+    )
     parser.add_argument("--grad-clip-norm", type=float, default=0.0)
     parser.add_argument(
         "--train-batch-norm", action="store_true",
@@ -411,6 +416,9 @@ def main() -> None:
         ignore_index=LoveDASemanticDataset.IGNORE_INDEX,
         class_weights=class_weights,
     )
+    if args.lovasz_weight < 0.0:
+        raise ValueError("--lovasz-weight must be non-negative")
+    lovasz_criterion = LovaszSoftmaxLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     boundary_criterion = BoundaryLoss(ignore_index=LoveDASemanticDataset.IGNORE_INDEX)
     magnitude_distillation_criterion = MagnitudeTeacherDistillationLoss()
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
@@ -490,6 +498,7 @@ def main() -> None:
         utility_gate_losses = []
         utility_gate_target_means = []
         utility_gate_agreements = []
+        lovasz_losses = []
         for batch in tqdm(train_loader, desc=f"epoch {epoch}/{args.epochs}"):
             image = batch["image"].to(device, non_blocking=True)
             target = batch["mask"].to(device, non_blocking=True)
@@ -501,6 +510,10 @@ def main() -> None:
                 prediction, _, auxiliary = model.forward_with_auxiliary(image, target)
                 boundary_logits = auxiliary["boundary_logits"] if auxiliary is not None else None
             loss = criterion(prediction, target)
+            if args.lovasz_weight > 0.0:
+                lovasz_loss = lovasz_criterion(prediction, target)
+                loss = loss + args.lovasz_weight * lovasz_loss
+                lovasz_losses.append(float(lovasz_loss.detach()))
             budget_routing = getattr(getattr(model, "decoder", None), "last_routing", None)
             if (
                 budget_routing is not None
@@ -639,6 +652,8 @@ def main() -> None:
             record["mean_utility_gate_agreement"] = sum(utility_gate_agreements) / len(
                 utility_gate_agreements
             )
+        if lovasz_losses:
+            record["mean_lovasz_loss"] = sum(lovasz_losses) / len(lovasz_losses)
         history.append(record)
         print(json.dumps(record))
         if validation_metrics["mIoU"] > best_score:

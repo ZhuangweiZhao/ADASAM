@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from adasam.losses import (
+    LovaszSoftmaxLoss,
     boundary_f1_counts,
     combined_loss,
     dice_loss,
@@ -18,6 +19,45 @@ from adasam.losses import (
     mask_iou,
     semantic_boundary_target,
 )
+
+
+def test_lovasz_softmax_is_low_for_confident_correct_prediction():
+    target = torch.tensor([[[0, 0], [1, 1]]])
+    logits = torch.full((1, 2, 2, 2), -10.0)
+    logits.scatter_(1, target.unsqueeze(1), 10.0)
+    loss = LovaszSoftmaxLoss()(logits, target)
+    assert loss.item() < 1e-6
+
+
+def test_lovasz_softmax_penalizes_wrong_prediction_more():
+    target = torch.tensor([[[0, 0], [1, 1]]])
+    correct = torch.full((1, 2, 2, 2), -5.0)
+    correct.scatter_(1, target.unsqueeze(1), 5.0)
+    wrong = -correct
+    criterion = LovaszSoftmaxLoss()
+    assert criterion(correct, target) < criterion(wrong, target)
+
+
+def test_lovasz_softmax_ignores_unlabeled_pixels():
+    target = torch.tensor([[[0, 255], [1, 1]]])
+    logits = torch.randn(1, 2, 2, 2)
+    changed = logits.clone()
+    changed[:, :, 0, 1] = torch.tensor([100.0, -100.0])
+    criterion = LovaszSoftmaxLoss(ignore_index=255)
+    assert criterion(logits, target).item() == pytest.approx(
+        criterion(changed, target).item(), abs=1e-7
+    )
+
+
+def test_lovasz_softmax_backward_is_finite():
+    logits = torch.randn(2, 3, 4, 4, requires_grad=True)
+    target = torch.randint(0, 3, (2, 4, 4))
+    target[0, :2, :2] = 255
+    loss = LovaszSoftmaxLoss(ignore_index=255)(logits, target)
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
 
 
 def test_focal_low_for_correct_high_for_wrong():

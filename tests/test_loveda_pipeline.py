@@ -89,6 +89,20 @@ def test_loveda_accepts_rural_domain_configuration(monkeypatch) -> None:
     assert args.rural_sampling_multiplier == 1.5
 
 
+def test_loveda_accepts_lovasz_region_loss_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam_finetune", "--label-ratio", "100",
+            "--class-balanced-ce", "--lovasz-weight", "0.5",
+        ],
+    )
+    args = parse_args()
+    assert args.class_balanced_ce
+    assert args.lovasz_weight == 0.5
+
+
 def test_loveda_accepts_semantic_progressive_configuration(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,
