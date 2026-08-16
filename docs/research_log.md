@@ -1,5 +1,24 @@
 # Research Log
 
+## 2026-08-16 - LoveDA benchmark context recorded
+
+Date: 2026-08-16
+
+Question: How do unified LoveDA results compare with the supplied literature table?
+
+Experiment: Recorded eight supplied literature rows and compared them with four
+internal 512 x 512, 100%-label, seed-42 baselines.
+
+Observation: MobileSAM full finetune reaches 52.35% mIoU, approximately matching
+UNetFormer (52.40%) and Hi-ResNet (52.50%), while trailing the supplied maximum
+(U-Net MaxViT-S, 56.16%) by 3.81 points. It leads the supplied rows on background
+and barren IoU but is notably weak on water and forest.
+
+Decision: Use the table only as external context until citations and protocols are
+verified. Keep internal results at screening status until three seeds are complete.
+
+Evidence Link: `docs/LOVEDA_BENCHMARK_COMPARISON.md`, `EXPERIMENT_MANIFEST.md`
+
 只记录可复用的研究事实，不记录长篇讨论。每天使用以下模板：
 
 ```text

@@ -26,6 +26,7 @@ manifest, seed, resolved config, checkpoint, commit, environment, and result art
 | NEU-A0 | NEU-Seg | CAT + hierarchical fusion | 1–100% | 42/123/456 | screening (3-seed runs complete, no checkpoint archived) |
 | NEU-A1 | NEU-Seg | isolated prompt/prototype/augmentation/boundary ablations | screening | 42 | pending |
 | LVD-B0 | LoveDA | U-Net / frozen MobileSAM baselines | 1–100% | 42 | screening (single seed) |
+| LVD-B1 | LoveDA | 512px full-supervision baselines and MobileSAM full finetune | 100% | 42 | screening (single seed; literature protocol verification pending) |
 | LVD-A0 | LoveDA | adapter, fusion, SCSR and semantic-budget study | screening | 42 (core: 42/123/456) | screening (single-seed ablations; budget/layer/magnitude groups 3-seed) |
 | VHN-A0 | Vaihingen | LoRA + random/magnitude/adaptive 25% retention | 25% | 42/123/456 | screening (3-seed survival study, verdicts REDESIGN/GO/GO) |
 | ISA-B0 | iSAID | U-Net / frozen MobileSAM baselines | 100% | 42 | screening (single run) |
@@ -64,6 +65,18 @@ missing frozen protocol record) and must not be cited as a paper result.
 - Adapter / fusion / calibration / base-model ablations: single seed 42, winners flip
   with budget — not usable for claims until multi-seed.
 - Status: screening overall.
+
+### LoveDA 512px full-supervision comparison (LVD-B1)
+
+- Protocol: official Train with fixed 20% internal validation; official Val as test;
+  512 x 512, batch 8, 100% labels, seed 42, class-balanced CE, cosine schedule,
+  and gradient clipping.
+- Internal mIoU: MobileSAM full finetune 0.5235; DeepLabV3+-R50 0.5110;
+  SegFormer-B0 0.4945; frozen MobileSAM + Sum 0.4769.
+- External context: user-supplied literature values range from 47.84% to 56.16%
+  mIoU. Citations and protocols are unverified, so this is not a strict ranking.
+- Evidence: `docs/LOVEDA_BENCHMARK_COMPARISON.md`.
+- Status: screening (single seed; source/protocol verification pending).
 
 ### Vaihingen — adaptive-retention survival study (3-seed)
 
