@@ -179,6 +179,24 @@ def test_semantic_progressive_starts_as_fixed_progressive_and_routes() -> None:
     assert model.decoder.semantic_p3_gate[-1].weight.grad is not None
 
 
+def test_semantic_progressive_v2_preserves_p4_and_bounds_p3_gate() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="semantic_progressive_v2",
+    )
+    logits = model(torch.rand(2, 3, 128, 128))
+    routing = model.decoder.last_routing
+    assert logits.shape == (2, 4, 128, 128)
+    assert routing is not None
+    assert routing["gate_bounds"] == (0.5, 1.5)
+    p3_gate, p4_gate = routing["stage_gates"].unbind(1)
+    assert torch.allclose(p3_gate, torch.ones_like(p3_gate))
+    assert torch.allclose(p4_gate, torch.ones_like(p4_gate))
+    logits.mean().backward()
+    assert model.decoder.semantic_coarse_head.weight.grad is not None
+    assert model.decoder.semantic_p3_gate[-1].weight.grad is not None
+
+
 @pytest.mark.parametrize("budget", [1, 2, 3])
 def test_semantic_budget_forward_backward_and_routing(budget: int) -> None:
     model = LabelEfficientSAM(

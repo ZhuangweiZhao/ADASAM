@@ -57,18 +57,19 @@ class LightweightSemanticDecoder(nn.Module):
         if fusion_version not in {
             "hierarchical", "concat", "sum", "global", "image_conditioned",
             "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive",
+            "semantic_progressive_v2",
         }:
             raise ValueError(
                 "fusion_version must be hierarchical, concat, global, "
                 "sum, image_conditioned, scsr, scsr_v2, scsr_task, semantic_budget, "
-                "or semantic_progressive"
+                "semantic_progressive, or semantic_progressive_v2"
             )
         if fusion_version in {"scsr", "scsr_v2", "scsr_task"} and feature_scales != "p3_p4_embedding":
             raise ValueError("SCSR requires feature_scales=p3_p4_embedding")
         if fusion_version == "semantic_budget" and feature_scales != "p3_p4_embedding":
             raise ValueError("semantic_budget requires feature_scales=p3_p4_embedding")
-        if fusion_version == "semantic_progressive" and feature_scales != "p3_p4_embedding":
-            raise ValueError("semantic_progressive requires feature_scales=p3_p4_embedding")
+        if fusion_version in {"semantic_progressive", "semantic_progressive_v2"} and feature_scales != "p3_p4_embedding":
+            raise ValueError("semantic progressive fusion requires feature_scales=p3_p4_embedding")
         if representation_budget not in {1, 2, 3}:
             raise ValueError("representation_budget must be 1, 2, or 3")
         if spatial_policy not in {"adaptive", "static", "magnitude", "distilled_magnitude", "random"}:
@@ -180,7 +181,7 @@ class LightweightSemanticDecoder(nn.Module):
         semantic_gate_channels = decoder_dim * 2 + num_classes + 1
         self.semantic_coarse_head = (
             nn.Conv2d(decoder_dim, num_classes, 1)
-            if fusion_version == "semantic_progressive" else None
+            if fusion_version in {"semantic_progressive", "semantic_progressive_v2"} else None
         )
         self.semantic_p4_gate = (
             nn.Sequential(
@@ -194,7 +195,7 @@ class LightweightSemanticDecoder(nn.Module):
                 ConvNormAct(semantic_gate_channels, decoder_dim),
                 nn.Conv2d(decoder_dim, 1, 1),
             )
-            if fusion_version == "semantic_progressive" else None
+            if fusion_version in {"semantic_progressive", "semantic_progressive_v2"} else None
         )
         for gate in (self.semantic_p4_gate, self.semantic_p3_gate):
             if gate is not None:
@@ -367,6 +368,52 @@ class LightweightSemanticDecoder(nn.Module):
                 "coarse_logits": coarse_logits,
                 "coarse_probability": coarse_probability.detach(),
                 "coarse_uncertainty": coarse_entropy.detach(),
+            }
+        elif self.fusion_version == "semantic_progressive_v2":
+            anchor = self.lateral["embedding"](features["embedding"])
+            coarse_logits = self.semantic_coarse_head(anchor)
+            coarse_probability = torch.softmax(coarse_logits, dim=1)
+            coarse_entropy = -(
+                coarse_probability.clamp_min(1e-8)
+                * coarse_probability.clamp_min(1e-8).log()
+            ).sum(dim=1, keepdim=True)
+            coarse_entropy = coarse_entropy / torch.log(
+                coarse_entropy.new_tensor(float(coarse_probability.shape[1]))
+            )
+
+            p4 = self.lateral["P4"](features["P4"])
+            fused = F.interpolate(anchor, size=p4.shape[-2:], mode="bilinear", align_corners=False)
+            fused = self.p4_fuse(fused + p4)
+
+            p3 = self.lateral["P3"](features["P3"])
+            fused = F.interpolate(fused, size=p3.shape[-2:], mode="bilinear", align_corners=False)
+            probability = F.interpolate(
+                coarse_probability, size=p3.shape[-2:], mode="bilinear", align_corners=False
+            )
+            uncertainty = F.interpolate(
+                coarse_entropy, size=p3.shape[-2:], mode="bilinear", align_corners=False
+            )
+            p3_logits = self.semantic_p3_gate(
+                torch.cat((fused, p3, probability, uncertainty), dim=1)
+            )
+            # Bounded residual modulation preserves a corrective detail path.
+            p3_gate = 1.0 + 0.5 * torch.tanh(p3_logits)
+            fused = self.p3_fuse(fused + p3_gate * p3)
+
+            p4_gate = torch.ones_like(p3_gate)
+            embedding_gate = torch.ones_like(p3_gate)
+            raw_weights = torch.cat((p3_gate, p4_gate, embedding_gate), dim=1)
+            weights = raw_weights / raw_weights.sum(dim=1, keepdim=True)
+            self.last_routing = {
+                "weights": weights.detach(),
+                "entropy": (
+                    -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(1)
+                ).detach(),
+                "stage_gates": torch.cat((p3_gate, p4_gate), dim=1).detach(),
+                "coarse_logits": coarse_logits,
+                "coarse_probability": coarse_probability.detach(),
+                "coarse_uncertainty": coarse_entropy.detach(),
+                "gate_bounds": (0.5, 1.5),
             }
         else:
             if self.fusion_version == "semantic_budget":
