@@ -27,6 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--rerun-completed", action="store_true",
+        help="run experiments even when their metrics.json already exists",
+    )
     return parser.parse_args()
 
 
@@ -68,6 +72,16 @@ def command_for(args: argparse.Namespace, method: str, ratio: int, seed: int) ->
     return command
 
 
+def expected_metrics_path(args: argparse.Namespace, method: str, ratio: int, seed: int) -> Path:
+    if method == "lora":
+        run_name = f"mobilesam_lora_r4_qkv-proj_ratio{ratio}_seed{seed}"
+    elif method == "full_ft":
+        run_name = f"mobilesam_finetune_ratio{ratio}_seed{seed}"
+    else:
+        run_name = f"loveda_ratio{ratio}_seed{seed}"
+    return Path(args.output_dir) / method / run_name / "metrics.json"
+
+
 def main() -> None:
     args = parse_args()
     invalid_ratios = sorted(set(args.ratios) - {1, 5, 10, 20, 25, 50, 100})
@@ -77,6 +91,10 @@ def main() -> None:
         for ratio in args.ratios:
             for seed in args.seeds:
                 command = command_for(args, method, ratio, seed)
+                metrics_path = expected_metrics_path(args, method, ratio, seed)
+                if metrics_path.exists() and not args.rerun_completed:
+                    print(f"SKIP completed={metrics_path}", flush=True)
+                    continue
                 print("COMMAND", subprocess.list2cmdline(command), flush=True)
                 if not args.dry_run:
                     subprocess.run(command, cwd=ROOT, check=True)

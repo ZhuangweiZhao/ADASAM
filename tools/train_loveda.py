@@ -492,6 +492,7 @@ def main() -> None:
                 targets=tuple(args.lora_targets),
             )
             model.enable_encoder_peft(True)
+            model.to(device)
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
     if args.model in {"deeplabv3plus", "segformer"} and args.decoder_version != "lightweight":

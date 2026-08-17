@@ -35,8 +35,10 @@ def test_tinyvit_lora_is_zero_initialized_and_trainable() -> None:
 
 
 def test_lora_parameters_follow_module_device() -> None:
-    encoder = nn.ModuleList([Block()])
+    encoder = nn.ModuleList([Block()]).to(dtype=torch.float64)
     inject_tinyvit_lora(encoder, rank=2, alpha=4)
     encoder.to(torch.device("cpu"))
     assert encoder[0].attn.qkv.lora_a.device == encoder[0].attn.qkv.base.weight.device
     assert encoder[0].attn.qkv.lora_b.device == encoder[0].attn.qkv.base.weight.device
+    assert encoder[0].attn.qkv.lora_a.dtype == encoder[0].attn.qkv.base.weight.dtype
+    assert encoder[0].attn.qkv.lora_b.dtype == encoder[0].attn.qkv.base.weight.dtype
