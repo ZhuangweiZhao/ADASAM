@@ -109,6 +109,19 @@ def test_loveda_accepts_lora_peft_configuration(monkeypatch) -> None:
     assert args.lora_targets == ["qkv", "proj"]
 
 
+def test_loveda_accepts_fixed_selection_manifest(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam", "--label-ratio", "5",
+            "--selection-manifest", "/runs/manifests/hrcs_ratio5.json",
+        ],
+    )
+    args = parse_args()
+    assert args.selection_manifest == "/runs/manifests/hrcs_ratio5.json"
+
+
 def test_loveda_accepts_lovasz_region_loss_configuration(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,

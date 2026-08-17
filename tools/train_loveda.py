@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from adasam.datasets.augmentation import build_augmentation  # noqa: E402
 from adasam.adapters import inject_tinyvit_lora  # noqa: E402
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices  # noqa: E402
+from adasam.datasets.selection import load_selection_manifest  # noqa: E402
 from adasam.losses import (  # noqa: E402
     BoundaryLoss,
     LabelEfficientSegmentationLoss,
@@ -100,6 +101,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--validation-seed", type=int, default=42)
+    parser.add_argument(
+        "--selection-manifest",
+        default=None,
+        help="JSON manifest selecting a fixed subset from the post-validation training pool",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -407,6 +413,16 @@ def main() -> None:
     train_indices, validation_indices, training_pool = fixed_validation_split_indices(
         len(selection_dataset), args.label_ratio, args.seed, args.val_fraction, args.validation_seed
     )
+    selection_metadata = None
+    if args.selection_manifest:
+        dataset_sample_ids = [sample[2] for sample in selection_dataset.samples]
+        train_indices, selection_metadata = load_selection_manifest(
+            resolve(args.selection_manifest),
+            dataset_sample_ids=dataset_sample_ids,
+            training_pool=training_pool,
+            label_ratio=args.label_ratio,
+            validation_seed=args.validation_seed,
+        )
     train_base = LoveDASemanticDataset(
         data_root, "train", args.image_size, transforms=build_augmentation(args.augmentation)
     )
@@ -827,6 +843,17 @@ def main() -> None:
         "test_samples": len(official_validation),
         "split_protocol": "fixed_train_validation_official_val_test",
         "validation_seed": args.validation_seed,
+        "sample_selection": (
+            {
+                "strategy": selection_metadata["strategy"],
+                "manifest": str(resolve(args.selection_manifest)),
+                "selected_indices": train_indices,
+                "selected_sample_ids": selection_metadata["selected_sample_ids"],
+                "coverage": selection_metadata.get("coverage"),
+            }
+            if selection_metadata is not None else
+            {"strategy": "random", "manifest": None}
+        ),
         "parameters": counts,
         "history": history,
         "best_epoch": best["epoch"],

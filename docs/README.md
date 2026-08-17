@@ -19,6 +19,8 @@ This index distinguishes current specifications from historical research materia
   visualizations, and claim gate for semantic-conditioned representation budgets.
 - `MAGNITUDE_TEACHER_SURVIVAL.md`: the single 25%-budget seed-42 survival experiment
   and its pre-registered stop/go gates.
+- `HRCS_SAMPLE_SELECTION.md`: label-free LoveDA 5% sample-selection protocol,
+  coverage metrics, cloud commands, and pre-registered stop/go thresholds.
 - `controlled_protocols.md`: controlled-comparison rules.
 - `not_yet_proven.md`: claims that still require evidence.
 - `research_log.md`: dated decisions and observations.
