@@ -51,6 +51,7 @@ class LabelEfficientSAM(nn.Module):
         self.backbone = backbone
         self.use_input_adapter = use_input_adapter
         self.encoder_requires_grad = False
+        self.encoder_peft_enabled = False
         self.input_adapter = nn.Conv2d(3, 3, 1, bias=True) if use_input_adapter else nn.Identity()
         if use_input_adapter:
             with torch.no_grad():
@@ -195,6 +196,13 @@ class LabelEfficientSAM(nn.Module):
             self.backbone.eval()
         return self
 
+    def enable_encoder_peft(self, enabled: bool = True) -> None:
+        """Allow gradients through frozen encoder weights for injected PEFT modules."""
+        self.encoder_peft_enabled = bool(enabled)
+        if self.encoder_peft_enabled and self.encoder_requires_grad:
+            raise ValueError("encoder PEFT and full encoder fine-tuning are mutually exclusive")
+        self.backbone.eval()
+
     def set_encoder_trainable(self, trainable: bool = True) -> None:
         """Switch between the frozen protocol and full TinyViT fine-tuning."""
         self.encoder_requires_grad = bool(trainable)
@@ -221,7 +229,7 @@ class LabelEfficientSAM(nn.Module):
         preprocessed = self._preprocess(image)
         # Parameters remain frozen, but the adapter needs a gradient through
         # the encoder with respect to its input.
-        if self.use_input_adapter or self.encoder_requires_grad:
+        if self.use_input_adapter or self.encoder_requires_grad or self.encoder_peft_enabled:
             features = self.backbone(preprocessed)
         else:
             with torch.no_grad():
@@ -256,7 +264,7 @@ class LabelEfficientSAM(nn.Module):
         if image.ndim != 4 or image.shape[1] != 3:
             raise ValueError(f"expected image [B,3,H,W], got {tuple(image.shape)}")
         output_size = tuple(image.shape[-2:])
-        if self.encoder_requires_grad:
+        if self.encoder_requires_grad or self.encoder_peft_enabled or self.use_input_adapter:
             features = self.backbone(self._preprocess(image))
         else:
             with torch.no_grad():

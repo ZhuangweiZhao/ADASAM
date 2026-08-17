@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from adasam.datasets.augmentation import build_augmentation  # noqa: E402
+from adasam.adapters import inject_tinyvit_lora  # noqa: E402
 from adasam.datasets.industrial import LoveDASemanticDataset, fixed_validation_split_indices  # noqa: E402
 from adasam.losses import (  # noqa: E402
     BoundaryLoss,
@@ -57,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--decoder-dim", type=int, default=96)
     parser.add_argument("--adapter", choices=["cat", "none"], default="cat")
     parser.add_argument("--adapter-placement", choices=["pre_fusion", "post_fusion"], default="pre_fusion")
+    parser.add_argument("--lora-rank", type=int, default=0, help="0 disables TinyViT attention LoRA")
+    parser.add_argument("--lora-alpha", type=float, default=8.0)
+    parser.add_argument(
+        "--lora-targets", nargs="+", choices=["qkv", "proj"], default=["qkv", "proj"]
+    )
     parser.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
     parser.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3", "regional_semantic"], default="hierarchical")
     parser.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
@@ -472,10 +478,26 @@ def main() -> None:
         )
         if args.model == "mobilesam_finetune":
             model.set_encoder_trainable(True)
+        if args.lora_rank < 0:
+            raise ValueError("--lora-rank must be non-negative")
+        if args.lora_rank > 0:
+            if args.model == "mobilesam_finetune":
+                raise ValueError("LoRA and full MobileSAM fine-tuning are mutually exclusive")
+            if args.lora_alpha <= 0.0:
+                raise ValueError("--lora-alpha must be positive")
+            model.lora_modules = inject_tinyvit_lora(
+                model.backbone.image_encoder,
+                rank=args.lora_rank,
+                alpha=args.lora_alpha,
+                targets=tuple(args.lora_targets),
+            )
+            model.enable_encoder_peft(True)
     if args.model == "unet" and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
     if args.model in {"deeplabv3plus", "segformer"} and args.decoder_version != "lightweight":
         raise ValueError("boundary decoder variants are only available for MobileSAM models")
+    if args.lora_rank > 0 and args.model in {"unet", "deeplabv3plus", "segformer"}:
+        raise ValueError("LoRA is only available for MobileSAM models")
     if args.train_batch_norm and args.model != "deeplabv3plus":
         raise ValueError("--train-batch-norm is only valid for DeepLabV3+")
     if args.train_batch_norm and args.batch_size < 2:
@@ -542,6 +564,11 @@ def main() -> None:
         run_name = f"segformer_{args.segformer_variant}_ratio{args.label_ratio}_seed{args.seed}"
     elif args.model == "mobilesam_finetune":
         run_name = f"mobilesam_finetune_ratio{args.label_ratio}_seed{args.seed}"
+    elif args.lora_rank > 0:
+        targets = "-".join(args.lora_targets)
+        run_name = (
+            f"mobilesam_lora_r{args.lora_rank}_{targets}_ratio{args.label_ratio}_seed{args.seed}"
+        )
     else:
         run_name = f"loveda_ratio{args.label_ratio}_seed{args.seed}"
     output_dir = resolve(args.output_dir) / run_name

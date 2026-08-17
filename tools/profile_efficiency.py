@@ -34,6 +34,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-channels", type=int, default=32)
     p.add_argument("--decoder-dim", type=int, default=96)
     p.add_argument("--adapter", choices=["cat", "none"], default="cat")
+    p.add_argument("--lora-rank", type=int, default=0)
+    p.add_argument("--lora-alpha", type=float, default=8.0)
+    p.add_argument("--lora-targets", nargs="+", choices=["qkv", "proj"], default=["qkv", "proj"])
     p.add_argument("--feature-scales", choices=["p3", "p4", "embedding", "p3_p4", "p3_embedding", "p4_embedding", "p3_p4_embedding"], default="p3_p4_embedding")
     p.add_argument("--fusion-version", choices=["hierarchical", "concat", "sum", "global", "image_conditioned", "scsr", "scsr_v2", "scsr_task", "semantic_budget", "semantic_progressive", "semantic_progressive_v2", "semantic_progressive_v3", "regional_semantic"], default="hierarchical")
     p.add_argument("--representation-budget", type=int, choices=[1, 2, 3], default=3)
@@ -76,7 +79,7 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
             weights_root=ROOT / "weights",
             device=device,
         )
-    return LabelEfficientSAM.build(
+    model = LabelEfficientSAM.build(
         checkpoint,
         num_classes=classes,
         img_size=args.sam_image_size,
@@ -96,6 +99,17 @@ def build_model(args: argparse.Namespace, name: str, checkpoint: Path, device: t
         ),
         device=device,
     )
+    if args.lora_rank > 0:
+        from adasam.adapters import inject_tinyvit_lora
+
+        model.lora_modules = inject_tinyvit_lora(
+            model.backbone.image_encoder,
+            rank=args.lora_rank,
+            alpha=args.lora_alpha,
+            targets=tuple(args.lora_targets),
+        )
+        model.enable_encoder_peft(True)
+    return model
 
 
 def load_weights(model: torch.nn.Module, path: Path, device: torch.device) -> None:

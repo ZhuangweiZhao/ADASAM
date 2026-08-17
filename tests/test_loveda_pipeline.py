@@ -93,6 +93,22 @@ def test_loveda_accepts_rural_domain_configuration(monkeypatch) -> None:
     assert args.rural_sampling_multiplier == 1.5
 
 
+def test_loveda_accepts_lora_peft_configuration(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "train_loveda.py", "--model", "mobilesam", "--label-ratio", "10",
+            "--adapter", "none", "--lora-rank", "4", "--lora-alpha", "8",
+            "--lora-targets", "qkv", "proj",
+        ],
+    )
+    args = parse_args()
+    assert args.lora_rank == 4
+    assert args.lora_alpha == 8.0
+    assert args.lora_targets == ["qkv", "proj"]
+
+
 def test_loveda_accepts_lovasz_region_loss_configuration(monkeypatch) -> None:
     monkeypatch.setattr(
         sys,

@@ -81,6 +81,20 @@ def test_full_encoder_finetuning_receives_gradients_and_can_refreeze() -> None:
     assert all(not parameter.requires_grad for parameter in model.backbone.parameters())
 
 
+def test_encoder_peft_keeps_backbone_in_eval_but_allows_gradients() -> None:
+    model = LabelEfficientSAM(
+        FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
+        use_cat_adapter=False, fusion_version="sum",
+    )
+    model.backbone.stem.weight.requires_grad_(True)
+    model.enable_encoder_peft(True)
+    model.train()
+    assert model.encoder_peft_enabled
+    assert not model.backbone.training
+    model(torch.rand(2, 3, 64, 64)).mean().backward()
+    assert model.backbone.stem.weight.grad is not None
+
+
 def test_input_adapter_starts_as_identity_and_receives_gradients() -> None:
     model = LabelEfficientSAM(
         FakeFrozenBackbone(), num_classes=4, decoder_dim=32,
