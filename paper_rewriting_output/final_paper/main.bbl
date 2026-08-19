@@ -1,0 +1,36 @@
+\begin{thebibliography}{1}
+
+\bibitem{kirillov2023sam}
+Alexander Kirillov et~al.
+\newblock Segment anything.
+\newblock In {\em ICCV}, 2023.
+
+\bibitem{chen2023samadapter}
+Tianrun Chen et~al.
+\newblock Sam-adapter: Adapting sam in underperformed scenes.
+\newblock In {\em ICCV Workshops}, 2023.
+
+\bibitem{xiao2024catsam}
+Aoran Xiao et~al.
+\newblock Cat-sam: Conditional tuning for few-shot adaptation of segment
+  anything model.
+\newblock In {\em ECCV}, 2024.
+
+\bibitem{zhang2023mobilesam}
+Chaoning Zhang et~al.
+\newblock Faster segment anything: Towards lightweight sam for mobile
+  applications.
+\newblock {\em arXiv preprint arXiv:2306.14289}, 2023.
+
+\bibitem{xiong2024efficientsam}
+Yunyang Xiong et~al.
+\newblock Efficientsam: Leveraged masked image pretraining for efficient
+  segment anything.
+\newblock In {\em CVPR}, 2024.
+
+\bibitem{zhao2023fastsam}
+Xu~Zhao et~al.
+\newblock Fast segment anything.
+\newblock {\em arXiv preprint arXiv:2306.12156}, 2023.
+
+\end{thebibliography}

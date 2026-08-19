@@ -1,0 +1,89 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{url}
+\usepackage{hyperref}
+\title{LoRA + CRHC: Parameter-Efficient MobileSAM Adaptation for Label-Efficient Remote-Sensing Segmentation}
+\author{AdaSAM Research Team}
+\date{}
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Foundation segmentation models are attractive for dense prediction under limited annotation, but adapting them efficiently requires controlling both trainable parameters and multi-level feature fusion. We study LoveDA with a frozen MobileSAM encoder, rank-4 LoRA on TinyViT attention projections (qkv and proj), and Class-Conditioned Regional Hierarchical Calibration (CRHC). CRHC uses regional semantic probabilities and learned class-by-level preferences to calibrate P3, P4 and embedding features; it does not skip feature computation or reduce FLOPs. In single-seed screening, LoRA + CRHC obtains 45.54, 46.93 and 49.61 mIoU at 5%, 10% and 20% labels, compared with 45.83, 46.31 and 49.21 for LoRA + Dense Sum. CRHC therefore improves the baseline at 10% and 20% but is lower at 5%. At 20% labels, CRHC uses 347,845 trainable parameters and is 0.58 points below the label-matched full-finetuning result. These findings are screening evidence; multi-seed replication, focused ablations and cross-dataset validation remain incomplete.
+\end{abstract}
+
+\section{Introduction}
+Pixel-level annotation is expensive in remote-sensing segmentation. Foundation models such as Segment Anything (SAM) provide a useful starting representation, but adapting them to a target domain requires choices about which parameters to train and how to combine multi-level features \cite{kirillov2023sam,chen2023samadapter,xiao2024catsam}. Parameter-efficient adaptation is attractive only when the comparison preserves the label budget and reports the trainable parameter count alongside accuracy \cite{zhang2023mobilesam,xiong2024efficientsam,zhao2023fastsam}.
+
+The practical question is not simply whether a parameter-efficient module improves one score. Under scarce labels, LoRA capacity, regional semantics, feature-level fusion and random seed interact. A comparison that changes several of these factors at once cannot tell a practitioner which intervention deserves additional annotation or compute. Likewise, feature calibration must not be confused with sparse computation: all feature levels remain computed in the current implementation.
+
+We therefore study the following question: \emph{how can a frozen MobileSAM encoder be adapted with few trainable parameters while using regional and class-conditioned hierarchy information?} Our contributions are threefold: (1) a LoveDA label- and parameter-efficient benchmark pairing rank-4 LoRA with a frozen MobileSAM encoder; (2) CRHC, a class-conditioned regional hierarchical feature-calibration mechanism that learns pixel-level fusion weights over P3, P4 and embedding; and (3) an evidence-graded analysis that reports label-matched accuracy and parameter efficiency while preserving negative results and explicitly separating calibration from sparse computation.
+
+Our claims are deliberately bounded. The LoveDA results are single-seed screening evidence, not a verified leaderboard: the current bundles lack multi-seed replication, focused CRHC ablations and cross-dataset confirmation. We do not claim stable gains across seeds, FLOP reduction, real-time deployment, state-of-the-art accuracy or universal transfer.
+
+\section{Evaluation Question and Protocol}
+\subsection{Task and datasets}
+We study label-efficient remote-sensing semantic segmentation rather than novel-class generalization. LoveDA is the primary benchmark, using its 2,522-image training split with a fixed 20\% internal validation partition and official validation images as test. Vaihingen is reserved for the next cross-dataset mechanism check; NEU-Seg and iSAID are not sources of the primary claim.
+
+\subsection{Matched factors}
+The current primary comparison uses LoRA rank 4 on TinyViT qkv and projection layers with either Dense Sum or CRHC fusion. LoveDA label ratios are 5, 10 and 20\%; the current results use seed 42 and are screening-level. The fixed protocol uses 512$\times$512 inputs, remote-strong augmentation, class-balanced cross-entropy, Lovasz weight 0.5 and a cosine schedule. We report mIoU and trainable parameters; multi-seed statistics, focused ablations and a fixed efficiency record are pending.
+
+\subsection{Evidence status}
+The experiment manifest requires a split manifest, seed, resolved configuration, checkpoint, metrics artifact, commit, environment and timing record. The current matrix has machine-readable metrics and repeated runs but is marked \emph{screening} because several bundles lack archived checkpoints and complete provenance. This status is part of the result, not an editorial footnote.
+
+\section{Interventions}
+\subsection{Frozen foundation and lightweight adaptation}
+MobileSAM supplies the frozen foundation representation \cite{zhang2023mobilesam}. We insert rank-4 LoRA modules into TinyViT attention qkv and projection layers, leaving the encoder's original weights frozen. The comparison baseline fuses P3, P4 and embedding features with Dense Sum.
+
+\subsection{Label-preserving augmentation}
+The primary protocol uses the same labeled subsets, validation split, remote-strong augmentation, class-balanced cross-entropy, Lovasz auxiliary weight and cosine schedule for Dense Sum and CRHC. Validation and test images are never used for subset selection.
+
+\subsection{Auxiliary retention studies}
+CRHC first obtains coarse regional semantic probabilities from high-level features, learns class-by-level preferences over P3, P4 and embedding, maps those preferences to pixel-level weights and applies a residual correction to Dense Sum. All three feature levels remain computed. HRCS sample selection is retained only as exploratory negative evidence and is not part of the core method.
+
+\section{Results}
+\subsection{LoveDA label-budget comparison}
+Table~\ref{tab:budget} reports the current single-seed screening comparison between LoRA + Dense Sum and LoRA + CRHC. CRHC is lower by 0.29 points at 5\% labels, but higher by 0.62 and 0.40 points at 10\% and 20\%, respectively. The result supports a budget-dependent signal, not a claim of improvement at every budget.
+
+\begin{table}[t]
+\centering
+\caption{LoveDA LoRA + Dense Sum versus LoRA + CRHC. Single-seed screening mIoU (percent).}
+\label{tab:budget}
+\begin{tabular}{lrrr}
+\toprule
+Labels & LoRA + Dense Sum & LoRA + CRHC & Difference\\
+\midrule
+5\% & 45.83 & 45.54 & -0.29\\
+10\% & 46.31 & 46.93 & +0.62\\
+20\% & 49.21 & 49.61 & +0.40\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Parameter efficiency and calibration status}
+CRHC has 347,845 trainable parameters, compared with 6,368,131 for full MobileSAM fine-tuning. At 20\% labels, its 49.61 mIoU is 0.58 points below the label-matched full-finetuning result of 50.19\%. The separate 100\%-label reference is 53.98\% and is not used in this comparison.
+
+\subsection{Negative representation-selection evidence}
+In the label-free 5\% subset experiment, HRCS obtains 45.95 mIoU versus 45.83 for random selection, while embedding k-center obtains 42.71. HRCS is therefore exploratory negative evidence: feature-space diversity alone is not established as task-effective supervision, and HRCS is not a second core contribution.
+
+\subsection{Auxiliary cross-dataset and negative evidence}
+Vaihingen is reserved for the next fair cross-dataset mechanism test: 10\% labels, seed 42, LoRA rank 4, and direct Dense Sum versus regional\_semantic comparison. It uses its own CE/Dice protocol and cannot be treated as a direct reproduction of LoveDA.
+
+\section{Discussion}
+The central result is an initial parameter-efficient adaptation signal. CRHC improves LoRA at 10\% and 20\% LoveDA labels but not at 5\%, indicating budget-dependent behavior. Its value is feature calibration and fusion, not sparse computation. The current evidence is insufficient to claim stable gains, causal class-level scale laws or cross-dataset transfer.
+
+The HRCS result reinforces the need to separate representation diversity from task-effective supervision. The next decision is determined by multi-seed LoRA--CRHC replication and focused ablations, not by the small HRCS difference.
+
+\section{Limitations and Next Experiments}
+The primary limitations are single-seed LoRA--CRHC comparisons, missing focused CRHC ablations, incomplete checkpoint/provenance bundles and no completed cross-dataset validation. The minimum paper-ready follow-up is to run LoveDA seeds 123 and 456 for LoRA + Dense Sum and LoRA + CRHC at 10\% and 20\%, add global-shared, no-prototype, uniform and shuffled hierarchy ablations, run Vaihingen 10\% seed 42, and archive commit, environment, checkpoint and timing artifacts.
+
+\section{Conclusion}
+This LoveDA-centered study presents LoRA + CRHC for parameter-efficient MobileSAM adaptation under limited labels. CRHC calibrates regional, class-conditioned hierarchy features and shows preliminary gains over LoRA + Dense Sum at 10\% and 20\% labels, while the 5\% decrease and HRCS negative result define the claim boundary. Multi-seed replication, ablations and cross-dataset validation are required before stronger conclusions about robustness or generalization.
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+\end{document}

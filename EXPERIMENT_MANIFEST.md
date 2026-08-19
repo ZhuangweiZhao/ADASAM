@@ -28,7 +28,10 @@ manifest, seed, resolved config, checkpoint, commit, environment, and result art
 | LVD-B0 | LoveDA | U-Net / frozen MobileSAM baselines | 1–100% | 42 | screening (single seed) |
 | LVD-B1 | LoveDA | 512px full-supervision baselines and MobileSAM full finetune | 100% | 42 | screening (single seed; literature protocol verification pending) |
 | LVD-A0 | LoveDA | adapter, fusion, SCSR and semantic-budget study | screening | 42 (core: 42/123/456) | screening (single-seed ablations; budget/layer/magnitude groups 3-seed) |
+| LVD-A1 | LoveDA | LoRA + Dense Sum versus LoRA + CRHC | 5/10/20% | 42 | screening (single seed; 10/20% positive, 5% negative) |
+| LVD-X0 | LoveDA | label-free Embedding/HRCS subset selection | 5% | 42 | exploratory negative (HRCS +0.12pt; Embedding -3.13pt) |
 | VHN-A0 | Vaihingen | LoRA + random/magnitude/adaptive 25% retention | 25% | 42/123/456 | screening (3-seed survival study, verdicts REDESIGN/GO/GO) |
+| VHN-A1 | Vaihingen | LoRA + Dense Sum versus LoRA + CRHC | 10% | 42 | planned cross-dataset mechanism test |
 | ISA-B0 | iSAID | U-Net / frozen MobileSAM baselines | 100% | 42 | screening (single run) |
 | ISA-A0 | iSAID | proposed semantic model, iteration-controlled | screening | 42 | pending |
 

@@ -1,4 +1,4 @@
-# METHOD_DESIGN — AdaSAM V3: Real-Time Label-Efficient Industrial Segmentation
+# METHOD_DESIGN — Label-Efficient Remote-Sensing Foundation Model Adaptation
 
 ## Status: Research Repositioning (Revision 3)
 
@@ -6,17 +6,36 @@
 > NEU-Seg、LoveDA 和 iSAID。当前代码实际支持多尺度特征选择、CAT adapter 前/后置、
 > DAPG v1/v2/v3、DPM、边界解码器，以及 hierarchical/global/image-conditioned/SCSR/
 > task-routed/semantic-budget 融合。它们均是待控制实验验证的候选组件，不代表已经证明
-> 下文的论文假设。可执行状态与证据缺口见 `docs/PROJECT_UPDATE_2026-08-10.md`。
+> 下文的论文假设。当前论文状态见 `docs/PROJECT_UPDATE_2026-08-18.md`。
 
 > **Document authority:** This revision defines the primary paper direction. The
 > earlier aerial few-shot instance-segmentation design retained below is an
 > implementation and ablation reference; its base/novel FSS framing is no longer the
 > primary task definition.
 
-## 0. Revision 3 Research Position
+## Current Paper Direction (2026-08-18)
 
-**Working title:** *Real-Time Label-Efficient Industrial Defect Segmentation via
-Lightweight SAM Adaptation*.
+The active paper line is **Class-Conditioned Hierarchical Calibration for
+Parameter-Efficient Adaptation of Foundation Models in Remote-Sensing Segmentation**.
+The main technical question is how to use frozen MobileSAM multi-level features under
+limited annotation and trainable-parameter budgets. The primary method is LoRA rank 4
+on TinyViT attention (`qkv + proj`) together with CRHC.
+
+CRHC calibrates the fusion of P3, P4, and embedding using regional semantic
+probabilities and class-level hierarchy preferences. It does not skip feature
+computation and must not be described as sparse or budgeted computation. LoveDA
+screening gives 45.54/46.93/49.61 mIoU for CRHC at 5/10/20% labels versus
+45.83/46.31/49.21 for LoRA with Dense Sum; these are single-seed results.
+
+The HRCS sample-selection study is exploratory negative evidence (45.95 versus 45.83
+mIoU at 5%), not a second core contribution. The previous industrial
+prompt/prototype narrative below remains implementation history and must not be used
+as the current paper claim without an explicit repositioning decision.
+
+## Legacy Revision 3 Research Position (Implementation Reference)
+
+**Historical working title:** *Real-Time Label-Efficient Industrial Defect
+Segmentation via Lightweight SAM Adaptation*.
 
 **Primary task:** support-conditioned, label-efficient industrial defect semantic
 segmentation with a frozen MobileSAM encoder. The study varies the pixel-level

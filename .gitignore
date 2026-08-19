@@ -25,6 +25,14 @@ data/
 
 # ── Experiment outputs ──
 runs/
+# Keep the boundary go/no-go summary auditable without tracking checkpoints or heatmaps.
+!runs/
+runs/*
+!runs/diagnostics/
+runs/diagnostics/*
+!runs/diagnostics/boundary_disagreement/
+runs/diagnostics/boundary_disagreement/*
+!runs/diagnostics/boundary_disagreement/boundary_disagreement_report.json
 output/
 /outputs/
 *.jsonl
@@ -34,6 +42,7 @@ output/
 docs/*
 !docs/README.md
 !docs/PROJECT_UPDATE_2026-08-10.md
+!docs/PROJECT_UPDATE_2026-08-18.md
 !docs/research_log.md
 !docs/TECHNICAL_DOCUMENTATION.md
 !docs/SEMANTIC_BUDGET_PROTOCOL.md

@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 RUNS = ROOT / "runs"
 CATEGORIES = ("current", "development", "history", "sanity", "diagnostics", "empty")
+HISTORICAL_PARTS = {"legacy", "archives", "logs"}
 
 
 def experiment_directories() -> list[Path]:
@@ -37,10 +38,11 @@ def main() -> None:
         relative = directory.relative_to(RUNS)
         files = [path for path in directory.iterdir() if path.is_file()]
         category = relative.parts[0]
+        is_current = category == "current" and not (set(relative.parts) & HISTORICAL_PARTS)
         rows.append({
             "path": str(relative).replace("\\", "/"),
             "category": category,
-            "status": "active" if category == "current" else "historical",
+            "status": "active" if is_current else "historical",
             "files_here": len(files),
             "checkpoints_here": sum(path.suffix.lower() == ".pt" for path in files),
             "metrics_here": sum(path.name in {"metrics.json", "evaluation.json"} for path in files),

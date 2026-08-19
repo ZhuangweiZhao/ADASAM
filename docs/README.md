@@ -4,7 +4,9 @@ This index distinguishes current specifications from historical research materia
 
 ## Read first
 
-- `PROJECT_UPDATE_2026-08-10.md`: current implementation and conversation summary.
+- `PROJECT_UPDATE_2026-08-18.md`: current paper direction, CRHC evidence, HRCS negative
+  result, claim boundaries, and next experiments.
+- `PROJECT_UPDATE_2026-08-10.md`: historical implementation and conversation summary.
 - `../README.md`: installation, supported datasets, and runnable entry points.
 - `../METHOD_DESIGN.md`: primary paper position and hypotheses.
 - `../EXPERIMENT_MANIFEST.md`: experiment registry and evidence requirements.

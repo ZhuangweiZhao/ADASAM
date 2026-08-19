@@ -288,6 +288,35 @@ class LabelEfficientSAM(nn.Module):
             auxiliary["boundary_logits"] = boundary_logits
         return logits, prompts, auxiliary or None
 
+    @torch.no_grad()
+    def forward_for_diagnostics(
+        self, image: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """Return logits plus raw encoder and decoder-input features for offline analysis."""
+        if image.ndim != 4 or image.shape[1] != 3:
+            raise ValueError(f"expected image [B,3,H,W], got {tuple(image.shape)}")
+        output_size = tuple(image.shape[-2:])
+        raw_features = self.backbone(self._preprocess(image))
+        adapted_features = self._adapt_features(raw_features)
+        prompts = (
+            self.prompt_generator(adapted_features)
+            if self.prompt_generator is not None
+            else None
+        )
+        decoder_features = adapted_features
+        if self.prototype_memory is not None:
+            enhanced, _ = self.prototype_memory(
+                adapted_features["embedding"], update_memory=False
+            )
+            decoder_features = {**adapted_features, "embedding": enhanced}
+        logits = self.decoder(
+            decoder_features,
+            output_size=output_size,
+            prompt_tokens=prompts if self.prompt_version == "v1" else None,
+            prompt=prompts if self.prompt_version in {"v2", "v3"} else None,
+        )
+        return logits, raw_features, decoder_features
+
     def parameter_counts(self) -> dict[str, int]:
         total = sum(parameter.numel() for parameter in self.parameters())
         trainable = sum(
